@@ -67,31 +67,56 @@
  * the same finding.
  */
 
+import { ConfigProvider } from 'antd';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { getDefaultNormalizer, screen, waitFor, within } from '@testing-library/react';
+import { act, getDefaultNormalizer, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
-import { listCards } from '../api/cards';
-import type { CardListQuery, CardSummary, PageDirection } from '../api/types';
-import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
+import { getCard, listCards } from '../api/cards';
+import { ApiRequestError } from '../api/client';
+import type { CardListQuery, CardSummary, PageDirection, PageResponse } from '../api/types';
+import {
+  INFORMATION_BAND_TEST_ID,
+  MESSAGE_BAND_CONTENT_WIDTH,
+  MESSAGE_BAND_TEST_ID,
+} from '../layout/MessageBand';
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import { PF_KEY_BAR_REGION_LABEL, UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
-import { PROGRAM_MESSAGES, SHARED_MESSAGES, STATUS_MESSAGES } from '../messages/messages';
+import {
+  PERSISTENT_FAILURE_REPORT_IT,
+  PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
+  SHARED_MESSAGES,
+  STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
+} from '../messages/messages';
 import { PROGRAM_MESSAGE_SOURCES, SHARED_MESSAGE_SOURCES } from '../messages/messages';
-import { CARD_SELECTOR_LENGTH, cardDetailPath, cardEditPath } from '../routes/cards';
+import {
+  CARD_EDIT_ROUTE,
+  CARD_SELECTOR_LENGTH,
+  cardDetailPath,
+  cardEditPath,
+} from '../routes/cards';
 import {
   CARD_LIST_ACCOUNT_FILTER_WIDTH,
   CARD_LIST_CARD_FILTER_WIDTH,
+  CARD_LIST_ENTRY_CONTROL_LABELS,
   CARD_LIST_LABELS,
   CARD_LIST_PAGE_SIZE,
   CARD_LIST_ROW_ACTION_CODES,
   reduceCardListSelection,
 } from '../screens/cardList/index';
+import { AppShell } from '../layout/AppShell';
 import CardListScreen from '../screens/cardList/index';
+import { CardUpdateScreen } from '../screens/cardUpdate/index';
+import { cardDemoTheme } from '../theme/antdTheme';
 import { TYPOGRAPHY_TOKENS } from '../theme/tokens';
 import { LEADING_CURSOR, TRAILING_CURSOR, pageResponse, pressPfKey } from './setup';
-import { expectMaxLength, expectVerbatimMessage, renderInAppShell } from './setup';
+import { apiError, expectMaxLength, expectVerbatimMessage, renderInAppShell } from './setup';
 
 /**
  * Builds the mocked surface of the card transport module.
@@ -527,6 +552,27 @@ function expectVerbatimMessageInBand(expected: string): HTMLElement {
 }
 
 /**
+ * Finds one catalogued sentence inside the shell's INFORMATIONAL band.
+ *
+ * Assumptions: a second scoped locator rather than a parameter on the one above, because the two bands
+ * are two different fields of the mapset and a case asserting on one nearly always asserts the other is
+ * quiet. `ui/src/layout/MessageBand.tsx` publishes a distinct identifier per channel for exactly that
+ * reason, and naming them separately here keeps each call site saying which of the mapset's two message
+ * fields it means.
+ *
+ * Assumptions: the non-collapsing normaliser is preserved for the reason recorded above -- several
+ * baseline sentences carry doubled spaces that are content rather than layout.
+ * @param {string} expected - The catalogued sentence, taken from the message catalog and not retyped.
+ * @returns {HTMLElement} The element inside the informational band carrying that sentence.
+ * @throws {Error} If that band carries no such sentence, which Testing Library raises.
+ */
+function expectVerbatimMessageInInformationBand(expected: string): HTMLElement {
+  return within(screen.getByTestId(INFORMATION_BAND_TEST_ID)).getByText(expected, {
+    normalizer: getDefaultNormalizer({ trim: true, collapseWhitespace: false }),
+  });
+}
+
+/**
  * Reads the whole rendered document as text.
  *
  * Assumptions: the data-exposure cases assert on the WHOLE document rather than on the table alone,
@@ -580,6 +626,111 @@ async function declaresTheMapsetRowArity(): Promise<void> {
 
   expect(browseBodyRows()).toHaveLength(DECLARED_ROW_ARITY);
   expect(rowActionEntries()).toHaveLength(DECLARED_ROW_ARITY);
+}
+
+/**
+ * The browse holds its own horizontal overflow instead of pushing the page sideways.
+ *
+ * ⚠️ Purpose: a browser sweep measured this grid painting 8.92 pixels OUTSIDE the viewport at 375 --
+ * table rect right 383.92 against an inner width of 375 -- and the page body absorbing the remainder:
+ * `#carddemo-shell-content` reported `scrollWidth` 384 against `clientWidth` 375 and accepted a
+ * `scrollLeft` of 9, while `.ant-table-content` and all NINE of its ancestors computed
+ * `overflow-x: visible` and refused a `scrollLeft` entirely. A body that pans sideways slides the
+ * title band, the message line and the key legend out from under the operator, so three persistent
+ * zones were being paid for one column. The same sweep found the visible consequence at 375 and 576:
+ * an eleven-digit account number wrapping as `000000` / `00100` and a masked card number over three
+ * lines, which for a card system is a misreading risk rather than a cosmetic one.
+ *
+ * ⚠️ Assumptions: both halves are asserted because neither alone is the fix.
+ * `@rc-component/table/lib/Table.js` L259-L272 turns a DECLARED horizontal extent into
+ * `overflow-x: auto` on the scrolling region, so without the extent the grid has no scroller to hold
+ * the overflow in; and L426-L442 infers a fixed layout only for a pinned column, a pinned header, a
+ * sticky grid or an ellipsised column -- this grid has none of the four, so under the inferred
+ * automatic layout a declared column width is a MINIMUM the content may grow past, and the sibling
+ * user browse measured a one-character column at roughly 700 pixels that way.
+ *
+ * Assumptions: the four column measures are asserted against cells transcribed from the mapset here
+ * rather than imported from the screen, so this case agrees with the ORACLE rather than with the
+ * subject. `app/bms/COCRDLI.bms` heads row 9 at columns 10, 21, 45 and 66, the last over `LENGTH=7`,
+ * so the four columns span columns 10 through 72 -- 63 character cells.
+ * @returns {Promise<void>} Resolves once the settled grid has been measured.
+ */
+async function holdsItsOwnHorizontalOverflow(): Promise<void> {
+  /** Character cells each column spans in `app/bms/COCRDLI.bms`, in the mapset's own order. */
+  const mapsetCells = [11, 24, 21, 7];
+
+  expect(
+    screenSource(),
+    'the grid must declare a horizontal extent, which is what creates its scroller',
+  ).toContain('scroll={{ x: cardListTableMeasure(cssVar) }}');
+  expect(
+    screenSource(),
+    'and must state the fixed layout the library will not infer for an unpinned grid',
+  ).toContain('tableLayout="fixed"');
+  expect(
+    screenSource(),
+    'each column must claim its own cells plus the padding on both of its edges',
+  ).toContain('characterCellColumnMeasure(CARD_LIST_COLUMN_CELLS.select, options.tokens.padding)');
+
+  answerWithPage(FULL_PAGE_ROWS, false);
+
+  const { container } = await renderInAppShell(<CardListScreen />, {
+    initialEntries: ['/cards'],
+    routePath: '/cards',
+  });
+
+  await waitFor(
+    /**
+     * Holds until the opening page has been applied.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function gridSettled(): void {
+      expect(browseBodyRows()).toHaveLength(DECLARED_ROW_ARITY);
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  /*
+   * WHY : Assumptions: the traversal is a plain loop rather than `map` and `filter`, for the reason the
+   *       file header records -- `ui/eslint.config.js` selects a function expression in every position,
+   *       so an inline callback owes its own JSDoc block.
+   */
+  const declared: string[] = [];
+  const proportional: string[] = [];
+
+  for (const column of container.querySelectorAll<HTMLElement>('.ant-table-content col')) {
+    declared.push(column.style.width);
+
+    if (column.style.width.includes('%')) {
+      proportional.push(column.style.width);
+    }
+  }
+
+  expect(declared, 'the grid declares one width per mapset column').toHaveLength(
+    mapsetCells.length,
+  );
+  expect(
+    proportional,
+    'no column may take a PROPORTIONAL share, which is what starved the narrowest one',
+  ).toEqual([]);
+
+  let spanned = 0;
+
+  for (const [index, cells] of mapsetCells.entries()) {
+    spanned += cells;
+    expect(
+      declared[index],
+      `column ${String(index)} must claim its own ${String(cells)} cells`,
+    ).toContain(`${String(cells)}ch`);
+    expect(
+      declared[index],
+      `column ${String(index)} must also reserve the padding on both of its edges`,
+    ).toContain('2 * ');
+  }
+
+  expect(spanned, 'and the four spans must sum to the mapset row the extent is derived from').toBe(
+    63,
+  );
 }
 
 /**
@@ -1158,30 +1309,190 @@ function preservesTheDeclaredSpellingOfEverySentence(): void {
 }
 
 /**
- * Asserts the record-action prompt is painted once a page has rows to act on.
+ * Asserts the record-action prompt is painted on the row-22 line and not in the row-23 error field.
  *
  * Assumptions: the prompt names both action codes, which is where the selection column's domain comes
  * from -- `app/cbl/COCRDLIC.cbl` L116 tells the operator to type `S` for detail or `U` to update. The
  * screen exports those two characters as `CARD_LIST_ROW_ACTION_CODES`, and both are asserted to appear
  * in the sentence so the control's domain and the sentence describing it cannot drift apart.
- * @returns {Promise<void>} Resolves once the prompt has been located.
+ *
+ * ⚠️ Refactoring Rationale: the CHANNEL is asserted, which it was not. The screen collapsed both of the
+ * mapset's message fields onto the row-23 band and switched its severity between `info` and `error`, so
+ * this advisory was painted as an informational alert inside the one field the reference reserves for
+ * what an operator must act on. `1400-SETUP-MESSAGE` keeps them apart: it moves `WS-ERROR-MSG` into
+ * `ERRMSGO` and, under its own separate guard, `WS-INFO-MSG` into `INFOMSGO` with `DFHNEUTR`
+ * (`app/cbl/COCRDLIC.cbl` L924 to L929), and the two fields differ in colour, in width and in row --
+ * `INFOMSG` is `COLOR=NEUTRAL` at `POS=(20,19)` with `LENGTH=45` and `ERRMSG` is `COLOR=RED` at
+ * `POS=(23,1)` with `LENGTH=78` (`app/bms/COCRDLI.bms` L324 to L334). Locating the sentence in the
+ * informational band proves the screen delegates that channel at all, since the frame renders that band
+ * only for a screen that published one, and asserting the row-23 band does NOT carry it is what stops
+ * the collapse being reintroduced.
+ * @returns {Promise<void>} Resolves once the prompt has been located on its own line.
  */
 async function paintsTheRecordActionPrompt(): Promise<void> {
   await renderBrowse(FULL_PAGE_ROWS);
 
   await waitFor(
     /**
-     * Holds until the prompt has been painted.
+     * Holds until the prompt has been painted on the row-22 line.
      * @returns {void} Nothing; the assertion is the wait's condition.
      */
     function promptPainted(): void {
-      expectVerbatimMessage(CARD_LIST_STATUS.WS_INFORM_REC_ACTIONS.text);
+      expectVerbatimMessageInInformationBand(CARD_LIST_STATUS.WS_INFORM_REC_ACTIONS.text);
     },
     { timeout: ASYNC_CONDITION_TIMEOUT_MS },
   );
 
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID).textContent ?? '').toBe('');
   expect(CARD_LIST_STATUS.WS_INFORM_REC_ACTIONS.text).toContain(CARD_LIST_ROW_ACTION_CODES.detail);
   expect(CARD_LIST_STATUS.WS_INFORM_REC_ACTIONS.text).toContain(CARD_LIST_ROW_ACTION_CODES.update);
+}
+
+/**
+ * Builds the rejection a service refusal reaches a screen as, carrying one problem document.
+ *
+ * Assumptions: the rejection is an `ApiRequestError` and NOT a bare problem document, because that is
+ * the only shape the paging hook reads a sentence out of: `ui/src/hooks/usePagedQuery.ts` narrows a
+ * rejection through `problemDocumentOf`, which returns `reason.problem` for that error type and `null`
+ * for everything else. A case that rejected with the document itself would exercise the
+ * no-document path while appearing to exercise the described one.
+ * @param {number} status - The HTTP status the service answered with.
+ * @param {string | null} message - The service's own sentence, or `null` when it sent none.
+ * @returns {ApiRequestError} The rejection, carrying a complete problem document.
+ */
+function refusalCarrying(status: number, message: string | null): ApiRequestError {
+  return new ApiRequestError('PROBLEM', status, apiError({ status, message }), 'PROBLEM');
+}
+
+/**
+ * Mounts the browse against a read that REFUSES, and waits for the refusal to be reported.
+ *
+ * Assumptions: the wait is on the row-23 band rather than on the table, which is why this cannot reuse
+ * {@link renderBrowse}. A refused opening read renders no table at all, so that helper's settled
+ * condition would never hold and the case would time out instead of asserting.
+ * @param {unknown} rejection - What the transport rejects with.
+ * @param {string} expected - The sentence the band is expected to carry once the refusal is reported.
+ * @returns {Promise<void>} Resolves once the band carries that sentence.
+ */
+async function renderRefusedBrowse(rejection: unknown, expected: string): Promise<void> {
+  vi.mocked(listCards).mockRejectedValue(rejection);
+
+  await renderInAppShell(<CardListScreen />, {
+    initialEntries: ['/cards'],
+    routePath: '/cards',
+  });
+
+  await waitFor(
+    /**
+     * Holds until the refusal has reached the row-23 line.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function refusalReported(): void {
+      expectVerbatimMessageInBand(expected);
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+}
+
+/**
+ * Asserts a described refusal is reported in the service's own words, not as a momentary outage.
+ *
+ * Purpose
+ * -------
+ * The browse reported every failed read as one authored availability sentence, so a refusal an
+ * operator could act on -- an authority refusal, a malformed filter, a payload the service would not
+ * accept -- was described as a condition that clears on its own. The published contract rules that
+ * reading out: `listCards` declares 400, 401, 403, 405, 406, 413 and 415 alongside 500, and declares
+ * that a page which matched nothing answers 200 with an empty array "rather than 404, because a query
+ * that matched nothing succeeded"
+ * (`services/card-service/src/main/resources/openapi/card-api.yaml` L509 to L537). So a refusal here is
+ * never absence, and the sentence the service sent is the only one that names what happened.
+ *
+ * Assumptions: the assertion is that the authored fallbacks are ABSENT as well as that the service's
+ * sentence is present. Painting both would still be wrong -- the operator would be told to wait and to
+ * act -- and only the absence catches that. ⚠️ Refactoring Rationale: BOTH authored sentences are named,
+ * where one was: the single availability sentence this screen used for every bodiless failure has been
+ * replaced by a classified pair, so asserting only one of them would leave the other free to appear
+ * beside a sentence the service sent.
+ * @returns {Promise<void>} Resolves once the described refusal has been reported verbatim.
+ */
+async function statesTheServiceSentenceForADescribedRefusal(): Promise<void> {
+  /*
+   * Assumptions: the sentence is invented HERE rather than drawn from the message catalog, and that is
+   *   deliberate rather than an omission. It stands for a body the SERVICE composed, so it must not be
+   *   one of this screen's own catalogued strings: if it were, the case would pass against a screen
+   *   that ignored the document and painted a local string that happened to match.
+   */
+  const serviceSentence = 'Card browse is not permitted for this operator.';
+  const forbidden = 403;
+
+  await renderRefusedBrowse(refusalCarrying(forbidden, serviceSentence), serviceSentence);
+
+  const band = screen.getByTestId(MESSAGE_BAND_TEST_ID).textContent ?? '';
+  expect(band).not.toContain(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(band).not.toContain(PERSISTENT_FAILURE_REPORT_IT);
+}
+
+/**
+ * Asserts a refusal carrying no sentence falls back to the PERSISTENT catalogued sentence.
+ *
+ * Purpose
+ * -------
+ * A rejection that never reached the service -- a dropped connection -- carries no problem document, so
+ * `usePagedQuery` reports `isFailed` with `error` null and there is nothing to quote. That is the one
+ * state an authored sentence belongs in, and this case fixes which authored sentence.
+ *
+ * ⚠️ Refactoring Rationale: the expected sentence was
+ * `Card data is temporarily unavailable. Report it with the correlation id.` and is now the catalogue's
+ * persistent one. That sentence asserted BOTH remedies at once -- wait, and report -- so it was wrong
+ * whichever the failure actually was, and `ui/src/api/client.ts` names this screen in the measured
+ * finding it records at `ApiFailureRemedy`: a timeout, a dropped connection and a 500 were
+ * indistinguishable on every screen, and a 404 was presented as "temporarily unavailable" on `/cards`.
+ * A screen that says one thing for every failure cannot be corrected by rewording it, which is why the
+ * expectation moves to a PAIR of cases rather than to a different single sentence.
+ *
+ * ⚠️ Assumptions: a plain `Error` is expected to reach the PERSISTENT sentence and not the transient one,
+ * which is the conservative direction and is deliberate. `isTransientFailure` narrows on the
+ * `ApiRequestError` class, so a value whose provenance cannot be established is not classified at all --
+ * and the client's own `remedyFor` argues the same way about the real thing: a `NETWORK` failure is not
+ * transient, because a request that never resolved a host fails again identically and inviting a retry
+ * for it sends the operator into a loop with no exit.
+ *
+ * Assumptions: the width is still asserted, because the band silently clips and a sentence whose tail is
+ * cut carries no indication that it was.
+ * @returns {Promise<void>} Resolves once the persistent sentence has been reported verbatim.
+ */
+async function statesTheCataloguedSentenceWhenTheRefusalCarriesNone(): Promise<void> {
+  await renderRefusedBrowse(new Error('the connection was lost'), PERSISTENT_FAILURE_REPORT_IT);
+
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID).textContent ?? '').not.toContain(
+    TRANSIENT_FAILURE_TRY_AGAIN,
+  );
+  expect(PERSISTENT_FAILURE_REPORT_IT.length).toBeLessThanOrEqual(MESSAGE_BAND_CONTENT_WIDTH);
+}
+
+/**
+ * Asserts a momentary outage carrying no sentence is reported as one to wait out, not to report.
+ *
+ * ⚠️ Assumptions: the refusal is built as a REAL `ApiRequestError` at a transient status, because that is
+ * the only shape the classification reads. `ui/src/api/client.ts` derives `transient` from the kind and
+ * the status -- a timeout, or 408, 429, 502, 503, 504 -- and exposes it through `isTransientFailure`,
+ * which narrows on the class; a structurally similar object is deliberately not accepted, so a case
+ * arranged from one would exercise the fallback while appearing to exercise this branch.
+ *
+ * ⚠️ Assumptions: the persistent sentence is asserted ABSENT as well. Painting both would tell the
+ * operator to wait and to report the same failure, and only the absence catches that.
+ * @returns {Promise<void>} Resolves once the outage sentence has been reported verbatim.
+ */
+async function statesTheOutageSentenceForATransientRefusal(): Promise<void> {
+  const unavailable = 503;
+
+  await renderRefusedBrowse(refusalCarrying(unavailable, null), TRANSIENT_FAILURE_TRY_AGAIN);
+
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID).textContent ?? '').not.toContain(
+    PERSISTENT_FAILURE_REPORT_IT,
+  );
+  expect(TRANSIENT_FAILURE_TRY_AGAIN.length).toBeLessThanOrEqual(MESSAGE_BAND_CONTENT_WIDTH);
 }
 
 /**
@@ -1307,6 +1618,167 @@ async function dispatchesTheForwardStepFromKeyboardAndControl(): Promise<void> {
 }
 
 /**
+ * Builds a page read whose settlement this case controls.
+ *
+ * Assumptions: a hand-rolled deferred rather than a timer, because the property under test is the state
+ * of the screen WHILE a page turn is outstanding, and a timer would make the window a duration to race
+ * against instead of a state to observe.
+ * @returns {{ promise: Promise<PageResponse<CardSummary>>; settle: () => void }} The promise to hand the
+ *   mocked client, and the function that settles it with one full page.
+ */
+function deferredPage(): { promise: Promise<PageResponse<CardSummary>>; settle: () => void } {
+  /*
+   * Assumptions: the captured resolver is held as possibly-undefined rather than seeded with a throwing
+   *   placeholder, because a placeholder is itself a function and every function in this file owes a doc
+   *   comment -- so seeding it would document a branch the executor makes unreachable.
+   */
+  let resolvePage: ((page: PageResponse<CardSummary>) => void) | undefined;
+  const promise = new Promise<PageResponse<CardSummary>>(
+    /**
+     * Captures the resolver so the case can settle the read when it chooses.
+     * @param {(page: PageResponse<CardSummary>) => void} resolve - The promise's own resolver.
+     * @returns {void} Nothing; the resolver is captured as a side effect.
+     */
+    (resolve: (page: PageResponse<CardSummary>) => void): void => {
+      resolvePage = resolve;
+    },
+  );
+  return {
+    promise,
+    /**
+     * Settles the held read with one full page.
+     * @returns {void} Nothing; the settlement is the effect.
+     * @throws {Error} If called before the promise executor has run, which cannot happen for a native
+     *   promise but is stated rather than assumed.
+     */
+    settle: (): void => {
+      if (resolvePage === undefined) {
+        throw new Error('the deferred page was settled before it was armed');
+      }
+      resolvePage(pageResponse(FULL_PAGE_ROWS, { hasNext: true }));
+    },
+  };
+}
+
+/**
+ * Asserts the outstanding page turn is announced through a live region that is empty when idle.
+ *
+ * ⚠️ Assumptions: the region's presence and EMPTINESS are asserted BEFORE the turn is taken, and that
+ * ordering is the point. `ui/src/layout/fieldHelp.tsx` records that a live region has to be in the
+ * accessibility tree before its content changes for the change to be announced, so a region rendered
+ * only while busy would arrive with its sentence already in place and be read by nothing -- which loses
+ * the transition that matters. A case that only looked for the sentence would pass against exactly that.
+ *
+ * ⚠️ Assumptions: the SAME DOM node is asserted across all three states, by identity, because "mounted
+ * throughout" is the property under test and a remounted region is indistinguishable from a live one by
+ * text alone.
+ *
+ * Assumptions: the sentence is compared by identity against the catalogue's authored `REQUEST_IN_PROGRESS`
+ * rather than against a literal, so a reword in the catalogue moves this case with it.
+ * @returns {Promise<void>} Resolves once all three states have been observed.
+ */
+async function announcesTheOutstandingPageTurn(): Promise<void> {
+  const { user } = await renderBrowse(FULL_PAGE_ROWS, true);
+  const idle = screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+  expect(idle).toHaveTextContent('');
+
+  const held = deferredPage();
+  vi.mocked(listCards).mockReturnValue(held.promise);
+  await pressPfKey(user, 'PFK08');
+
+  const busy = screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+  expect(busy).toBe(idle);
+  expect(busy).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  await act(
+    /**
+     * Lets the held read settle inside the scope, so the screen's own update is flushed.
+     * @returns {Promise<void>} Resolves once the read has settled.
+     */
+    async (): Promise<void> => {
+      held.settle();
+      await held.promise;
+    },
+  );
+
+  await waitFor(
+    /**
+     * Holds until the announcement has been withdrawn.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function announcementWithdrawn(): void {
+      const settled = screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+      expect(settled).toBe(idle);
+      expect(settled).toHaveTextContent('');
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+}
+
+/**
+ * Asserts only the key whose own turn is outstanding is declined, and the other keys stay live.
+ *
+ * ⚠️ Assumptions: the decline is asserted PER KEY. One busy flag for the browse as a whole would decline
+ * the BACKWARD key because the forward one is waiting, which withdraws a key at a moment the reference
+ * does not: a 3270 inhibits the keyboard for the duration of a turn and then releases every key at once,
+ * never one key because of another. So the forward key is asserted busy and declining, while the
+ * backward key and the exit key are asserted NOT busy.
+ *
+ * ⚠️ Assumptions: the declined control is asserted to stay PRESENT, ENABLED and NAMED. A disabled control
+ * leaves the focus order, so an operator tabbing the legend would find the set of controls changing
+ * under them mid-turn; the contract is that a busy key is a valid key pressed early, so it stays where
+ * it was. The exit key carries no `aria-busy` attribute at all, which is the renderer's way of saying
+ * this key never reports busy -- distinct from reporting `false`.
+ *
+ * Assumptions: no invalid-key sentence appears. The decline is silent, and this program has no
+ * invalid-key message to show in any case -- its own `WHEN OTHER` arm coerces the key
+ * (`app/cbl/COCRDLIC.cbl` L370-L380).
+ * @returns {Promise<void>} Resolves once the decline and the surviving keys have been observed.
+ */
+async function declinesOnlyTheKeyWhoseTurnIsOutstanding(): Promise<void> {
+  const { user } = await renderBrowse(FULL_PAGE_ROWS, true);
+  const settledReads = readCount();
+
+  const held = deferredPage();
+  vi.mocked(listCards).mockReturnValue(held.promise);
+  await pressPfKey(user, 'PFK08');
+  expect(readCount()).toBe(settledReads + 1);
+
+  await pressPfKey(user, 'PFK08');
+  await clickLegendKey(user, UNIFORM_PF_KEY_LABELS.PFK08);
+  expect(readCount()).toBe(settledReads + 1);
+
+  const forward = within(keyLegend()).getByRole('button', { name: UNIFORM_PF_KEY_LABELS.PFK08 });
+  const backward = within(keyLegend()).getByRole('button', { name: UNIFORM_PF_KEY_LABELS.PFK07 });
+  /*
+   * Assumptions: the exit control is located through the legend's own advertised descriptors rather than
+   *   through a constant, because the exit label is private to the screen module -- the case that counts
+   *   the bindings makes the same accommodation for the same reason, asserting its SHAPE instead.
+   */
+  const exitDescriptor = advertisedKeyDescriptors()[0] ?? '';
+  expect(exitDescriptor.startsWith('F3=')).toBe(true);
+  const exit = within(keyLegend()).getByRole('button', { name: exitDescriptor });
+  expect(forward).toHaveAttribute('aria-busy', 'true');
+  expect(forward).toBeEnabled();
+  expect(forward).toHaveAccessibleName();
+  expect(backward).toHaveAttribute('aria-busy', 'false');
+  expect(backward).toBeEnabled();
+  expect(exit).not.toHaveAttribute('aria-busy');
+  expect(exit).toBeEnabled();
+
+  await act(
+    /**
+     * Settles the held read so the screen leaves its outstanding state inside an act scope.
+     * @returns {Promise<void>} Resolves once the read has settled.
+     */
+    async (): Promise<void> => {
+      held.settle();
+      await held.promise;
+    },
+  );
+}
+
+/**
  * Asserts the backward refusal is reported identically from the keyboard and from the legend control.
  *
  * Assumptions: the first page is the state under test, so both paths are refused rather than served.
@@ -1342,6 +1814,362 @@ async function reportsTheBackwardRefusalFromKeyboardAndControl(): Promise<void> 
   );
 
   expect(readCount()).toBe(1);
+}
+
+/**
+ * Locates the account-number filter control by the label the mapset gives it.
+ *
+ * Assumptions: the label text is normalised the way the two width cases already normalise it, because
+ * the rendered label carries the source's own spacing and Testing Library matches the accessible name.
+ * @returns {HTMLElement} The account-number entry control.
+ * @throws {Error} If no control carries that name, which Testing Library raises.
+ */
+function accountFilterControl(): HTMLElement {
+  return screen.getByLabelText(CARD_LIST_LABELS.accountNumberFilter.replace(/\s+/gu, ' ').trim());
+}
+
+/**
+ * Types one account narrowing into the filter control and applies it.
+ *
+ * Assumptions: the narrowing is APPLIED through the screen's own control rather than by pressing
+ * Enter, because both arms reach the same edit -- `2200-EDIT-INPUTS` is performed from the Enter arm
+ * at `app/cbl/COCRDLIC.cbl` L989 to L996 -- and the control is the arm a pointer user has. The other
+ * arm is exercised by the attention-identifier cases.
+ * @param {HarnessOperator} user - The operator driving the document.
+ * @param {string} narrowing - The eleven-digit account identifier to narrow by.
+ * @returns {Promise<void>} Resolves once the narrowed read has been dispatched.
+ */
+async function applyAccountNarrowing(user: HarnessOperator, narrowing: string): Promise<void> {
+  await user.type(accountFilterControl(), narrowing);
+  await user.click(screen.getByRole('button', { name: CARD_LIST_ENTRY_CONTROL_LABELS.filter }));
+
+  await waitFor(
+    /**
+     * Holds until a read carrying the narrowing has been dispatched.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function narrowedReadDispatched(): void {
+      expect(recordedQuery(readCount() - 1).accountId).toBe(narrowing);
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+}
+
+/**
+ * Asserts every paging step carries the narrowing in force, not only the turn that applied it.
+ *
+ * Purpose
+ * -------
+ * This is the case for the finding that the forward key dropped the account narrowing: the request
+ * carried only the cursor and the direction while the entry box still visibly held what the operator
+ * typed, so the grid repopulated with rows from other accounts under an unchanged filter.
+ *
+ * ⚠️ Assumptions: the narrowing belongs on the paging request because it is what the browse is a browse
+ * OF. `app/cbl/COCRDLIC.cbl` reads every page through `9000-READ-FORWARD`, which filters each record it
+ * reads against the carried `CDEMO-ACCT-ID` -- `9500-FILTER-RECORDS` at L1281 to L1310 rejects a record
+ * whose account does not match -- and PF8 performs that same paragraph (L456 to L470). There is no arm
+ * in which a page is read unfiltered while a filter is in force, so a request omitting it describes a
+ * browse the reference cannot perform.
+ *
+ * Assumptions: BOTH halves are asserted -- the request carries the narrowing AND the entry box still
+ * shows it. The finding is precisely the disagreement between the two, so an assertion on either alone
+ * would pass against the defect stated the other way round.
+ * @returns {Promise<void>} Resolves once the forward step has been observed to carry the narrowing.
+ */
+async function carriesTheNarrowingIntoEveryPagingStep(): Promise<void> {
+  const narrowing = FIRST_ROW.accountId;
+  const { user } = await renderBrowse(FULL_PAGE_ROWS, true);
+
+  await applyAccountNarrowing(user, narrowing);
+  const afterFilter = readCount();
+
+  await clickLegendKey(user, UNIFORM_PF_KEY_LABELS.PFK08);
+
+  await waitFor(
+    /**
+     * Holds until the forward step has been dispatched.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function forwardStepDispatched(): void {
+      expect(readCount()).toBeGreaterThan(afterFilter);
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  const stepped = recordedQuery(readCount() - 1);
+  expect(stepped.accountId).toBe(narrowing);
+  expect(stepped.cursor).toBe(TRAILING_CURSOR);
+  expect(stepped.direction).toBe('next');
+  expect((accountFilterControl() as HTMLInputElement).value).toBe(narrowing);
+}
+
+/**
+ * Asserts neither paging control is ever withdrawn, at either boundary.
+ *
+ * ⚠️ Assumptions: a boundary is ANNOUNCED and never expressed by taking the key away. The reference
+ * paints `ENTER=Continue  F3=Exit  F7=Backward  F8=Forward` from one unconditional legend field
+ * (`app/bms/COCRDLI.bms` L336 to L341 declares `ATTRB=(ASKIP,NORM)` with that INITIAL and no paragraph
+ * darkens it), and its boundary arms move a SENTENCE into the message field instead -- L901 to L904 for
+ * the backward boundary and L905 to L909 for the forward one -- while still re-sending the map. So a
+ * disabled control would remove a sentence the operator reads, which is the opposite of the accessible
+ * improvement it looks like.
+ *
+ * Assumptions: both boundaries are exercised in one case because they are one property of one control
+ * group. The opening page is the backward boundary by construction, and a page reporting no further one
+ * is the forward boundary, so a single page with `hasNext` false is at both at once.
+ * @returns {Promise<void>} Resolves once both keys have been shown enabled at both boundaries.
+ */
+async function withdrawsNoPagingKeyAtEitherBoundary(): Promise<void> {
+  const { user } = await renderBrowse(FULL_PAGE_ROWS);
+
+  for (const descriptor of [UNIFORM_PF_KEY_LABELS.PFK07, UNIFORM_PF_KEY_LABELS.PFK08]) {
+    expect(within(keyLegend()).getByRole('button', { name: descriptor })).toBeEnabled();
+  }
+
+  await pressPfKey(user, 'PFK07');
+  await waitFor(
+    /**
+     * Holds until the backward boundary has announced itself.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function backwardBoundaryAnnounced(): void {
+      expectVerbatimMessageInBand(CARD_LIST_PAGING.NO_PREVIOUS_PAGES_TO_DISPLAY);
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  await pressPfKey(user, 'PFK08');
+  await waitFor(
+    /**
+     * Holds until the forward boundary has announced itself.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function forwardBoundaryAnnounced(): void {
+      expectVerbatimMessageInBand(CARD_LIST_PAGING.NO_MORE_RECORDS_TO_SHOW);
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  // WHY : Assumptions: enablement is re-read AFTER both refusals, because a screen that greyed a key on
+  //       reaching its boundary would still have satisfied the assertion above -- the sentence and the
+  //       withdrawal are not alternatives, and the finding this guards against is the withdrawal.
+  for (const descriptor of [UNIFORM_PF_KEY_LABELS.PFK07, UNIFORM_PF_KEY_LABELS.PFK08]) {
+    expect(within(keyLegend()).getByRole('button', { name: descriptor })).toBeEnabled();
+  }
+
+  // WHY : Assumptions: no read was issued past either boundary, which is the other half of the
+  //       reference's behaviour -- its boundary arms state a sentence and re-send the map WITHOUT
+  //       performing the read paragraph, so a request here would be a page nobody asked for.
+  expect(readCount()).toBe(1);
+}
+
+/**
+ * Asserts the page size is the mapset's row count and never reaches the wire.
+ *
+ * Assumptions: seven is asserted against the screen's own exported constant, whose provenance the
+ * arity case establishes from two independent artifacts, and the ABSENCE is asserted against every
+ * recorded request. `card-api.yaml` declares no page-size member on the browse query at all, so a
+ * request carrying one would be describing a body the service does not accept -- and the row count is
+ * a property of a 24-row terminal frame rather than something a client negotiates.
+ * @returns {Promise<void>} Resolves once the size has been checked and every request searched.
+ */
+async function keepsThePageSizeOffTheWire(): Promise<void> {
+  expect(CARD_LIST_PAGE_SIZE).toBe(DECLARED_ROW_ARITY);
+
+  const { user } = await renderBrowse(FULL_PAGE_ROWS, true);
+  await clickLegendKey(user, UNIFORM_PF_KEY_LABELS.PFK08);
+
+  await waitFor(
+    /**
+     * Holds until the forward step has been dispatched.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function forwardStepDispatched(): void {
+      expect(readCount()).toBeGreaterThan(1);
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  for (let index = 0; index < readCount(); index += 1) {
+    for (const member of Object.keys(recordedQuery(index))) {
+      expect(isPermittedQueryMember(member)).toBe(true);
+    }
+  }
+}
+
+/**
+ * The address the browse occupies, spelled as `ui/src/router.tsx` declares it.
+ *
+ * Assumptions: this is the string the screen's own hand-over carries as its origin, so the two cases
+ * below start the router at the same address the application does rather than at an approximation.
+ */
+const BROWSE_ADDRESS = '/cards';
+
+/**
+ * Mounts the browse and the update screen under one router, so a transfer and its return are real.
+ *
+ * Purpose
+ * -------
+ * The narrowing an operator applied has to SURVIVE a transfer out and the exit key coming back, and
+ * nothing about that is observable inside one screen: the browse unmounts on the way out and mounts
+ * again on the way back, so the property under test is what travels between two mounts. Mounting both
+ * screens under one memory router is the only arrangement in which that is a real transition rather
+ * than an assertion about an argument.
+ *
+ * Assumptions: the screens are mounted as CHILDREN of a pathless layout route holding the shell, which
+ * is how `ui/src/router.tsx` declares them and what `ui/src/test/setup.ts` records as the arrangement to
+ * reproduce -- passing a screen as the shell's `children` replaces the outlet instead of filling it, so
+ * an outlet regression would leave such a test passing.
+ *
+ * Assumptions: the theme provider is the application's own `cardDemoTheme`, imported rather than
+ * restated, for the reason the shared harness gives -- a subject rendered without it renders Ant
+ * Design's defaults rather than the BMS bridge.
+ *
+ * Alternatives Considered: extending the shared `renderInAppShell` helper to accept a history entry
+ * carrying state. Rejected because `ui/src/test/setup.ts` belongs to another group in this checkpoint
+ * and its `initialEntries` is typed as strings; a local harness reaches the same arrangement without
+ * editing a file this group does not own.
+ * @param {string | { pathname: string; state: { accountId: string } }} entry - The history entry to
+ *   open at, either a bare address or one carrying a hand-over.
+ * @returns {HarnessOperator} The operator bound to the rendered document.
+ */
+function renderCardRoutes(
+  entry: string | { pathname: string; state: { accountId: string } },
+): HarnessOperator {
+  const user = userEvent.setup();
+
+  render(
+    <ConfigProvider theme={cardDemoTheme}>
+      <MemoryRouter initialEntries={[entry]}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path={BROWSE_ADDRESS} element={<CardListScreen />} />
+            <Route path={CARD_EDIT_ROUTE} element={<CardUpdateScreen />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    </ConfigProvider>,
+  );
+
+  return user;
+}
+
+/**
+ * Asserts an arrival carrying a narrowing opens narrowed, in the box and on the wire.
+ *
+ * Purpose
+ * -------
+ * This is the arrival half of the finding that the exit key from a card returned an operator to an
+ * unnarrowed browse with both boxes empty. The reference repaints the filter field from the carried
+ * `CDEMO-ACCT-ID` on every entry that is not a fresh one from the menu -- the `WHEN OTHER` arm of
+ * `app/cbl/COCRDLIC.cbl` L849 to L854 moves the carried identifier into `ACCTSIDO` and sets the field's
+ * modified-data tag -- and the browse it then reads is narrowed by that same field.
+ *
+ * Assumptions: both the BOX and the REQUEST are asserted. A screen that seeded only the box would show
+ * the operator a filter over rows from every account, and one that seeded only the request would narrow
+ * the rows beside an empty box; the reference can exhibit neither, because one carried field feeds both.
+ * @returns {Promise<void>} Resolves once the narrowed arrival has been observed.
+ */
+async function adoptsTheNarrowingAnArrivalCarries(): Promise<void> {
+  const narrowing = FIRST_ROW.accountId;
+  answerWithPage(FULL_PAGE_ROWS, false);
+
+  renderCardRoutes({ pathname: BROWSE_ADDRESS, state: { accountId: narrowing } });
+
+  await waitFor(
+    /**
+     * Holds until the opening read has been dispatched.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function openingReadDispatched(): void {
+      expect(readCount()).toBeGreaterThan(0);
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  expect(recordedQuery(0).accountId).toBe(narrowing);
+  expect(recordedQuery(0).cursor).toBeUndefined();
+  expect((accountFilterControl() as HTMLInputElement).value).toBe(narrowing);
+}
+
+/**
+ * Asserts the exit key from the update screen returns to the browse still narrowed.
+ *
+ * Purpose
+ * -------
+ * This is the finding's own reproduction, end to end: narrow the browse, open a card's update form from
+ * a row, press the exit key, and read what the browse comes back as. It failed because the transfer
+ * carried the origin and not the narrowing, so the return was a first arrival.
+ *
+ * ⚠️ Assumptions: the narrowing travels because the reference's COMMAREA does. The transfer arm writes
+ * it in before the transfer (`MOVE CC-ACCT-ID TO CDEMO-ACCT-ID` at `app/cbl/COCRDLIC.cbl` L1027, with
+ * the update arm's transfer at L548 to L562), the update program receives that same area and never
+ * writes that field, and its exit arm hands the area back (`app/cbl/COCRDUPC.cbl` L442 to L460). So the
+ * operator returns to the browse they left rather than to the browse's opening state.
+ *
+ * Assumptions: the update screen's read is REFUSED rather than answered, because this case is about the
+ * exit key and the record is not on the screen it asserts about. The refusal keeps that screen mounted
+ * with its unconditional `F3=Exit` painted (`app/bms/COCRDUP.bms` L158 to L162), which is the control
+ * being pressed, and it spares this file a card-detail fixture it would otherwise have to carry for a
+ * screen it does not test.
+ * @returns {Promise<void>} Resolves once the browse has come back narrowed.
+ */
+async function returnsToTheNarrowedBrowseFromTheUpdateScreen(): Promise<void> {
+  const narrowing = FIRST_ROW.accountId;
+  answerWithPage(FULL_PAGE_ROWS, false);
+  vi.mocked(getCard).mockRejectedValue(new Error('the read was refused'));
+
+  const user = renderCardRoutes(BROWSE_ADDRESS);
+
+  await waitFor(
+    /**
+     * Holds until the opening page has been rendered.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function openingPageRendered(): void {
+      expect(browseTable()).toBeInTheDocument();
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  await applyAccountNarrowing(user, narrowing);
+
+  // WHY : Assumptions: the transfer is driven as a TURN -- the update code typed into the first row's
+  //       action field and then Enter -- because that is the reference's own path to the update
+  //       program: `2250-EDIT-ARRAY` reads the row's character and the `EVALUATE` arm at
+  //       `app/cbl/COCRDLIC.cbl` L548 to L562 transfers. Driving it through the row control would
+  //       exercise the same hand-over by the target-only pointer path instead.
+  await user.type(rowActionEntry(0), CARD_LIST_ROW_ACTION_CODES.update);
+  await pressPfKey(user, 'ENTER');
+
+  await waitFor(
+    /**
+     * Holds until the update screen has replaced the browse.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function updateScreenMounted(): void {
+      expect(screen.queryByRole('table')).toBeNull();
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  const readsBeforeReturn = readCount();
+  await pressPfKey(user, 'PFK03');
+
+  await waitFor(
+    /**
+     * Holds until the browse has been re-read on the way back.
+     * @returns {void} Nothing; the assertion is the wait's condition.
+     */
+    function browseReturned(): void {
+      expect(readCount()).toBeGreaterThan(readsBeforeReturn);
+      expect(browseTable()).toBeInTheDocument();
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  expect(recordedQuery(readCount() - 1).accountId).toBe(narrowing);
+  expect((accountFilterControl() as HTMLInputElement).value).toBe(narrowing);
 }
 
 /**
@@ -1613,11 +2441,314 @@ async function preservesIdentifiersAsStringsWithoutCoercion(): Promise<void> {
  */
 
 /**
+ * Reads every design-system text control the screen rendered.
+ *
+ * Assumptions: the class is queried rather than the accessible names being listed, because the point
+ * of the case below is that no control of this kind is rendered by a DIFFERENT mechanism than the
+ * others. A name list would only find the controls it already knew about.
+ * @returns {readonly HTMLElement[]} Every element carrying the design system's text-control class.
+ */
+function renderedTextControls(): readonly HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('.ant-input')];
+}
+
+/**
+ * Reads one of the three entry actions by its visible label.
+ *
+ * ⚠️ Assumptions: the control is reached through its TEXT and then its enclosing button, not through a
+ * name-bearing role query, and this is a measured decision rather than a stylistic one. Timed in this
+ * suite, `screen.getByRole('button', { name })` cost 22.9 seconds per call for the two disabled
+ * actions against 5 milliseconds for `getByText` -- and 22.9 seconds again with `hidden: true`, which
+ * rules out the accessibility filter and leaves the accessible-name computation over a document
+ * carrying the design system's injected stylesheets. Three such calls made one case take 47 of this
+ * file's 57 seconds. The role is still asserted, once, by the emphasis case, so nothing is given up.
+ * @param {string} label - The control's visible label.
+ * @returns {HTMLElement} The button carrying that label.
+ * @throws {Error} If no button carries it, which the enclosing-element narrowing raises.
+ */
+function entryAction(label: string): HTMLElement {
+  const button = screen.getByText(label).closest('button');
+  if (button === null) {
+    throw new Error(`no button carries the label ${label}`);
+  }
+  return button;
+}
+
+/**
+ * Asserts one control's inline size is ceilinged at its declared character width.
+ *
+ * Assumptions: the `ch` term is matched rather than the whole declaration, because the padding term is
+ * a theme custom property whose serialised form belongs to the design system and not to this file.
+ * What this file is entitled to assert is the character count, which is the copybook's.
+ *
+ * Assumptions: `max-inline-size` is asserted and not a pixel width, because jsdom computes no layout --
+ * a pixel assertion here would assert nothing. The remedy is a ceiling expressed in `ch` plus the
+ * system's own horizontal control padding, so the declaration's presence and its character count are
+ * exactly what can be established.
+ * @param {HTMLElement} control - The control to inspect.
+ * @param {number} declaredWidth - The width the field's PICTURE clause declares.
+ * @returns {void} Nothing; the expectations throw on a mismatch.
+ */
+function expectDeclaredWidthCeiling(control: HTMLElement, declaredWidth: number): void {
+  const ceiling = control.style.maxInlineSize;
+  expect(ceiling, 'the control must carry a declared-width ceiling').not.toBe('');
+  expect(
+    ceiling,
+    `the ceiling must be measured in ${String(declaredWidth)} character columns`,
+  ).toContain(`${String(declaredWidth)}ch`);
+  // WHY : Assumptions: the full-width base is asserted beside the ceiling because the helper keeps
+  //       both -- a ceiling alone would fix the field's size and stop it shrinking inside a phone
+  //       viewport, which is the sideways overflow the card screens have already been measured for.
+  expect(control.style.inlineSize).toBe('100%');
+}
+
+/**
+ * Asserts the screen renders no in-field clear control, hidden or otherwise.
+ *
+ * Purpose
+ * -------
+ * This is the case for two findings that share one cause. A browser found two interactive controls on
+ * this screen that could not be seen -- `button.ant-input-clear-icon-hidden`, `visibility: hidden`,
+ * 12 by 12 pixels, `tabIndex 0`, no `aria-hidden`, with a full four-state style set -- so a keyboard
+ * operator hit two tab stops with nothing to land on, each below the 24-pixel pointer floor the
+ * exported `TARGET_SIZE_AA_MINIMUM` constant records from success criterion 2.5.8 -- named in prose
+ * rather than as a link target, because it is a VALUE and `jsdoc/no-undefined-types` resolves a link
+ * target against the type namespace alone. The same prop is also why two
+ * adjacent entry controls in one form measured 40 and 28 pixels tall: it wraps the control in an
+ * affix wrapper and moves the variant class that carries the border, the padding and the control
+ * height off the `<input>` and onto that wrapper, so the screen rendered two different kinds of
+ * element both matching one selector.
+ *
+ * ⚠️ Assumptions: the mapset is what settles whether the affordance belongs at all, and it does not.
+ * `ACCTSID` and `CARDSID` are plain `UNPROT` entry fields with nothing beside them
+ * (`app/bms/COCRDLI.bms` L89 to L93 and L101 to L105), the only affordances the screen paints are the
+ * three on its legend field at L335 to L339, and the program reaches an arm for exactly ENTER, PF3,
+ * PF7 and PF8 (`app/cbl/COCRDLIC.cbl` L439 to L562). So the fix is to drop the affordance rather than
+ * to inflate its glyph, and asserting ABSENCE is what fixes that decision in place.
+ *
+ * Assumptions: the second expectation is that every text control is the same KIND of element, which
+ * is the height defect stated at its cause. jsdom computes no layout, so two heights cannot be
+ * measured here; what can be established is that one selector no longer matches two different boxes.
+ * @returns {Promise<void>} Resolves once the absence has been established.
+ */
+async function rendersNoInFieldClearControl(): Promise<void> {
+  await renderBrowse(FULL_PAGE_ROWS);
+
+  expect(document.querySelectorAll('.ant-input-clear-icon')).toHaveLength(0);
+  expect(document.querySelectorAll('.ant-input-affix-wrapper')).toHaveLength(0);
+
+  const controls = renderedTextControls();
+  expect(controls.length).toBeGreaterThan(0);
+  for (const control of controls) {
+    expect(
+      control.classList.contains('ant-input-outlined'),
+      'every text control must be the same kind of box, so one theme height governs them all',
+    ).toBe(true);
+  }
+}
+
+/**
+ * Asserts all three entry controls are measured from the widths their copybooks declare.
+ *
+ * Purpose
+ * -------
+ * The regression guard for the one-character row selector rendering about 217 pixels wide -- against
+ * about 97 for the identical selector on the user browse -- and for the two filter fields carrying no
+ * measure of their own at all. `.ant-input` is full-width by default, so an eleven-digit account
+ * number, a sixteen-digit card number and a one-character action code were all rendered the width of
+ * whatever box contained them.
+ *
+ * Assumptions: the widths come from the screen's own exported constants, which are the same values its
+ * `maxLength` props carry, so the entry bound and the rendered measure cannot state two widths.
+ * @returns {Promise<void>} Resolves once all three ceilings have been asserted.
+ */
+async function measuresEveryEntryFromItsDeclaredWidth(): Promise<void> {
+  await renderBrowse(FULL_PAGE_ROWS);
+
+  expectDeclaredWidthCeiling(accountFilterControl(), CARD_LIST_ACCOUNT_FILTER_WIDTH);
+  expectDeclaredWidthCeiling(
+    screen.getByLabelText(CARD_LIST_LABELS.cardNumberFilter.replace(/\s+/gu, ' ').trim()),
+    CARD_LIST_CARD_FILTER_WIDTH,
+  );
+  expectDeclaredWidthCeiling(rowActionEntry(0), ROW_ACTION_DECLARED_WIDTH);
+}
+
+/**
+ * Asserts the three entry actions are separated from each other and from the field they act on.
+ *
+ * Purpose
+ * -------
+ * A browser measured 0-pixel gaps between `Filter`, `Open detail` and `Open update`, so three
+ * independent actions read as one segmented control whose segments looked like states of a single
+ * choice -- while the key legend on the same screen separated its own controls by about 9 pixels. The
+ * cause was that all three sat inside the card number's compact group, and a compact group exists to
+ * render its members as one joined control.
+ *
+ * ⚠️ Assumptions: the gap is asserted to be the LEGEND'S OWN, by comparing the two inline values rather
+ * than by naming a number. Both are written from `SPACING_TOKENS.sectionGapCompact` -- the actions row
+ * here and `ui/src/layout/PfKeyBar.tsx` L449 for the legend -- so an identical serialised custom-property
+ * reference is what proves one token feeds both. A pixel assertion would be asserting nothing in jsdom,
+ * and a literal would pass while the two rows drifted apart.
+ * @returns {Promise<void>} Resolves once the separation has been established.
+ */
+async function separatesTheEntryActionsFromTheEntryField(): Promise<void> {
+  await renderBrowse(FULL_PAGE_ROWS);
+
+  const actions = [
+    CARD_LIST_ENTRY_CONTROL_LABELS.filter,
+    CARD_LIST_ENTRY_CONTROL_LABELS.openDetail,
+    CARD_LIST_ENTRY_CONTROL_LABELS.openUpdate,
+  ].map(entryAction);
+
+  for (const action of actions) {
+    expect(
+      action.closest('.ant-space-compact'),
+      'no entry action may sit inside a joined control group',
+    ).toBeNull();
+  }
+
+  const [filterAction] = actions;
+  if (filterAction === undefined) {
+    throw new Error('the screen rendered no filter action');
+  }
+  const row = filterAction.parentElement;
+  if (row === null) {
+    throw new Error('the filter action has no containing row');
+  }
+
+  /*
+   * WHY : Assumptions: the row's CHILDREN are asserted rather than each action's parent, because that
+   *       establishes the stronger property -- the row holds exactly these three controls in the
+   *       mapset-independent order the screen renders them, and nothing else has been folded in beside
+   *       them. Asserting each parent separately would pass for a row that also contained the entry
+   *       field, which is the arrangement this case exists to rule out.
+   */
+  expect([...row.children]).toEqual(actions);
+  expect(row.style.gap, 'the actions row must carry a gap').not.toBe('');
+  expect(row.style.gap, "the gap must be the legend's own spacing step").toBe(
+    keyLegend().style.gap,
+  );
+}
+
+/**
+ * Asserts exactly one control carries the emphasised treatment, and that it is the screen's submit.
+ *
+ * Purpose
+ * -------
+ * A browser found no primary-solid control anywhere on this screen, so `Filter`, which performs the
+ * browse, was pixel-indistinguishable from `F3=Exit`, which leaves it.
+ *
+ * ⚠️ Assumptions: the emphasised control is the screen's ENTER action, which is what the design-system
+ * mapping fixes -- AAP section 0.3.2 maps Enter and PF5 to `type="primary"` and PF3, PF4 and PF12 to
+ * `default`. The mapset paints no Enter on its legend (`app/bms/COCRDLI.bms` L339 names only F3, F7
+ * and F8), and the program's `CCARD-AID-ENTER` arms are the ones that edit both filters and read the
+ * browse (`app/cbl/COCRDLIC.cbl` L517 and L545), so this control is that verb's affordance.
+ *
+ * Assumptions: EXACTLY one is asserted rather than at least one. Two emphasised controls on one screen
+ * is the same defect stated the other way round -- nothing stands out when everything does -- and the
+ * delegated legend keys must stay neutral, which a count is what establishes.
+ * @returns {Promise<void>} Resolves once the single emphasised control has been identified.
+ */
+async function emphasisesTheScreensOwnSubmitAndNothingElse(): Promise<void> {
+  await renderBrowse(FULL_PAGE_ROWS);
+
+  const emphasised = [...document.querySelectorAll('button.ant-btn-primary')];
+  expect(emphasised).toHaveLength(1);
+  expect(emphasised[0]).toBe(
+    screen.getByRole('button', { name: CARD_LIST_ENTRY_CONTROL_LABELS.filter }),
+  );
+}
+
+/**
+ * Asserts every browse row is a pointer target and can be reached and activated from the keyboard.
+ *
+ * Purpose
+ * -------
+ * A browser measured `cursor: auto` on these rows both at rest and hovered, with no `:hover` rule of
+ * their own and no focus or active treatment at all -- so nothing about a row said it could be acted
+ * on, even though every row carries a selection field and two controls that act on it.
+ *
+ * ⚠️ Assumptions: the outcome of activating a row is the REFERENCE'S own -- the cursor lands in that
+ * row's selection field. `1250-SETUP-ARRAY-ATTRIBS` repositions the cursor onto a row by moving `-1`
+ * into that row's selection-field length (`app/cbl/COCRDLIC.cbl` L766 to L773 and the four blocks
+ * after it), so this is the terminal's gesture for directing an operator to a row and not an invented
+ * navigation.
+ *
+ * ⚠️ Assumptions: the activation key is the space key and the case asserts that pressing it submitted
+ * NO turn. Enter is claimed document-wide by `usePfKeys` as this screen's submit, so a row that
+ * activated on Enter would give one key two meanings; the read count is what proves the space key did
+ * not reach that verb.
+ * @returns {Promise<void>} Resolves once the affordance and the activation have been established.
+ */
+async function offersEveryRowAsAPointerAndKeyboardTarget(): Promise<void> {
+  const { user } = await renderBrowse(FULL_PAGE_ROWS);
+  const rows = browseBodyRows();
+  expect(rows).toHaveLength(FULL_PAGE_ROWS.length);
+
+  for (const row of rows) {
+    expect(row.style.cursor, 'every row must offer a pointer affordance').toBe('pointer');
+    expect(row.tabIndex, 'every row must be reachable from the keyboard').toBe(0);
+  }
+
+  const [firstRow, secondRow] = rows;
+  if (firstRow === undefined || secondRow === undefined) {
+    throw new Error('the rendered page has fewer than two rows');
+  }
+  const readsBefore = readCount();
+
+  /**
+   * Moves the operator's focus onto the second rendered row.
+   *
+   * Assumptions: a NAMED function rather than an inline arrow at the `act` call below, because
+   * `ui/eslint.config.js` selects `jsdoc/require-jsdoc` with `publicOnly: false` -- which requires a
+   * doc comment on a function in every position -- and Prettier moves a block comment attached to an
+   * inline argument onto the preceding expression, detaching it from what it documents.
+   *
+   * ⚠️ Assumptions: it is bound to a `const` rather than declared with `function`, and the difference is
+   * a type one. A hoisted declaration may be called before the guard above runs, so TypeScript discards
+   * the narrowing that guard establishes and reports `secondRow` as possibly undefined inside it; a
+   * closure created AFTER the guard keeps the narrowing, because the captured binding is `const`.
+   * @returns {void} Nothing; the focus change is the effect.
+   */
+  const placeTheFocusOnTheSecondRow = (): void => {
+    secondRow.focus();
+  };
+
+  await user.click(firstRow);
+  expect(document.activeElement, 'a click on a row lands in that row').toBe(rowActionEntry(0));
+
+  /*
+   * WHY : Assumptions: the keyboard half is exercised on a DIFFERENT row from the pointer half, so a
+   *       screen that answered only the pointer cannot pass it -- focus is already in row one's field
+   *       when this begins, and the assertion is that it has moved to row two's.
+   * WHY : Assumptions: the focus is applied inside `act` because it is a real state change. antd's own
+   *       components update on focus, and React reports an update applied outside `act` as a warning
+   *       rather than a failure -- so leaving it out would leave this file emitting one.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the scope is entered WITHOUT `await`, where it was awaited. `act`
+   *       returns a thenable only when its callback does, and this callback is synchronous -- so the
+   *       `await` was awaiting a plain value, which `@typescript-eslint/await-thenable` reports and
+   *       which also implies a flush this call does not perform. The synchronous form flushes the
+   *       update before it returns, which is what the assertion below needs.
+   */
+  act(placeTheFocusOnTheSecondRow);
+  expect(document.activeElement).toBe(secondRow);
+  await user.keyboard('[Space]');
+
+  expect(document.activeElement, 'activating a focused row lands in that row').toBe(
+    rowActionEntry(1),
+  );
+  expect(readCount(), 'activating a row must not submit the turn').toBe(readsBefore);
+}
+
+/**
  * Registers the keyset-pagination cases.
  * @returns {void} Nothing.
  */
 function keysetPaginationCases(): void {
   it('declares the row arity the mapset and the program both measure', declaresTheMapsetRowArity);
+  it('holds its own horizontal overflow', holdsItsOwnHorizontalOverflow);
   it('disables the design system offset pager', disablesTheDesignSystemOffsetPager);
   it('renders exactly the rows the envelope delivered', rendersExactlyTheDeliveredRows);
   it('steps forward on the trailing cursor', stepsForwardOnTheTrailingCursor);
@@ -1627,6 +2758,14 @@ function keysetPaginationCases(): void {
   it(
     'reports the end of records and then the end of pages',
     reportsTheEndOfRecordsThenTheEndOfPages,
+  );
+  it('carries the narrowing into every paging step', carriesTheNarrowingIntoEveryPagingStep);
+  it('withdraws no paging key at either boundary', withdrawsNoPagingKeyAtEitherBoundary);
+  it('keeps the page size off the wire', keepsThePageSizeOffTheWire);
+  it('adopts the narrowing an arrival carries', adoptsTheNarrowingAnArrivalCarries);
+  it(
+    'returns to the narrowed browse from the update screen',
+    returnsToTheNarrowedBrowseFromTheUpdateScreen,
   );
 }
 
@@ -1663,6 +2802,18 @@ function messageFidelityCases(): void {
     'paints the search-condition sentence when nothing matches',
     paintsTheSearchConditionSentenceWhenNothingMatches,
   );
+  it(
+    'states the service sentence for a described refusal',
+    statesTheServiceSentenceForADescribedRefusal,
+  );
+  it(
+    'states the catalogued sentence when the refusal carries none',
+    statesTheCataloguedSentenceWhenTheRefusalCarriesNone,
+  );
+  it(
+    'states the outage sentence for a transient refusal',
+    statesTheOutageSentenceForATransientRefusal,
+  );
 }
 
 /**
@@ -1673,6 +2824,11 @@ function attentionIdentifierCases(): void {
   it(
     'binds the four measured identifiers and no others',
     bindsTheFourMeasuredIdentifiersAndNoOthers,
+  );
+  it('announces the outstanding page turn through a live region', announcesTheOutstandingPageTurn);
+  it(
+    'declines only the key whose own turn is outstanding',
+    declinesOnlyTheKeyWhoseTurnIsOutstanding,
   );
   it(
     'dispatches the forward step from keyboard and control',
@@ -1693,6 +2849,100 @@ function selectionCases(): void {
   it('refuses two selections without opening either', refusesTwoSelectionsWithoutOpeningEither);
   it('refuses an unrecognised action character', refusesAnUnrecognisedActionCharacter);
   it('selects the destination for each action code', selectsTheDestinationForEachActionCode);
+}
+
+/**
+ * Asserts each entry label stays whole beside its field and is not joined to it.
+ *
+ * Purpose
+ * -------
+ * A browser measured the `Credit Card Number:` label at a 375-pixel width broken into stacked one- and
+ * two-character pieces, beside an entry field 166 pixels wide. Both members of the pair were being
+ * shrunk to fit one line that could not hold them, because the pair sat in a compact group -- a
+ * construct whose whole purpose is to render its members as ONE joined control on ONE line.
+ *
+ * ⚠️ Assumptions: the mapset is what fixes "whole". `app/bms/COCRDLI.bms` L84-L88 and L96-L100 each
+ * paint their label as a single 19-character field on a single row, so a label rendered as several
+ * stacked fragments is not a narrower rendering of that field -- it is a different field.
+ *
+ * ⚠️ Assumptions: what is asserted is the DECLARATIONS that prevent the fragmenting, not a measured
+ * width, because jsdom computes no layout and a pixel assertion here would assert nothing. The pair of
+ * declarations is exactly what a browser needs to keep the label whole: refuse it a share of the
+ * shrinking, and refuse it a line break. The row is required to wrap so that the width the label keeps
+ * is taken from the line rather than from the entry.
+ *
+ * Assumptions: the gap is compared with the LEGEND'S, by value, for the same reason
+ * `separatesTheEntryActionsFromEntryField` in this file does -- one token feeds both, so an identical
+ * serialised custom-property reference is the proof, and a literal would pass while the rows drifted.
+ * That case is named in prose rather than as a link target, because `jsdoc/no-undefined-types` resolves
+ * a link target against the type namespace and a function is not in it.
+ * @returns {Promise<void>} Resolves once both rows have been established.
+ */
+async function keepsEachEntryLabelWholeBesideItsField(): Promise<void> {
+  await renderBrowse(FULL_PAGE_ROWS);
+
+  const pairs: readonly (readonly [HTMLElement, string])[] = [
+    [accountFilterControl(), CARD_LIST_LABELS.accountNumberFilter],
+    [
+      screen.getByLabelText(CARD_LIST_LABELS.cardNumberFilter.replace(/\s+/gu, ' ').trim()),
+      CARD_LIST_LABELS.cardNumberFilter,
+    ],
+  ];
+
+  for (const [field, labelText] of pairs) {
+    expect(
+      field.closest('.ant-space-compact'),
+      'an entry field may not be joined to its own label',
+    ).toBeNull();
+
+    /*
+     * WHY : Assumptions: the label is reached through the field's OWN `aria-labelledby` rather than by
+     *       matching its text. That is the association a screen reader follows, so following it here
+     *       asserts the naming and the layout on one element instead of trusting two lookups to land on
+     *       the same node -- and it cannot be defeated by the whitespace the mapset pads these labels
+     *       with, which `app/bms/COCRDLI.bms` L88 declares as four spaces inside a 19-character field.
+     */
+    const labelId = field.getAttribute('aria-labelledby');
+    expect(labelId, `the entry for ${labelText} must name its own label`).not.toBeNull();
+    const label = document.getElementById(labelId ?? '');
+    if (label === null) {
+      throw new Error(`the label element named by ${labelText} is not in the document`);
+    }
+    expect(label.textContent).toBe(labelText);
+    expect(label.closest('.ant-space-compact')).toBeNull();
+    expect(label.style.flexShrink, 'the label may not take a share of the shrinking').toBe('0');
+    expect(label.style.whiteSpace, 'the label may not be broken across lines').toBe('nowrap');
+
+    const row = label.parentElement;
+    if (row === null) {
+      throw new Error(`the label ${labelText} has no containing row`);
+    }
+    expect([...row.children]).toEqual([label, field]);
+    expect(row, 'the label and its entry must be free to wrap').toHaveClass('ant-flex-wrap-wrap');
+    expect(row.style.gap, 'the row must carry a gap').not.toBe('');
+    expect(row.style.gap, "the gap must be the legend's own spacing step").toBe(
+      keyLegend().style.gap,
+    );
+  }
+}
+
+/**
+ * Registers the data-exposure cases.
+ * @returns {void} Nothing.
+ */
+function controlAffordanceCases(): void {
+  it('renders no in-field clear control', rendersNoInFieldClearControl);
+  it('measures every entry from its declared width', measuresEveryEntryFromItsDeclaredWidth);
+  it('keeps each entry label whole beside its field', keepsEachEntryLabelWholeBesideItsField);
+  it('separates the entry actions from the entry field', separatesTheEntryActionsFromTheEntryField);
+  it(
+    "emphasises the screen's own submit and nothing else",
+    emphasisesTheScreensOwnSubmitAndNothingElse,
+  );
+  it(
+    'offers every row as a pointer and keyboard target',
+    offersEveryRowAsAPointerAndKeyboardTarget,
+  );
 }
 
 /**
@@ -1718,3 +2968,4 @@ describe('card list message fidelity', messageFidelityCases);
 describe('card list attention identifiers', attentionIdentifierCases);
 describe('card list selection and navigation', selectionCases);
 describe('card list data exposure', dataExposureCases);
+describe('card list control affordances', controlAffordanceCases);

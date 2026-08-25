@@ -63,7 +63,13 @@
  * on one spelling of the code.
  */
 
-import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import {
+  getApiClient,
+  keysetPagingMembers,
+  requestPath,
+  requireWithinPublishedWidths,
+  withoutConcurrentDuplicate,
+} from './client';
 import type {
   ContractOperation,
   DateEvaluationResult,
@@ -352,6 +358,8 @@ export async function listTransactionTypes(
  * Creates one transaction type.
  * @param {TransactionTypeCreateRequest} request - The code and description.
  * @returns {Promise<TransactionType>} The created type, carrying its initial version.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `TransactionTypeCreateRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
  *   HTTP 409 when the code already exists.
  */
@@ -360,7 +368,7 @@ export async function createTransactionType(
 ): Promise<TransactionType> {
   const response = await getApiClient().post<TransactionType>(
     requestPath(CREATE_TRANSACTION_TYPE),
-    request,
+    requireWithinPublishedWidths('TransactionTypeCreateRequest', request),
   );
   return response.data;
 }
@@ -384,6 +392,8 @@ export async function getTransactionType(typeCd: string): Promise<TransactionTyp
  * @param {string} typeCd - The two-character type code.
  * @param {TransactionTypeReplaceRequest} request - The new description and the version last read.
  * @returns {Promise<TransactionType>} The type as stored after the change, with its new version.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `TransactionTypeReplaceRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
  *   HTTP 404 when no such type exists and 409 when the version supplied is no longer current.
  */
@@ -393,7 +403,11 @@ export async function replaceTransactionType(
 ): Promise<TransactionType> {
   const response = await getApiClient().put<TransactionType>(
     requestPath(REPLACE_TRANSACTION_TYPE, { typeCd }),
-    request,
+    // Assumptions: the description is bounded at fifty here and at one hundred on a transaction
+    //   capture, which is why the guard is keyed by schema rather than by member name -- a table keyed
+    //   on `description` alone would have to choose one of the two and would refuse valid input for the
+    //   other.
+    requireWithinPublishedWidths('TransactionTypeReplaceRequest', request),
   );
   return response.data;
 }
@@ -414,7 +428,21 @@ export async function replaceTransactionType(
  *   HTTP 404 when no such type exists and **409 when categories still reference it**.
  */
 export async function deleteTransactionType(typeCd: string): Promise<void> {
-  await getApiClient().delete<void>(requestPath(DELETE_TRANSACTION_TYPE, { typeCd }));
+  const target = requestPath(DELETE_TRANSACTION_TYPE, { typeCd });
+  // Assumptions: guarded on the same terms as the user deletion, and for the same reason -- a repeated
+  //   confirmation of one deletion is never two deletions. Here the second attempt would also answer
+  //   404, so without the guard an operator who pressed twice would see the row vanish and then be told
+  //   it does not exist, which reads as a failure of the deletion that in fact succeeded.
+  await withoutConcurrentDuplicate(
+    `DELETE ${target}`,
+    /**
+     * Issues the deletion.
+     * @returns {Promise<void>} Nothing; the operation answers 204 with no body.
+     */
+    async (): Promise<void> => {
+      await getApiClient().delete<void>(target);
+    },
+  );
 }
 
 /**
@@ -435,6 +463,8 @@ export async function listTransactionCategories(
  * Creates one transaction category beneath an existing type.
  * @param {TransactionCategoryCreateRequest} request - The type code, category code and description.
  * @returns {Promise<TransactionCategory>} The created category, carrying its initial version.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `TransactionCategoryCreateRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
  *   HTTP 409 when the pair already exists or the type does not.
  */
@@ -443,7 +473,7 @@ export async function createTransactionCategory(
 ): Promise<TransactionCategory> {
   const response = await getApiClient().post<TransactionCategory>(
     requestPath(CREATE_TRANSACTION_CATEGORY),
-    request,
+    requireWithinPublishedWidths('TransactionCategoryCreateRequest', request),
   );
   return response.data;
 }
@@ -472,6 +502,8 @@ export async function getTransactionCategory(
  * @param {string} catCd - The four-character category code.
  * @param {TransactionCategoryReplaceRequest} request - The new description and the version last read.
  * @returns {Promise<TransactionCategory>} The category as stored after the change.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `TransactionCategoryReplaceRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
  *   HTTP 404 when no such category exists and 409 when the version supplied is no longer current.
  */
@@ -482,7 +514,7 @@ export async function replaceTransactionCategory(
 ): Promise<TransactionCategory> {
   const response = await getApiClient().put<TransactionCategory>(
     requestPath(REPLACE_TRANSACTION_CATEGORY, { typeCd, catCd }),
-    request,
+    requireWithinPublishedWidths('TransactionCategoryReplaceRequest', request),
   );
   return response.data;
 }
@@ -496,7 +528,17 @@ export async function replaceTransactionCategory(
  *   HTTP 404 when no such category exists.
  */
 export async function deleteTransactionCategory(typeCd: string, catCd: string): Promise<void> {
-  await getApiClient().delete<void>(requestPath(DELETE_TRANSACTION_CATEGORY, { typeCd, catCd }));
+  const target = requestPath(DELETE_TRANSACTION_CATEGORY, { typeCd, catCd });
+  await withoutConcurrentDuplicate(
+    `DELETE ${target}`,
+    /**
+     * Issues the deletion.
+     * @returns {Promise<void>} Nothing; the operation answers 204 with no body.
+     */
+    async (): Promise<void> => {
+      await getApiClient().delete<void>(target);
+    },
+  );
 }
 
 /**
@@ -729,12 +771,26 @@ export async function evaluateDate(date: string, mask?: string): Promise<DateEva
  * @param {MaintenanceActionBatchRequest} request - The entries to apply.
  * @returns {Promise<MaintenanceActionBatchResponse>} One outcome per entry, and the aggregate return
  *   code: 0 when every entry applied, 4 when at least one matched nothing.
+ * @throws {RangeError} If any entry carries a value longer than the width
+ *   `MaintenanceAction` publishes for it, in which case the whole batch is refused and nothing is sent.
  * @throws {Error} The normalised `ApiRequestError` from `./client` if the request fails, including
  *   HTTP 400 when an entry is malformed.
  */
 export async function applyReferenceMaintenanceActions(
   request: MaintenanceActionBatchRequest,
 ): Promise<MaintenanceActionBatchResponse> {
+  // Assumptions: the bound-check is applied per ENTRY and not to the request, because the request
+  //   carries nothing but the array -- the values that have widths are one level down, and
+  //   `requireWithinPublishedWidths` deliberately does not descend. The loop is here rather than inside
+  //   that helper for the reason its own note records: this is the only nested request shape in any of
+  //   the seven contracts, so the traversal is visible at the one call site that needs it.
+  // Assumptions: the whole batch is refused when any entry is over-long, before anything is sent. The
+  //   batch is not all-or-nothing at the SERVICE -- it keeps the entries that applied -- so dispatching
+  //   a batch with one unstorable entry would apply the rest and leave the caller to work out which,
+  //   whereas refusing locally leaves nothing applied and names the entry that is wrong.
+  for (const action of request.actions) {
+    requireWithinPublishedWidths('MaintenanceAction', action);
+  }
   const response = await getApiClient().post<MaintenanceActionBatchResponse>(
     requestPath(APPLY_REFERENCE_MAINTENANCE_ACTIONS),
     request,

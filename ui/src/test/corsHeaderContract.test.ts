@@ -86,7 +86,17 @@ const REQUEST_HEADER_SOURCES: readonly HeaderSource[] = [
   { file: join(UI_ROOT, 'src', 'api', 'client.ts'), constant: 'AUTHORIZATION_HEADER' },
   { file: join(UI_ROOT, 'src', 'api', 'client.ts'), constant: 'DEFAULT_CORRELATION_HEADER' },
   { file: join(UI_ROOT, 'src', 'api', 'accounts.ts'), constant: 'PRECONDITION_HEADER' },
-  { file: join(UI_ROOT, 'src', 'api', 'reporting.ts'), constant: 'IDEMPOTENCY_KEY_HEADER' },
+  /*
+   * WHY : Refactoring Rationale: this entry named `reporting.ts` until the constant moved to
+   *       `client.ts`, where the response interceptor now reads it to decide whether a failed request
+   *       is repeatable -- a request that carried an idempotency key may be retried, one that did not
+   *       may not. The HEADER NAME is unchanged and this file's assertion is unchanged; what changed is
+   *       which module declares it, and the inventory reads a DECLARATION rather than an import, so it
+   *       had to follow. Leaving it pointed at `reporting.ts` would have failed with "declares no
+   *       string constant", which is the inventory refusing to guess rather than a header going
+   *       unchecked.
+   */
+  { file: join(UI_ROOT, 'src', 'api', 'client.ts'), constant: 'IDEMPOTENCY_KEY_HEADER' },
 ];
 
 /** Header names this client READS from a response, paired with the constant that declares each. */

@@ -322,6 +322,21 @@ async function refusesAnEditWithNoRevision(): Promise<void> {
   expect(dispatchedRequests()).toHaveLength(0);
 }
 
+/**
+ * Asserts an edit whose revision is present but blank is refused locally too.
+ *
+ * ⚠️ Assumptions: a tag of one space is the case an empty-string check misses, and it is the case that
+ * MATTERS -- the service's own test is `expectedRevision.isBlank()`, so a blank tag is accepted by the
+ * framework's required-header check, reaches the business rule, and is answered with the same
+ * changed-record conflict an outdated token raises. Refusing it locally is what keeps the two tests from
+ * disagreeing about the same string; the assertion that nothing was dispatched is the whole claim.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function refusesAnEditWhoseRevisionIsBlank(): Promise<void> {
+  await expect(updateAccount(ACCOUNT_EDIT, '   ')).rejects.toThrow(RangeError);
+  expect(dispatchedRequests(), 'a blank precondition never reaches the transport').toHaveLength(0);
+}
+
 /** Asserts the cross-reference browse sends the identifier in the body and the cursor in the query. */
 async function browsesCrossReferencesByKey(): Promise<void> {
   answerWith(pageOf([XREF_ROW], true));
@@ -479,6 +494,7 @@ function accountClientBehaviour(): void {
   it('refuses a malformed identifier locally', refusesAMalformedIdentifierLocally);
   it('submits an edit under its precondition', submitsAnEditUnderItsPrecondition);
   it('refuses an edit with no revision', refusesAnEditWithNoRevision);
+  it('refuses an edit whose revision is blank', refusesAnEditWhoseRevisionIsBlank);
   it('browses cross-references by key', browsesCrossReferencesByKey);
   it(
     'reads the opening cross-reference page without paging',

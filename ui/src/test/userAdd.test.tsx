@@ -125,7 +125,8 @@ const {
 } = await import('../screens/userAdd');
 const { ApiRequestError } = await import('../api/client');
 const { AppShell } = await import('../layout/AppShell');
-const { PF_KEY_BAR_REGION_LABEL, UNIFORM_PF_KEY_LABELS } = await import('../layout/PfKeyBar');
+const { PF_KEY_BAR_REGION_LABEL, PRIMARY_ACTION_AIDS, UNIFORM_PF_KEY_LABELS } =
+  await import('../layout/PfKeyBar');
 const { MESSAGE_BAND_TEST_ID } = await import('../layout/MessageBand');
 const { USER_ADD_PATH } = await import('../router');
 const { RequireAdmin, SIGN_ON_ROUTE } = await import('../routes/guards');
@@ -138,7 +139,7 @@ const { CARDDEMO_ADMIN_GROUP, CARDDEMO_USER_GROUP } = await import('../hooks/use
  *   React and antd. Making them dynamic would suggest a dependency edge that does not exist and would
  *   put four more names behind a `const` a reader has to scroll past.
  */
-import { fieldErrorId } from '../layout/fieldHelp';
+import { BUSY_ANNOUNCEMENT_TEST_ID, fieldErrorId } from '../layout/fieldHelp';
 import {
   ACCESS_DENIED_ADMIN_ONLY,
   ADMIN_MENU_OPTIONS,
@@ -150,6 +151,7 @@ import {
   MESSAGE_BAND_BY_MAPSET,
   PROGRAM_MESSAGES,
   PROGRAM_MESSAGE_SOURCES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   SHARED_MESSAGE_SOURCES,
   USER_ADD_CAPTION,
@@ -635,6 +637,201 @@ function everyControlDeclaresItsCopybookWidth(): void {
   expect(USER_ADD_FIELD_WIDTHS.userType).toBe(1);
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * ⚠️ Declared width measured in the record's own units, and sized to it
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * A composed accent: ONE code point, one UTF-16 unit, TWO UTF-8 bytes.
+ *
+ * Assumptions: this specimen exists because it is the case where the three readings of "width" that a
+ * `PIC X(n)` field could have diverge in the direction that LOSES data -- a value `maxLength` admits
+ * and the twenty-byte record cannot hold.
+ */
+const COMPOSED_ACCENT = '\u00E9';
+
+/** The same accent decomposed: TWO code points, THREE bytes, and identical on the glass. */
+const DECOMPOSED_ACCENT = 'e\u0301';
+
+/** A party popper: ONE code point, TWO UTF-16 units, FOUR UTF-8 bytes. */
+const ASTRAL_CHARACTER = '\u{1F389}';
+
+/**
+ * Pastes one value into one control, which is how an over-capacity entry actually arrives.
+ *
+ * ⚠️ Assumptions: a PASTE rather than a run of keystrokes, and the difference is what the cases below
+ * measure. Typing reaches the clamp once per character, so the last admitted character is the only one
+ * the clamp ever has to drop; a paste hands it the whole value at once, which is the arrival the
+ * measured defect was reported from and the one where a naive implementation could split a surrogate
+ * pair. Every specimen below is within the control's `maxLength` counted in UTF-16 units, so no case
+ * depends on how the test DOM enforces that attribute -- only on what the screen does with what it is
+ * given.
+ * @param {UserEvent} user - The interaction driver the render returned.
+ * @param {string} label - Label of the control to paste into.
+ * @param {string} value - The value to paste.
+ * @returns {Promise<void>} Resolves once the paste has been applied.
+ */
+async function pasteInto(user: UserEvent, label: string, value: string): Promise<void> {
+  await user.click(control(label));
+  await user.paste(value);
+}
+
+/**
+ * A value that exactly fills a declared width is admitted whole.
+ *
+ * Purpose: establish the other side of the clamp. A measure that refused a value AT its declared width
+ * would be the same defect in the opposite direction, and a twenty-character surname is the ordinary
+ * case rather than an edge one.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function admitsAValueThatFillsItsDeclaredWidth(): Promise<void> {
+  const user = renderUserAdd();
+  const filled = 'A'.repeat(USER_ADD_FIELD_WIDTHS.lastName);
+
+  await pasteInto(user, USER_ADD_FIELD_LABELS.lastName, filled);
+
+  expect(
+    control(USER_ADD_FIELD_LABELS.lastName),
+    'a value at the declared width must survive intact in all three readings of that width',
+  ).toHaveValue(filled);
+}
+
+/**
+ * Capacity is measured in the record's BYTES, not in the control's UTF-16 code units.
+ *
+ * ⚠️ Purpose: this is the defect. `SEC-USR-LNAME PIC X(20)` (`app/cpy/CSUSR01Y.cpy` L20) is twenty
+ * BYTES on the record, and `maxLength` counts UTF-16 code units -- so twenty composed accents are
+ * twenty code units the attribute admits and forty bytes the record cannot hold. Before the clamp the
+ * control accepted all twenty and the overflow was discovered by whatever refused it downstream.
+ *
+ * Assumptions: the expected survivor count is COMPUTED from the specimen's own byte cost rather than
+ * written as ten, so the case states the rule instead of a number and would still be right if the
+ * declared width changed.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function measuresCapacityInBytesRatherThanCodeUnits(): Promise<void> {
+  const user = renderUserAdd();
+  const declared = USER_ADD_FIELD_WIDTHS.lastName;
+  const bytesPerCharacter = new TextEncoder().encode(COMPOSED_ACCENT).length;
+  const admitted = Math.floor(declared / bytesPerCharacter);
+
+  expect(
+    COMPOSED_ACCENT.repeat(declared).length,
+    'the specimen must be one the maxLength attribute admits, or the case proves nothing',
+  ).toBeLessThanOrEqual(declared);
+
+  await pasteInto(user, USER_ADD_FIELD_LABELS.lastName, COMPOSED_ACCENT.repeat(declared));
+
+  expect(
+    control(USER_ADD_FIELD_LABELS.lastName),
+    'a twenty-byte field must hold ten two-byte characters and not twenty of them',
+  ).toHaveValue(COMPOSED_ACCENT.repeat(admitted));
+}
+
+/**
+ * An astral character is kept or dropped WHOLE, never cut into a lone surrogate.
+ *
+ * ⚠️ Purpose: cover the failure a byte-arithmetic implementation would produce. Each specimen is one
+ * code point, two UTF-16 units and four bytes, so a clamp that walked UTF-16 units could stop halfway
+ * through one and leave an unpaired surrogate -- a value no byte measure can make sense of and one the
+ * transport would encode as a replacement character.
+ *
+ * Assumptions: the survivors are counted as CODE POINTS through the string iterator, because
+ * `String.prototype.length` is the very measure under test and asserting with it would beg the question.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function keepsAnAstralCharacterWhole(): Promise<void> {
+  const user = renderUserAdd();
+  const declared = USER_ADD_FIELD_WIDTHS.firstName;
+  const bytesPerCharacter = new TextEncoder().encode(ASTRAL_CHARACTER).length;
+  const admitted = Math.floor(declared / bytesPerCharacter);
+  const pasted = ASTRAL_CHARACTER.repeat(admitted + 3);
+
+  expect(
+    pasted.length,
+    'the specimen must be one the maxLength attribute admits, or the case proves nothing',
+  ).toBeLessThanOrEqual(declared);
+
+  await pasteInto(user, USER_ADD_FIELD_LABELS.firstName, pasted);
+
+  /*
+   * WHY : Assumptions: the value is read from the DOM PROPERTY rather than from the attribute, which is
+   *       the idiom `src/test/cardList.test.tsx` L1593 already uses for the same need. A controlled
+   *       input's authoritative value is its property; the attribute is only the initial one, so reading
+   *       it would tie this case to a rendering detail rather than to what the operator can see.
+   */
+  const held = (control(USER_ADD_FIELD_LABELS.firstName) as HTMLInputElement).value;
+
+  expect([...held], 'the field must hold whole characters up to its byte capacity').toHaveLength(
+    admitted,
+  );
+  expect(held, 'and every one of them must be the character that was pasted').toBe(
+    ASTRAL_CHARACTER.repeat(admitted),
+  );
+}
+
+/**
+ * Two spellings of one accent converge, so a name has one form on the wire.
+ *
+ * ⚠️ Purpose: the composed and decomposed spellings are indistinguishable on the glass and differ byte
+ * for byte, which on a system whose keys are compared as characters means two records an operator
+ * cannot tell apart and a search that finds one of them. Composing at the point the value is captured
+ * removes the ambiguity at the last boundary where it can still be removed.
+ *
+ * Assumptions: NFC and not NFD, for the reason `normaliseForWire` records -- it is the shorter form for
+ * Latin text, so it is the form that fits the most letters into a declared width.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function normalisesTwoSpellingsOfOneAccent(): Promise<void> {
+  const user = renderUserAdd();
+
+  expect(
+    [...DECOMPOSED_ACCENT],
+    'the specimen must genuinely be the longer spelling, or nothing is being normalised',
+  ).toHaveLength(2);
+
+  await pasteInto(user, USER_ADD_FIELD_LABELS.firstName, DECOMPOSED_ACCENT);
+
+  expect(
+    control(USER_ADD_FIELD_LABELS.firstName),
+    'the captured value must carry the one canonical spelling',
+  ).toHaveValue(COMPOSED_ACCENT);
+}
+
+/**
+ * Every control is sized to the character width its copybook declares.
+ *
+ * ⚠️ Purpose: regress the measured geometry. An eight-character identifier input rendered 1172 pixels
+ * wide and the blank-field asterisk this screen paints at the field's right-hand edge landed at x≈1211,
+ * roughly 1150 pixels from the value it qualifies -- and the one-position user type rendered at that
+ * same full width, so nothing about a control said how much it would take.
+ *
+ * ⚠️ Assumptions: the DECLARATION is asserted and not a rendered pixel width, because the test DOM
+ * performs no layout -- every box in it measures zero, so a width assertion would pass on the broken
+ * value too. What can be checked here is that each control carries a maximum measure stated in the
+ * field's own character units. The pixel outcome was measured in a browser; this case exists to stop the
+ * declaration being removed.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function sizesEveryControlToItsDeclaredWidth(): void {
+  renderUserAdd();
+
+  for (const entry of CONTROLS_UNDER_TEST) {
+    const measure = control(entry.label).style.maxInlineSize;
+
+    expect(measure, `${entry.label} must declare a maximum measure of its own`).not.toBe('');
+    expect(measure, `${entry.label} must be capped at its own declared width`).toContain(
+      `${String(entry.declaredWidth)}ch`,
+    );
+    expect(
+      control(entry.label).style.inlineSize,
+      `${entry.label} must still shrink inside a narrow viewport`,
+    ).toBe('100%');
+  }
+}
+
 /**
  * Exactly one control takes the initial cursor, matching the mapset's single `IC` operand.
  * @returns {void} Nothing; the assertions carry the outcome.
@@ -938,6 +1135,50 @@ async function theCredentialSentenceIsCataloguedAndUnemitted(): Promise<void> {
 }
 
 /**
+ * The handover surface appears BELOW the form, so nothing already on the glass moves when it arrives.
+ *
+ * ⚠️ Purpose: regress a measured layout shift. Rendered between the caption and the form, this surface's
+ * insertion moved everything below it by roughly 150 pixels -- and everything below it is the whole
+ * form, including the first-name control that the same turn has just placed the cursor on
+ * (`app/cbl/COUSR01C.cbl` L289 moves `-1` into `FNAMEL`). The one control the operator was about to type
+ * into slid out from under the cursor at the moment the write completed. Rendered last, the surface
+ * grows the column downward and no element already painted changes position.
+ *
+ * ⚠️ Assumptions: DOCUMENT ORDER is what is asserted, not a pixel offset, and this is the strongest
+ * available check rather than a weaker substitute for one. The test DOM performs no layout, so no
+ * position can be measured in it; but a surface that follows every other element in the flow cannot
+ * displace any of them, whatever those positions turn out to be. The pixel figure came from a browser.
+ *
+ * Assumptions: the cursor is asserted too, because the two halves are what make the shift harmful rather
+ * than merely untidy -- a surface inserted above a control nothing is focused on would move a control
+ * the operator is not using. L289 is why one always is.
+ * @returns {Promise<void>} Resolves once the order and the cursor have been asserted.
+ */
+async function theHandoverSurfaceDisplacesNothingAlreadyPainted(): Promise<void> {
+  createUserMock.mockResolvedValueOnce(CREATED_USER);
+  const user = renderUserAdd();
+  await typeAValidUser(user, 'A');
+  await user.keyboard('{Enter}');
+
+  const handover = await screen.findByTestId(USER_ADD_CREDENTIAL_TEST_ID);
+  const form = control(USER_ADD_FIELD_LABELS.firstName).closest('form');
+
+  expect(
+    form,
+    'the four controls must sit inside a form for the order to mean anything',
+  ).not.toBeNull();
+  expect(
+    Boolean((form?.compareDocumentPosition(handover) ?? 0) & Node.DOCUMENT_POSITION_FOLLOWING),
+    'the handover surface must follow the form, so its arrival displaces no control',
+  ).toBe(true);
+
+  expect(
+    control(USER_ADD_FIELD_LABELS.firstName),
+    'and the cursor the success path places is on a control the surface cannot have moved',
+  ).toHaveFocus();
+}
+
+/**
  * The service-generated credential is handed over once and retained nowhere.
  * @returns {Promise<void>} Resolves once the handover, its contents and its dismissal are observed.
  */
@@ -1136,6 +1377,83 @@ async function aServiceFieldRefusalMarksOnlyTheNamedControl(): Promise<void> {
     }
     expect(control(entry.label)).not.toHaveAttribute('aria-invalid', 'true');
   }
+}
+
+/**
+ * A refusal naming TWO controls marks both, describes each with its own sentence, and focuses the first.
+ *
+ * ⚠️ Purpose: this screen and `/users/:id/edit` are the reference implementation of the conforming-400
+ * treatment for the whole delivery -- other surfaces are being brought up to match them -- so the
+ * multi-offender case is pinned here rather than assumed to follow from the single-offender one. It does
+ * not follow: a screen that marked the array's FIRST entry only, or that pointed both controls at one
+ * shared help element, would satisfy every assertion in the single-offender case above and still lose
+ * one of the two refusals.
+ *
+ * ⚠️ Assumptions: focus lands on the FIRST entry in the array and not on the last one applied, which is
+ * this screen's own published rule -- `ui/src/screens/userAdd/index.tsx` takes `fieldErrors[0]` as the
+ * control to focus. Order therefore has to be observable, so the two refusals are supplied in an order
+ * that is NOT the order the four controls are painted in: the array names the last name first. A screen
+ * that focused by field position rather than by array position would pass an in-order fixture and fail
+ * this one.
+ * @returns {Promise<void>} Resolves once both marks, both descriptions and the cursor are observed.
+ */
+async function aRefusalNamingTwoControlsMarksBoth(): Promise<void> {
+  createUserMock.mockRejectedValueOnce(
+    failureCarrying(
+      apiError({
+        message: SHARED_MESSAGES.LAST_NAME_CAN_NOT_BE_EMPTY,
+        fieldErrors: [
+          fieldError('lastName', SHARED_MESSAGES.LAST_NAME_CAN_NOT_BE_EMPTY),
+          fieldError('firstName', SHARED_MESSAGES.FIRST_NAME_CAN_NOT_BE_EMPTY),
+        ],
+      }),
+    ),
+  );
+  const user = renderUserAdd();
+  await typeAValidUser(user, 'U');
+  await user.keyboard('{Enter}');
+
+  const band = await screen.findByTestId(MESSAGE_BAND_TEST_ID);
+  expect(band).toHaveTextContent(SHARED_MESSAGES.LAST_NAME_CAN_NOT_BE_EMPTY);
+
+  const lastName = control(USER_ADD_FIELD_LABELS.lastName);
+  const firstName = control(USER_ADD_FIELD_LABELS.firstName);
+
+  expect(lastName).toHaveAttribute('aria-invalid', 'true');
+  expect(firstName).toHaveAttribute('aria-invalid', 'true');
+  expect(lastName, 'the cursor goes to the refusal the array names first').toHaveFocus();
+
+  /*
+   * WHY : ⚠️ Assumptions: each control is asserted to carry its OWN sentence, reached through its OWN
+   *       `aria-describedby`, and the two identifiers are asserted DISTINCT. That last assertion is the
+   *       one that catches the plausible failure: a screen that bound both controls to a single help
+   *       element would announce the first-name refusal on the last-name control, and every other
+   *       assertion here would still hold. `app/cpy/CSSETATY.cpy` L17-L26 is templated per field for
+   *       exactly this reason -- one substitution per control, never one shared statement.
+   */
+  const lastNameHelpId = fieldErrorId(lastName.id);
+  const firstNameHelpId = fieldErrorId(firstName.id);
+
+  expect(lastNameHelpId).not.toBe(firstNameHelpId);
+  expect(lastName.getAttribute('aria-describedby') ?? '').toContain(lastNameHelpId);
+  expect(firstName.getAttribute('aria-describedby') ?? '').toContain(firstNameHelpId);
+  expect(document.getElementById(lastNameHelpId)).toHaveTextContent(
+    SHARED_MESSAGES.LAST_NAME_CAN_NOT_BE_EMPTY,
+  );
+  expect(document.getElementById(firstNameHelpId)).toHaveTextContent(
+    SHARED_MESSAGES.FIRST_NAME_CAN_NOT_BE_EMPTY,
+  );
+
+  /*
+   * WHY : Assumptions: the two controls the array does not name stay clean, so the marking is still
+   *       per-field when more than one field is named. A screen that switched to marking everything once
+   *       a second refusal arrived would satisfy the positive half of this case entirely.
+   */
+  expect(control(USER_ADD_FIELD_LABELS.userId)).not.toHaveAttribute('aria-invalid', 'true');
+  expect(control(USER_ADD_FIELD_LABELS.userType.trim())).not.toHaveAttribute(
+    'aria-invalid',
+    'true',
+  );
 }
 
 /**
@@ -1489,20 +1807,36 @@ async function theAdvertisedExitKeyIsPaintedAndRefused(): Promise<void> {
 }
 
 /**
- * Enter takes the primary emphasis and the other three legend controls take the default one.
+ * ⚠️ Enter takes the primary emphasis because it WRITES, and the other three take the default one.
+ *
+ * ⚠️ Refactoring Rationale: the outcome asserted here is unchanged and its GROUND is not. The note that
+ * stood here credited `PRIMARY_ACTION_AIDS` -- the frozen attention-identifier list -- and observed that
+ * this screen registers no PFK05, so Enter came out emphasised. That reasoning is a coincidence rather
+ * than a rule: the same list paints `F5=Delete` on `app/bms/COUSR03.bms` L148 in benign primary blue,
+ * which is the measured defect the sibling screens were repaired for. The screen now declares that
+ * `ENTER=Add User` is `'mutating'` and that `F3=Back`, `F4=Clear` and `F12=Exit` are `'read-only'`, all
+ * four read off `app/bms/COUSR01.bms` L159, so the emphasis rests on what the keys do. This screen is
+ * the one place in the user group where the old rule and the new one agree, which is exactly why the
+ * ground has to be stated -- otherwise a reader would take the agreement as evidence for the list.
+ *
+ * Assumptions: emphasis is asserted through the design system's own class rather than through a colour,
+ * because AAP section 0.3.2 admits no literal colour value and the mapping it states is a
+ * component-level one: `type="primary"` for the committing key and `default` for the rest.
  * @returns {void} Nothing; the assertions carry the outcome.
  */
 function onlyEnterTakesThePrimaryEmphasis(): void {
   renderUserAdd();
 
   /*
-   * WHY : Assumptions: emphasis is asserted through the design system's own primary class rather than
-   *       through a colour, because AAP section 0.3.2 admits no literal colour value and the mapping it
-   *       states is a component-level one: `type="primary"` for the committing key and `default` for the
-   *       rest. `ui/src/layout/PfKeyBar.tsx` derives that from `PRIMARY_ACTION_AIDS`, which lists ENTER
-   *       and PFK05, and this screen registers no PFK05 -- so Enter is both the one control that writes
-   *       and the one control emphasised.
+   * WHY : ⚠️ Assumptions: the AID fallback is pinned UNCHANGED, and on this screen that pin carries a
+   *       different weight than on its siblings. Here the fallback and the declaration agree, so the
+   *       emphasis assertions below cannot by themselves tell which one produced the result. Pinning the
+   *       list is what records that the twenty screens which have declared nothing still render exactly
+   *       as they did, and it is what would fail if the fallback were quietly removed on the assumption
+   *       that every screen had been migrated.
    */
+  expect([...PRIMARY_ACTION_AIDS]).toStrictEqual(['ENTER', 'PFK05']);
+
   expect(legendControl(USER_ADD_KEY_LABELS.ENTER).className).toContain('ant-btn-primary');
 
   for (const label of [
@@ -1510,8 +1844,138 @@ function onlyEnterTakesThePrimaryEmphasis(): void {
     UNIFORM_PF_KEY_LABELS.PFK04,
     USER_ADD_KEY_LABELS.PFK12,
   ]) {
-    expect(legendControl(label).className).not.toContain('ant-btn-primary');
+    expect(legendControl(label).className, label).not.toContain('ant-btn-primary');
   }
+
+  /*
+   * WHY : ⚠️ Assumptions: the committing key is asserted NOT dangerous, and that is a classification
+   *       rather than an omission. `'mutating'` and `'destructive'` resolve to different paints on
+   *       purpose: creating a user is undone by deleting it from the sibling screen, so this key must
+   *       read as the screen's primary action and not as an irreversible one. Asserting the absence is
+   *       what keeps a well-meant escalation to `'destructive'` from passing here, and it is the
+   *       distinction that lets `F5=Delete` on `app/bms/COUSR03.bms` L148 look different from this.
+   */
+  expect(legendControl(USER_ADD_KEY_LABELS.ENTER).className).not.toContain('ant-btn-dangerous');
+}
+
+/**
+ * ⚠️ Every key pressed while the create is outstanding is declined without being WITHDRAWN.
+ *
+ * ⚠️ Refactoring Rationale: this screen declines all four keys for the duration of its own write, and
+ * the reason is recorded on the handler map: a 3270 keyboard was LOCKED between the send and the reply,
+ * so PF3 leaving or PF4 blanking the form mid-write would resolve the turn the operator's way while the
+ * service resolved it its own. That DECISION is preserved exactly. What changed is the channel: the four
+ * entries report `busy` where they reported `disabled`, so the controls stay present, enabled, focusable
+ * and named and wear the design system's in-flight affordance instead of greying out. A withdrawn
+ * control tells an operator the key does not work; a busy one tells them it has not answered yet.
+ *
+ * ⚠️ Assumptions: FIVE properties are asserted, because the finding a busy channel answers is that a
+ * declined key must not become an unavailable one -- enabled, named, announced, dispatching nothing, and
+ * saying nothing. A control that went `disabled` would satisfy the fourth and fifth alone.
+ *
+ * Assumptions: the write is held open with a promise this case resolves itself rather than with a timer,
+ * so the in-flight window is bounded by the assertions inside it instead of by a duration.
+ * @returns {Promise<void>} Resolves once the held create has been released and its surface has landed.
+ */
+async function declinesEveryKeyDuringTheWriteWithoutWithdrawingIt(): Promise<void> {
+  /**
+   * Placeholder resolver, replaced the moment the held promise hands over its own.
+   *
+   * Assumptions: an initialiser is supplied rather than declaring the binding possibly-undefined,
+   * because the promise executor runs synchronously inside the constructor below and therefore always
+   * replaces it before any code can call it.
+   * @returns {void} Nothing; it is never the resolver that runs.
+   */
+  function releaseNothing(): void {
+    // Assumptions: an empty body is the whole implementation; see the doc block above.
+  }
+
+  let releaseCreate: (created: CreatedUserResponse) => void = releaseNothing;
+
+  createUserMock.mockReturnValueOnce(
+    new Promise<CreatedUserResponse>(
+      /**
+       * Captures the resolver so the case controls when the create lands.
+       * @param {(created: CreatedUserResponse) => void} resolve - The promise's own resolver.
+       * @returns {void} Nothing; the resolver is retained for later.
+       */
+      (resolve: (created: CreatedUserResponse) => void): void => {
+        releaseCreate = resolve;
+      },
+    ),
+  );
+
+  const user = renderUserAdd();
+  await typeAValidUser(user, 'A');
+  await user.keyboard('{Enter}');
+
+  await waitFor(
+    /**
+     * Waits until the create has been dispatched, so the window under test is genuinely open.
+     * @returns {void} Nothing; the assertion resolves the wait.
+     */
+    (): void => {
+      expect(createUserMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  const busyLabels: readonly string[] = [
+    USER_ADD_KEY_LABELS.ENTER,
+    USER_ADD_KEY_LABELS.PFK03,
+    UNIFORM_PF_KEY_LABELS.PFK04,
+    USER_ADD_KEY_LABELS.PFK12,
+  ];
+
+  for (const label of busyLabels) {
+    const legend = legendControl(label);
+
+    /*
+     * WHY : ⚠️ Assumptions: the accessible name is read from the mapset-derived label rather than
+     *       retyped, so a busy render that RENAMED the control would fail here. The design system's bare
+     *       `loading` prop does exactly that -- it contributes the word "loading" to the name -- which is
+     *       why the bar's own affordance is asserted for rather than assumed harmless.
+     */
+    expect(legend, label).toBeEnabled();
+    expect(legend, label).toHaveAttribute('aria-busy', 'true');
+    expect(legend, label).toHaveAccessibleName(label);
+
+    legend.focus();
+    expect(legend, label).toHaveFocus();
+  }
+
+  await user.keyboard('{Enter}');
+
+  /*
+   * WHY : ⚠️ Assumptions: exactly ONE create exists, so the second press was declined rather than
+   *       dispatched; and the band carries no invalid-key sentence, so it was declined SILENTLY. Both
+   *       halves are load-bearing and neither alone would do: the first passes for a withdrawn key, the
+   *       second for a key that wrote twice. The silence is the faithful outcome -- during a locked turn
+   *       the terminal accepted nothing at all, so a refusal sentence would report a condition the
+   *       reference never reported.
+   */
+  expect(createUserMock).toHaveBeenCalledTimes(1);
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).not.toHaveTextContent(
+    INVALID_KEY_PRESSED.trim(),
+  );
+
+  /*
+   * WHY : ⚠️ Assumptions: the wait is ANNOUNCED as well as declined, and it is asserted from inside the
+   *       held window. An operator who cannot see the in-flight affordance has only this region, and a
+   *       screen that rendered the affordance without announcing anything would pass every assertion
+   *       above while telling a keyboard-only operator nothing -- which matters most here, where the
+   *       outstanding turn is the one that CREATES the account.
+   */
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  releaseCreate(CREATED_USER);
+  await screen.findByTestId(USER_ADD_CREDENTIAL_TEST_ID);
+
+  /*
+   * WHY : Assumptions: empty once the turn has landed, and still MOUNTED. A live region has to be in the
+   *       accessibility tree before its content changes for the first change to be announced, so
+   *       emptiness is what "no longer working" looks like and an unmounted region would be the defect.
+   */
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
 }
 
 /**
@@ -1657,6 +2121,14 @@ function userAddScreenCases(): void {
   afterEach(resetTransportAndStorage);
 
   it('declares every control at its copybook width', everyControlDeclaresItsCopybookWidth);
+  it('admits a value that fills its declared width', admitsAValueThatFillsItsDeclaredWidth);
+  it(
+    'measures capacity in bytes rather than code units',
+    measuresCapacityInBytesRatherThanCodeUnits,
+  );
+  it('keeps an astral character whole', keepsAnAstralCharacterWhole);
+  it('normalises two spellings of one accent', normalisesTwoSpellingsOfOneAccent);
+  it('sizes every control to its declared width', sizesEveryControlToItsDeclaredWidth);
   it('places the initial cursor on exactly one control', exactlyOneControlTakesTheInitialCursor);
   it('composes the form from design-system components', theScreenUsesDesignSystemComponents);
   it('records both declared message-band widths', theBandCarriesBothDeclaredWidths);
@@ -1677,8 +2149,13 @@ function userAddScreenCases(): void {
     theCredentialSentenceIsCataloguedAndUnemitted,
   );
   it('hands the generated credential over once', theGeneratedCredentialIsHandedOverOnce);
+  it(
+    'places the handover surface where its arrival displaces nothing',
+    theHandoverSurfaceDisplacesNothingAlreadyPainted,
+  );
   it('refuses a duplicate identifier verbatim', aDuplicateIdentifierIsRefusedVerbatim);
   it('marks only the control a refusal names', aServiceFieldRefusalMarksOnlyTheNamedControl);
+  it('marks both controls a two-field refusal names', aRefusalNamingTwoControlsMarksBoth);
   it('falls back to the catch-all sentence', anUnclassifiedRefusalUsesTheCatchAllSentence);
 
   for (const arm of BLANK_REFUSAL_CASCADE) {
@@ -1694,6 +2171,10 @@ function userAddScreenCases(): void {
   it('blanks every control on the clear key', theClearKeyBlanksEveryControl);
   it('paints and refuses the advertised exit key', theAdvertisedExitKeyIsPaintedAndRefused);
   it('emphasises only the committing key', onlyEnterTakesThePrimaryEmphasis);
+  it(
+    'declines every key during the write without withdrawing it',
+    declinesEveryKeyDuringTheWriteWithoutWithdrawingIt,
+  );
   it('admits only an administrator', theRouteAdmitsOnlyAnAdministrator);
   it('stands in for the second administrative option', theScreenIsTheSecondAdministrativeOption);
   it('renders no sensitive or internal value', noSensitiveOrInternalValueIsRendered);

@@ -81,9 +81,9 @@
 
 // WHY : see the first numbered divergence in the header block: `ui/tsconfig.json` declares no
 //       ambient test types, so these four symbols are imported rather than assumed.
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import type { UserEvent } from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   isConflictFailure,
@@ -94,6 +94,7 @@ import {
 import type { AccountUpdateResponse, AccountViewResponse, CustomerDetail } from '../api/accounts';
 import { ApiRequestError } from '../api/client';
 import type { ApiError, FieldError } from '../api/types';
+import { BLANK_FIELD_MARKER_CHARACTERS } from '../layout/fieldHelp';
 import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, PRIMARY_ACTION_AIDS } from '../layout/PfKeyBar';
 import {
@@ -109,14 +110,22 @@ import {
  *       the navigation helpers that also re-declare it.
  */
 import { ACCOUNT_UPDATE_PATH } from '../router';
+import { SECTION_HEADING_LEVEL } from '../layout/ScreenTitle';
 import {
   ACCOUNT_UPDATE_FIELD_LABELS_PAINTED,
   ACCOUNT_UPDATE_FIELD_WIDTHS,
+  ACCOUNT_UPDATE_HEADINGS,
   ACCOUNT_UPDATE_KEY_LABELS,
   ACCOUNT_UPDATE_PART_NAMES,
   ACCOUNT_UPDATE_STORED_STATE_LABEL,
+  ADDRESS_LINE_2_NAME,
   AccountUpdateScreen,
+  accountUpdateGridGutter,
+  clampToDeclaredWidth,
   fieldDomId,
+  groupCaptionDomId,
+  headlineForFieldErrors,
+  isAccountUpdateField,
 } from '../screens/accountUpdate';
 import type { AccountUpdateFieldName } from '../screens/accountUpdate';
 import { FIELD_ERROR_TOKENS } from '../theme/tokens';
@@ -170,6 +179,48 @@ const MESSAGES = STATUS_MESSAGES.COACTUPC;
  *       `app/cpy-bms/COACTUP.CPY` L60.
  */
 const ACCOUNT_ID = '00000000011';
+
+/*
+ * WHY : Assumptions: seven is the count a browser accessibility audit reported and the count the
+ *       mapset paints -- one caption over each of the four dates, the national identifier and both
+ *       telephone numbers. Naming it means the case fails if a group is added or removed rather than
+ *       silently checking six.
+ */
+
+/** Part groups on this screen, each one caption over two or three boxes. */
+const PART_GROUP_COUNT = 7;
+
+/*
+ * WHY : ⚠️ Assumptions: the surface is asserted as the design system's own custom-property REFERENCE
+ *       rather than as a resolved colour. An inline style holding a literal hue would satisfy a colour
+ *       assertion while having opted the control out of the theme, which is the failure the token
+ *       bridge exists to prevent -- so the reference is what proves the token was used.
+ * WHY : Assumptions: the digit-free token name needs no hyphenation beyond the word boundaries, so the
+ *       reference is written out here rather than derived, and the derivation helper this file's
+ *       sibling suite carries is not duplicated for one constant.
+ */
+
+/** The reference antd emits for the surface an unavailable control is painted on. */
+const UNAVAILABLE_SURFACE_REFERENCE = 'var(--ant-color-bg-container-disabled)';
+
+/** The seven painted captions, as the label map declares them, punctuation included. */
+const PAINTED_CAPTIONS: readonly string[] = [
+  ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.openDate,
+  ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.expirationDate,
+  ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.reissueDate,
+  ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.dateOfBirth,
+  ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.ssn,
+  ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.phone1,
+  ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.phone2,
+];
+
+/*
+ * WHY : Assumptions: the status is written as a named constant rather than as the number, matching
+ *       how this file already names the conflict status at its own refusal sites.
+ */
+
+/** HTTP status a validation refusal carrying field errors arrives with. */
+const BAD_REQUEST_STATUS = 400;
 
 /**
  * The concurrency token a read hands back and a write must quote.
@@ -589,6 +640,30 @@ function control(field: AccountUpdateFieldName): HTMLElement {
 }
 
 /**
+ * Returns the element one field's control is SIZED on.
+ *
+ * WHY : ⚠️ Assumptions: that is not always the input itself. The one marker-bearing field carries an
+ *       antd `suffix` in every state -- deliberately, so the affix never appears or disappears under a
+ *       focused cursor -- and an affix changes the component's rendered root from a bare `input` to a
+ *       wrapping element, which is where the design system then puts `style`. The wrapper is also the
+ *       correct box to size, because it is the one with the visible border.
+ * WHY : Assumptions: the input is preferred and the wrapper is the fallback, rather than the wrapper
+ *       being looked for first, so the 42 fields without an affix are asserted on the element they
+ *       actually carry and a future affix on any of them is picked up without editing this helper.
+ * @param {AccountUpdateFieldName} field - Form member whose sized box is wanted.
+ * @returns {HTMLElement} The input, or the affix wrapper that holds its size.
+ */
+function sizedBox(field: AccountUpdateFieldName): HTMLElement {
+  const input = control(field);
+
+  if ((input.getAttribute('style') ?? '') !== '') {
+    return input;
+  }
+
+  return input.closest<HTMLElement>('.ant-input-affix-wrapper') ?? input;
+}
+
+/**
  * Renders the screen inside the real shared frame.
  *
  * WHY : ⚠️ Assumptions: the shell is MANDATORY, not decoration. The screen publishes its
@@ -652,6 +727,33 @@ function labelOfLegendControl(button: HTMLButtonElement): string {
  */
 function legendLabels(): readonly string[] {
   return Array.from(legendRegion().querySelectorAll('button')).map(labelOfLegendControl);
+}
+
+/**
+ * Reads the legend control painting one label.
+ *
+ * WHY : Assumptions: the control is located by its painted label rather than by position, because the
+ *       legend's contents are state-dependent -- PF5 is admitted only once changes validate -- so an
+ *       index would name a different key on a different turn.
+ * @param {string} label - The painted label, exactly as the legend renders it.
+ * @returns {HTMLButtonElement} The control painting that label.
+ * @throws {Error} When the legend paints no such label, which is a failure and not an empty result.
+ */
+function legendControlFor(label: string): HTMLButtonElement {
+  const found = Array.from(legendRegion().querySelectorAll('button')).find(
+    /**
+     * Tests one legend control for the wanted label.
+     * @param {HTMLButtonElement} candidate - The control under test.
+     * @returns {boolean} `true` when it paints the wanted label.
+     */
+    (candidate: HTMLButtonElement): boolean => labelOfLegendControl(candidate) === label,
+  );
+
+  if (found === undefined) {
+    throw new Error(`the legend paints no control labelled ${label}`);
+  }
+
+  return found;
 }
 
 /**
@@ -1374,6 +1476,15 @@ async function validationAsksForTheSaveKeyRatherThanCommitting(): Promise<void> 
  *       line. This is asserted separately from the case above because the two fail differently:
  *       one would write on the first key, the other on the second, and an operator pressing
  *       ENTER twice out of habit is the likelier of the two.
+ * WHY : ⚠️ Assumptions: the VALIDATION spy's call count is asserted as well, and it is asserted to be
+ *       unchanged. A responsive review reported this turn as a defect on the ground that it issued no
+ *       request; it issues none because the reference issues none --
+ *       `WHEN ACUP-CHANGES-OK-NOT-CONFIRMED ... CONTINUE` at `app/cbl/COACTUPC.cbl` L2618 to L2620 is
+ *       an arm of its own, distinct from the one above it that additionally requires PF05, so Enter on
+ *       this turn re-sends the same protected screen. Pinning the count here is what keeps a later
+ *       change from "fixing" the report by adding a round trip the reference does not make; what the
+ *       review was actually seeing is that the restated prompt sat below the fold, which is a band
+ *       placement matter and is addressed as one.
  * @returns {Promise<void>} Resolves once the second key has been checked.
  */
 async function aSecondProcessingKeyAfterValidationCommitsNothing(): Promise<void> {
@@ -1387,6 +1498,7 @@ async function aSecondProcessingKeyAfterValidationCommitsNothing(): Promise<void
     collapse(MESSAGES.PROMPT_FOR_CONFIRMATION.text),
   );
   expect(vi.mocked(updateAccount)).not.toHaveBeenCalled();
+  expect(vi.mocked(validateAccountUpdate)).toHaveBeenCalledTimes(1);
 }
 
 /**
@@ -1412,25 +1524,35 @@ async function theSaveAndCancelKeysAppearOnceChangesValidate(): Promise<void> {
 }
 
 /**
- * Processing and saving take the primary emphasis; exit and cancel do not.
+ * The one key that writes takes the primary emphasis; the three that do not, do not.
  *
- * WHY : Assumptions: the emphasis split is fixed by the design-system mapping -- primary for
- *       ENTER and PF5, default for PF3 and PF12 -- and is read from `PRIMARY_ACTION_AIDS` in
- *       `ui/src/layout/PfKeyBar.tsx` rather than restated, so the two cannot drift. The class
- *       is what proves the emphasis reached the DOM: the library applies `ant-btn-primary`
- *       itself and nothing else in this tree does.
+ * WHY : ⚠️ Refactoring Rationale: this case asserted ENTER emphasised as well, on the strength of the
+ *       shared `PRIMARY_ACTION_AIDS` fallback, and now asserts it plain. The screen declares each
+ *       key's RISK, and risk follows what the label says the action does: `ENTER=Process` fetches a
+ *       record or asks the service's non-writing check, while the rewrite is reached from the F5 arm
+ *       alone -- `app/cbl/COACTUPC.cbl` L905 to L916 admits PF05 only in the validated action. Two
+ *       emphasised controls, one of which writes, is emphasis that marks position rather than
+ *       consequence.
+ * WHY : ⚠️ Assumptions: the fallback's own membership is asserted BESIDE the plain ENTER, and that
+ *       pairing is the point. It proves the declared risk OVERRIDES the fallback rather than merely
+ *       agreeing with it -- without it, a screen that had simply stopped binding ENTER would satisfy
+ *       every other assertion here.
+ * WHY : Assumptions: the save key is also asserted free of the danger treatment. The shared primitive
+ *       reserves that for a DESTRUCTIVE action, and this one replaces a record rather than removing
+ *       one, so an alarming save control would overstate what the key does.
  * @returns {Promise<void>} Resolves once the emphasis of all four controls has been checked.
  */
-async function processingAndSavingCarryThePrimaryEmphasis(): Promise<void> {
+async function onlyTheWritingKeyCarriesThePrimaryEmphasis(): Promise<void> {
   arrangeSuccessfulRead();
   const user = await renderScreen();
   await loadAndValidate(user);
   await waitFor(expectLegendToPaint(ACCOUNT_UPDATE_KEY_LABELS.PFK05));
 
-  expect(PRIMARY_ACTION_AIDS).toStrictEqual(['ENTER', 'PFK05']);
+  expect(PRIMARY_ACTION_AIDS).toContain('ENTER');
+  expect(emphasisOf(ACCOUNT_UPDATE_KEY_LABELS.ENTER)).not.toContain('ant-btn-primary');
 
-  expect(emphasisOf(ACCOUNT_UPDATE_KEY_LABELS.ENTER)).toContain('ant-btn-primary');
   expect(emphasisOf(ACCOUNT_UPDATE_KEY_LABELS.PFK05)).toContain('ant-btn-primary');
+  expect(emphasisOf(ACCOUNT_UPDATE_KEY_LABELS.PFK05)).not.toContain('danger');
   expect(emphasisOf(ACCOUNT_UPDATE_KEY_LABELS.PFK03)).not.toContain('ant-btn-primary');
   expect(emphasisOf(ACCOUNT_UPDATE_KEY_LABELS.PFK12)).not.toContain('ant-btn-primary');
 }
@@ -2082,13 +2204,523 @@ function fieldConstraintCases(): void {
     everyControlBoundsEntryToItsDeclaredWidth,
   );
   it('lands the initial cursor on the account key', theInitialCursorLandsOnTheAccountKey);
+  it('clamps an over-long entry to the declared width', anOverLongEntryIsClampedToTheDeclaredWidth);
+  it(
+    'clamps a multi-byte entry on the width the record imposes',
+    aMultiByteEntryIsClampedOnTheWidthTheRecordImposes,
+  );
+  it('keeps an astral character whole while clamping', anAstralCharacterIsKeptWholeWhileClamping);
+}
+
+/**
+ * An entry longer than its field is shortened to the declared width.
+ *
+ * WHY : ⚠️ Assumptions: the entry is raised as a change event, which is precisely the path that
+ *       `maxLength` does NOT police -- the attribute constrains typing and pasting in a browser and
+ *       constrains nothing about a value assigned to the control. So this case observes the screen's
+ *       own limit rather than the platform's, which is the limit that has to hold: a responsive review
+ *       reported an over-long entry arriving truncated with nothing said about it.
+ * @returns {Promise<void>} Resolves once the clamped value has been read.
+ */
+async function anOverLongEntryIsClampedToTheDeclaredWidth(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  await loadAccount(user);
+
+  fill('lastName', 'A'.repeat(LAST_NAME_DECLARED_WIDTH + 5));
+
+  expect(control('lastName')).toHaveValue('A'.repeat(LAST_NAME_DECLARED_WIDTH));
+}
+
+/**
+ * A multi-byte entry is clamped on bytes, which is the measure the record is declared in.
+ *
+ * WHY : ⚠️ Assumptions: twenty-five accented letters are twenty-five code points and fifty bytes, and
+ *       `lastName` is `PIC X(25)` -- twenty-five BYTES on the record. `maxLength` would admit all
+ *       twenty-five because it counts UTF-16 units; the field could store twelve. The expected count
+ *       is derived here rather than written as a number, so the case states the RULE and does not have
+ *       to be edited if the width is ever restated from the mapset.
+ * @returns {Promise<void>} Resolves once the clamped value has been read.
+ */
+async function aMultiByteEntryIsClampedOnTheWidthTheRecordImposes(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  await loadAccount(user);
+
+  fill('lastName', ACCENTED_LETTER.repeat(LAST_NAME_DECLARED_WIDTH));
+
+  const fitting = Math.floor(LAST_NAME_DECLARED_WIDTH / ACCENTED_LETTER_BYTES);
+  expect(control('lastName')).toHaveValue(ACCENTED_LETTER.repeat(fitting));
+}
+
+/**
+ * Clamping drops whole characters, never half of a surrogate pair.
+ *
+ * WHY : ⚠️ Assumptions: this is asserted against the exported function rather than through the tree,
+ *       because what it pins is the UNIT the clamp walks and a rendered assertion could not tell a
+ *       code-point walk from a UTF-16 one on any value a form realistically holds. An emoji is one
+ *       code point, two UTF-16 units and four UTF-8 bytes, so a four-wide field holds exactly one --
+ *       and a clamp that walked UTF-16 units would return a lone surrogate, which is not a character.
+ * @returns {void} Nothing; the assertions run for their effect.
+ */
+function anAstralCharacterIsKeptWholeWhileClamping(): void {
+  const clamped = clampToDeclaredWidth(`${ASTRAL_CHARACTER}${ASTRAL_CHARACTER}`, 4);
+
+  expect(Array.from(clamped)).toStrictEqual([ASTRAL_CHARACTER]);
 }
 
 /**
  * Registers the split-group cases.
  * @returns {void} Nothing; cases are registered as a side effect.
  */
+/**
+ * The seven part-group captions name a real group and point at a real control.
+ *
+ * WHY : ⚠️ Purpose: a browser accessibility audit reported seven form-field labels with nothing
+ *       associated, and they were precisely these captions -- the four dates, the national
+ *       identifier and both telephone numbers each paint ONE caption over two or three boxes. Each
+ *       box was individually named already; what was missing was the group.
+ * WHY : Assumptions: both halves are asserted, because the audit's finding and the grouping are two
+ *       different defects. The caption's `for` is what stops it dangling; the group's `role` and its
+ *       name are what make the visible grouping announceable.
+ * @returns {Promise<void>} Resolves once all seven captions have been asserted.
+ */
+async function eachPartGroupCaptionNamesItsGroup(): Promise<void> {
+  await renderScreen();
+
+  const groups: readonly AccountUpdateFieldName[] = [
+    'openDateYear',
+    'expirationDateYear',
+    'reissueDateYear',
+    'dateOfBirthYear',
+    'ssnPart1',
+    'phone1AreaCode',
+    'phone2AreaCode',
+  ];
+
+  /*
+   * WHY : Assumptions: the expected caption is read from the painted-label map by the same key the
+   *       screen renders it under, rather than retyped here. The captions carry contract punctuation --
+   *       `Opened :` has a space before its colon and `Reissue:` does not -- and a retyped copy is
+   *       exactly where that detail is lost.
+   */
+  expect(groups).toHaveLength(PART_GROUP_COUNT);
+
+  for (const firstPart of groups) {
+    const captionId = groupCaptionDomId(firstPart);
+    const captionElement = document.getElementById(captionId);
+
+    expect(captionElement, `no caption element carries ${captionId}`).not.toBeNull();
+    expect(PAINTED_CAPTIONS).toContain(captionElement?.textContent ?? '');
+
+    const label = captionElement?.closest('label');
+    expect(label, `the caption for ${firstPart} is not inside a label`).not.toBeNull();
+    expect(label?.getAttribute('for')).toBe(fieldDomId(firstPart));
+
+    const group = control(firstPart).closest('[role="group"]');
+    expect(group, `the parts beside ${firstPart} are in no group`).not.toBeNull();
+    expect(group?.getAttribute('aria-labelledby')).toBe(captionId);
+  }
+}
+
+/**
+ * No caption is left pointing at a control that does not exist.
+ *
+ * WHY : Assumptions: this is the audit's own check, restated as a property of the whole rendered
+ *       document rather than of the seven captions the case above walks. A caption added later with
+ *       no target would pass that case by not being in its list, and fail this one.
+ * @returns {Promise<void>} Resolves once every label has been checked.
+ */
+async function noPaintedCaptionPointsAtNothing(): Promise<void> {
+  await renderScreen();
+
+  const labels = Array.from(document.querySelectorAll('label'));
+  expect(labels.length).toBeGreaterThan(0);
+
+  for (const label of labels) {
+    const target = label.getAttribute('for');
+
+    /*
+     * WHY : Assumptions: a label with no `for` at all is only acceptable when it WRAPS its control,
+     *       which is the other association HTML admits. Accepting an unwrapped one would let the
+     *       defect back in under a different shape.
+     */
+    if (target === null) {
+      expect(
+        label.querySelector('input, select, textarea'),
+        `a label reading '${label.textContent ?? ''}' has neither a for nor a wrapped control`,
+      ).not.toBeNull();
+      continue;
+    }
+
+    expect(
+      document.getElementById(target),
+      `a label points at the absent '${target}'`,
+    ).not.toBeNull();
+  }
+}
+
+/**
+ * The fetch turn leaves the cursor on the account status field.
+ *
+ * WHY : Assumptions: the field is the reference's, not a preference. The cursor table of
+ *       `3300-SETUP-SCREEN-ATTRS` opens `WHEN FOUND-ACCOUNT-DATA ... MOVE -1 TO ACSTTUSL` at
+ *       `app/cbl/COACTUPC.cbl` L3008 to L3011, and `ACSTTUS` is the account status field at
+ *       `app/bms/COACTUP.bms` L94 -- the first field the read unlocks.
+ * WHY : ⚠️ Purpose: a browser review measured `document.activeElement` as the document BODY after
+ *       this turn, so a keyboard operator was returned to the top of the document and had to
+ *       traverse the skip link, the sign-off control and the title band to reach the fields the read
+ *       had just unlocked.
+ * @returns {Promise<void>} Resolves once the focused element has been asserted.
+ */
+async function theFetchTurnLeavesTheCursorOnTheFirstUnlockedField(): Promise<void> {
+  const user = await renderScreen();
+  await loadAccount(user);
+
+  await waitFor(
+    /**
+     * Asserts the cursor rests on the first unlocked control once the fetch turn has painted.
+     * @returns {void} Nothing; the assertion carries the outcome.
+     */
+    (): void => {
+      expect(document.activeElement).toBe(control('activeStatus'));
+    },
+  );
+}
+
+/**
+ * A write in flight holds every record field still and makes the exit key inert.
+ *
+ * WHY : ⚠️ Purpose: a browser review measured every record field reporting `disabled: false` with a
+ *       text cursor, and `F3=Exit` enabled and undimmed, while the mutating request was in the air --
+ *       so a value could be retyped after the body carrying the previous value had left, and the
+ *       operator could leave for the menu without ever learning whether the write landed.
+ * WHY : Assumptions: the write is held unresolved deliberately. The state under test exists only
+ *       while the request is in flight, so a resolved mock would render it unobservable.
+ * @returns {Promise<void>} Resolves once the in-flight state has been asserted.
+ */
+async function aWriteInFlightHoldsTheRecordStillAndStandsTheExitKeyDown(): Promise<void> {
+  const user = await renderScreen();
+  await loadAndValidate(user);
+
+  vi.mocked(updateAccount).mockReturnValue(
+    new Promise(
+      /**
+       * Holds the write outstanding by never settling, so the in-flight state can be read.
+       * @returns {void} Nothing; the promise is deliberately left pending.
+       */
+      (): void => undefined,
+    ),
+  );
+  await acceptTheConfirmation(user);
+
+  await waitFor(
+    /**
+     * Asserts the record has gone read-only for the duration of the write.
+     * @returns {void} Nothing; the assertion carries the outcome.
+     */
+    (): void => {
+      expect(control('firstName')).toHaveAttribute('readonly');
+    },
+  );
+
+  expect(control('firstName')).toHaveAttribute('aria-busy', 'true');
+
+  /*
+   * WHY : ⚠️ Assumptions: the exit key is asserted PRESENT AND INERT rather than withdrawn, and that
+   *       is the contract `ui/src/layout/PfKeyBar.tsx` states rather than a concession to what the
+   *       component happens to do. Its own reasoning cites `app/cbl/COACTUPC.cbl` L905 to L916: the
+   *       reference sets `PFK-INVALID` for a key it does not admit and then resolves it with
+   *       `SET CCARD-AID-ENTER TO TRUE`, so the key is accepted and reduced to a refresh -- present,
+   *       labelled, inert. Withdrawing the descriptor is the OTHER treatment the reference expresses,
+   *       through `ATTRB=(ASKIP,DRK)` at `app/bms/COACTUP.bms` L498 to L507, and this screen already
+   *       uses it for the two keys the source darkens. Exit is not one of them.
+   * WHY : Trade-offs: an inert control is the stronger feedback for the defect this closes. The review
+   *       measured the exit key enabled and undimmed while the write was in the air, so the operator
+   *       had no signal at all; a dimmed control is continuously visible BEFORE they commit, where a
+   *       withdrawn one would also move every legend control after it and disturb focus mid-turn.
+   */
+  expect(legendLabels()).toContain(ACCOUNT_UPDATE_KEY_LABELS.PFK03);
+  expect(legendControlFor(ACCOUNT_UPDATE_KEY_LABELS.PFK03)).toBeDisabled();
+}
+
+/**
+ * A refusal naming a field this screen does not paint does not become its headline.
+ *
+ * WHY : ⚠️ Purpose: a browser review drove a refusal whose first entry named another screen's field
+ *       and measured that sentence as this screen's only headline -- naming a control that is not
+ *       present, while the on-screen field's own refusal went unpromoted. The operator was shown a
+ *       refusal they had no way to satisfy.
+ * WHY : Assumptions: the four outcomes are asserted on the chooser directly. Driving all four through
+ *       the rendered screen would assert the same function four times through four turns, where the
+ *       rendered case below establishes once that the screen uses it.
+ * @returns {void} Nothing; the assertions run for their effect.
+ */
+function anOffScreenRefusalDoesNotBecomeTheHeadline(): void {
+  /*
+   * WHY : Assumptions: the state is `NOT_OK` because those are the only two states the wire admits --
+   *       `ui/src/api/types.ts` L217 declares `FieldValidationState` as `'NOT_OK' | 'BLANK'`, which is
+   *       the templated highlight copybook's own pair: `app/cpy/CSSETATY.cpy` L18-L26 colours a field
+   *       for either condition and writes the asterisk for the blank one only. `NOT_OK` is the right
+   *       one here because the headline choice under test is about WHICH field a refusal names, not
+   *       about whether the field was left empty.
+   */
+  const offScreen: FieldError = {
+    field: 'userId',
+    message: 'off the screen',
+    state: 'NOT_OK',
+  };
+  const onScreen: FieldError = {
+    field: 'firstName',
+    message: 'on the screen',
+    state: 'NOT_OK',
+  };
+
+  expect(isAccountUpdateField('firstName')).toBe(true);
+  expect(isAccountUpdateField('userId')).toBe(false);
+
+  expect(headlineForFieldErrors([offScreen, onScreen], 'the problem')).toBe(onScreen.message);
+  expect(headlineForFieldErrors([onScreen, offScreen], 'the problem')).toBe(onScreen.message);
+  expect(headlineForFieldErrors([offScreen], 'the problem')).toBe('the problem');
+  expect(headlineForFieldErrors([offScreen], null)).toBeNull();
+}
+
+/**
+ * The screen publishes the on-screen refusal and marks its control.
+ *
+ * WHY : Assumptions: this is the rendered half of the case above -- it establishes that the screen
+ *       routes its headline through the chooser, and that the off-screen entry marks nothing because
+ *       no control bears its name.
+ * @returns {Promise<void>} Resolves once the band and the marked control have been asserted.
+ */
+async function theOnScreenRefusalIsThePublishedHeadline(): Promise<void> {
+  const user = await renderScreen();
+  await loadAccount(user);
+
+  vi.mocked(validateAccountUpdate).mockRejectedValue(
+    refusal(BAD_REQUEST_STATUS, 'the problem sentence', [
+      { field: 'userId', message: 'off the screen', state: 'NOT_OK' },
+      { field: 'firstName', message: 'on the screen', state: 'NOT_OK' },
+    ]),
+  );
+
+  editFirstName('GRACE');
+  await pressPfKey(user, 'ENTER');
+
+  const band = await screen.findByTestId(MESSAGE_BAND_TEST_ID);
+  await waitFor(
+    /**
+     * Asserts the band has taken the sentence the turn reported.
+     * @returns {void} Nothing; the assertion carries the outcome.
+     */
+    (): void => {
+      expect(band).toHaveTextContent('on the screen');
+    },
+  );
+  expect(band).not.toHaveTextContent('off the screen');
+}
+
+/**
+ * Every control is sized from the character width its own copybook clause declares.
+ *
+ * WHY : ⚠️ Purpose: a browser review measured all 43 controls sharing one full-width rule, so
+ *       `Opened :`, `Expiry :` and `Reissue:` each painted three boxes of identical width -- 146,
+ *       147 and 146 pixels -- putting the four-digit year box and the two-digit month box at the same
+ *       size, and `Active Y/N:` painted 446 pixels at 992 and 723 at 1600 for ONE character. The
+ *       defect grew with the viewport because nothing in the rule referred to the data.
+ * WHY : Assumptions: the declared width is read from the screen's own width map rather than retyped,
+ *       so this asserts that the RENDERED size is derived from the same transcription `maxLength` and
+ *       the entry clamp already use -- which is the property that stops a one-character field painting
+ *       at 45 per cent of a viewport.
+ * WHY : Assumptions: the inline maximum is asserted rather than a computed pixel width, because a
+ *       jsdom layout has no real typography to measure. The declaration is what the screen controls
+ *       and what a browser then resolves.
+ * @returns {Promise<void>} Resolves once every control's declared size has been asserted.
+ */
+async function eachControlIsSizedFromItsDeclaredWidth(): Promise<void> {
+  await renderScreen();
+
+  const distinctWidths = new Set<string>();
+
+  for (const row of FORM_FIELD_WIDTHS) {
+    const declared = ACCOUNT_UPDATE_FIELD_WIDTHS[row.field];
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the expectation now allows for the MARKER SLOT on the one field
+     *       that carries one, where it used to assert the declared width alone for all of them. A
+     *       browser review measured why: with a suffix present the design system sizes the affix
+     *       WRAPPER, whose space the value and the marker then share, so a box measured for the value
+     *       alone clips the value -- on a sibling screen's two-character key that showed as a record
+     *       identity rendering as one glyph and a sliver. `copybookFieldWidthStyle` therefore takes the
+     *       slot's width as an argument, and a field that reserves it is CORRECT rather than oversized.
+     * WHY : ⚠️ Assumptions: whether a field carries the slot is read from the RENDERED tree rather than
+     *       from a list retyped here. The design system moves a control into an affix wrapper exactly
+     *       when it is given a suffix, so the wrapper's presence IS the question being asked, and a
+     *       screen that later gave a second field a marker would be measured correctly without this
+     *       case being edited.
+     * WHY : Assumptions: the allowance is stated as the marker's own characters plus one, which is the
+     *       contract `copybookFieldWidthStyle` documents -- the marker's glyphs, and one further cell
+     *       because `ch` on the wrapper resolves in the theme's proportional face while the value
+     *       renders in the wider fixed-pitch one. Stating it exactly rather than as a bound is what
+     *       keeps the case discriminating: a measure that reserved a comfortable surplus instead of the
+     *       slot would still be a measure not derived from the data.
+     */
+    const carriesMarkerSlot = control(row.field).closest('.ant-input-affix-wrapper') !== null;
+    const reserved = carriesMarkerSlot ? declared + BLANK_FIELD_MARKER_CHARACTERS + 1 : declared;
+    const style = sizedBox(row.field).getAttribute('style') ?? '';
+
+    expect(style, `${row.field} is not sized from its declared width`).toContain(
+      `${String(reserved)}ch`,
+    );
+    distinctWidths.add(`${String(declared)}ch`);
+  }
+
+  /*
+   * WHY : Assumptions: more than one distinct measure is asserted as well as each field's own, because
+   *       every assertion above would also pass if the map happened to declare one width for
+   *       everything -- and a single shared measure is precisely the defect being closed.
+   */
+  expect(distinctWidths.size).toBeGreaterThan(1);
+  expect(sizedBox('activeStatus').getAttribute('style') ?? '').toContain('1ch');
+  expect(sizedBox('openDateYear').getAttribute('style') ?? '').toContain('4ch');
+  expect(sizedBox('openDateMonth').getAttribute('style') ?? '').toContain('2ch');
+}
+
+/**
+ * A control the operator cannot type into is painted on the unavailable surface.
+ *
+ * WHY : ⚠️ Purpose: a browser review measured the read-only controls at `rgb(255,255,255)` --
+ *       indistinguishable from an editable one except by border -- and separately reported the
+ *       read-only account number as the one field that looked ACTIVE beside its editable neighbours.
+ *       The single field that cannot be edited was the one advertising that it could.
+ * WHY : Assumptions: the control stays reachable while it is painted as unavailable, so both halves are
+ *       asserted. `readOnly` is what keeps it in the focus order and the accessibility tree, which is
+ *       why this screen does not use `disabled`; the surface is borrowed without the removal.
+ * @returns {Promise<void>} Resolves once both states have been asserted.
+ */
+async function aProtectedControlIsPaintedAsUnavailable(): Promise<void> {
+  const user = await renderScreen();
+
+  const beforeRead = sizedBox('firstName');
+  expect(beforeRead).toHaveAttribute('readonly');
+  expect(beforeRead.getAttribute('style') ?? '').toContain(UNAVAILABLE_SURFACE_REFERENCE);
+
+  await loadAccount(user);
+
+  const editable = sizedBox('firstName');
+  expect(editable).not.toHaveAttribute('readonly');
+  expect(editable.getAttribute('style') ?? '').not.toContain(UNAVAILABLE_SURFACE_REFERENCE);
+
+  /*
+   * WHY : Assumptions: the account key is checked on the SAME turn as an editable field, because the
+   *       review's complaint was a contrast between neighbours rather than a property of one control.
+   */
+  const stillProtected = sizedBox('accountId');
+  expect(stillProtected).toHaveAttribute('readonly');
+  expect(stillProtected.getAttribute('style') ?? '').toContain(UNAVAILABLE_SURFACE_REFERENCE);
+}
+
+/**
+ * No cell of the record grid is rendered empty.
+ *
+ * WHY : ⚠️ Purpose: an empty grid cell stood in the account block, rendered only to hold the left half
+ *       of one mapset row open so later fields kept their left/right pairing. A browser review
+ *       measured the cost as a void in the left column, present even in the empty pre-read state --
+ *       a static grid artefact rather than a data one -- where the eye jumps a full row height.
+ * WHY : Assumptions: the pre-read state is the one asserted, which is where the review found it and
+ *       where a data-driven explanation is unavailable.
+ * @returns {Promise<void>} Resolves once every grid cell has been asserted non-empty.
+ */
+async function noGridCellIsRenderedEmpty(): Promise<void> {
+  await renderScreen();
+
+  /*
+   * WHY : Assumptions: the document is queried rather than a render result, because `renderScreen`
+   *       hands back the user-event instance this file drives every interaction through -- the shell
+   *       harness owns the container.
+   */
+  const cells = Array.from(document.querySelectorAll('.ant-col'));
+  expect(cells.length).toBeGreaterThan(0);
+
+  for (const cell of cells) {
+    expect(
+      cell.childElementCount,
+      `an empty grid cell is rendered: ${cell.outerHTML}`,
+    ).toBeGreaterThan(0);
+  }
+}
+
+/**
+ * The second address line paints a visible label, and it is the program's own name for the field.
+ *
+ * WHY : ⚠️ Purpose: a browser review measured the control orphaned at 576 and below -- no visible
+ *       label, landing between `State` and `Zip` -- because its only association with `Address:` was
+ *       that the two-column grid put it directly beneath address line 1.
+ * WHY : Assumptions: the visible label and the accessible name are asserted to be the SAME words. The
+ *       association the mapset relied on was positional, which AAP section 0.3.4 gap G1 surrenders,
+ *       and `app/cbl/COACTUPC.cbl` L1614 supplies the words -- so this checks that the name the
+ *       control already announced is now also the name it paints.
+ * @returns {Promise<void>} Resolves once the label and the name have been asserted.
+ */
+async function theSecondAddressLineIsLabelled(): Promise<void> {
+  await renderScreen();
+
+  const line2 = control('addressLine2');
+  const label = document.querySelector<HTMLLabelElement>(
+    `label[for="${fieldDomId('addressLine2')}"]`,
+  );
+
+  expect(label, 'the second address line paints no label').not.toBeNull();
+  expect(collapse(label?.textContent ?? '')).toBe(collapse(ADDRESS_LINE_2_NAME));
+  expect(line2).toHaveAccessibleName(ADDRESS_LINE_2_NAME);
+}
+
+/**
+ * The section heading is a real heading, at the rank the paired view screen uses.
+ *
+ * WHY : ⚠️ Purpose: this string used to be emphasised text inside a rule, so the section was not in
+ *       the document's heading hierarchy at all -- while `/account/view` paints the same string as a
+ *       heading. A browser review reported the two patterns as divergent, and the divergence was
+ *       navigational: an operator could jump to the section on the view screen and not on this one.
+ * WHY : Assumptions: the rank is read from `ui/src/layout/ScreenTitle.tsx` rather than retyped, which
+ *       is the property that keeps it one below the screen caption if the caption's rank ever moves.
+ * @returns {Promise<void>} Resolves once the heading and its rank have been asserted.
+ */
+async function theSectionHeadingIsARealHeading(): Promise<void> {
+  await renderScreen();
+
+  const heading = screen.getByRole('heading', {
+    name: ACCOUNT_UPDATE_HEADINGS.customerSection,
+  });
+
+  expect(heading.tagName.toLowerCase()).toBe(`h${String(SECTION_HEADING_LEVEL)}`);
+}
+
+/**
+ * Registers the cases covering the split-part groups and the grid they sit in.
+ * @returns {void} Nothing; the registrations are the effect.
+ */
 function splitGroupCases(): void {
+  it('sizes each control from its declared width', eachControlIsSizedFromItsDeclaredWidth);
+  it('paints a protected control as unavailable', aProtectedControlIsPaintedAsUnavailable);
+  it('renders no empty grid cell', noGridCellIsRenderedEmpty);
+  it('labels the second address line', theSecondAddressLineIsLabelled);
+  it('renders the section heading as a real heading', theSectionHeadingIsARealHeading);
+  it('names each part group by its painted caption', eachPartGroupCaptionNamesItsGroup);
+  it('leaves no painted caption pointing at nothing', noPaintedCaptionPointsAtNothing);
+  it(
+    'leaves the cursor on the first unlocked field after a fetch',
+    theFetchTurnLeavesTheCursorOnTheFirstUnlockedField,
+  );
+  it(
+    'holds the record still and stands the exit key down while a write is in flight',
+    aWriteInFlightHoldsTheRecordStillAndStandsTheExitKeyDown,
+  );
+  it(
+    'does not headline a refusal naming an absent field',
+    anOffScreenRefusalDoesNotBecomeTheHeadline,
+  );
+  it('publishes the on-screen refusal as its headline', theOnScreenRefusalIsThePublishedHeadline);
   it('renders each date as three independent parts', eachSplitDateRendersThreeIndependentParts);
   it(
     'renders the national identifier as three independent parts',
@@ -2159,12 +2791,140 @@ function attentionIdentifierCases(): void {
     aSecondProcessingKeyAfterValidationCommitsNothing,
   );
   it('offers save and cancel once changes validate', theSaveAndCancelKeysAppearOnceChangesValidate);
+  it('opens the confirmation on the safe choice', theConfirmationOpensOnTheSafeChoice);
   it(
-    'carries the primary emphasis on processing and saving',
-    processingAndSavingCarryThePrimaryEmphasis,
+    'withdraws the confirmation on escape and keeps the entry',
+    escapeWithdrawsTheConfirmationAndKeepsTheEntry,
+  );
+  it(
+    'carries the primary emphasis on the saving key alone',
+    onlyTheWritingKeyCarriesThePrimaryEmphasis,
   );
   it('closes the screen on the exit key', theExitKeyClosesTheScreen);
   it('closes the screen on the exit legend control', theExitLegendControlClosesTheScreen);
+}
+
+/**
+ * Returns the in-content save control, which is the surface's anchor.
+ *
+ * WHY : Assumptions: it is found by ELIMINATION rather than by role and name, because `'F5=Save'` is
+ *       painted in up to three places at once -- the legend, this anchor and the surface's own accept
+ *       control -- and a tree-wide query resolves to whichever comes first in document order. Excluding
+ *       the legend landmark and the surface leaves exactly one, and the count is asserted so a fourth
+ *       copy appearing would fail here rather than silently changing which control the case measures.
+ * @returns {HTMLButtonElement} The in-content save control.
+ * @throws {Error} When elimination does not leave exactly one control, so the failure names the
+ *   ambiguity instead of measuring an arbitrary member of it.
+ */
+function inContentSaveControl(): HTMLButtonElement {
+  const wanted = collapse(ACCOUNT_UPDATE_KEY_LABELS.PFK05);
+  const candidates = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).filter(
+    /**
+     * Keeps a control that carries the label but sits in neither the legend nor the surface.
+     * @param {HTMLButtonElement} button - Control to test.
+     * @returns {boolean} `true` when it is the in-content copy.
+     */
+    (button: HTMLButtonElement): boolean =>
+      collapse(button.textContent ?? '') === wanted &&
+      !legendRegion().contains(button) &&
+      button.closest('.ant-popconfirm') === null,
+  );
+
+  if (candidates.length !== 1) {
+    throw new Error(
+      `elimination left ${String(candidates.length)} in-content controls labelled '${wanted}', not one`,
+    );
+  }
+
+  return candidates[0] as HTMLButtonElement;
+}
+
+/**
+ * ⚠️ Asserts the save surface is brought onto the display before it asks, and opens downward.
+ *
+ * ⚠️ Purpose: close two browser-measured defects that no request-shape, focus or text case can see.
+ * This is the longest screen in the application -- its body measured 3567 pixels against a 486-pixel
+ * visible band at a 375-pixel width -- and the surface anchors to a control below all forty editable
+ * fields, at `top: 2468`. A turn taken from the function-key legend needs no pointer and so no
+ * scrolling, and with the body where the operator left it the surface opened at `top: 2379`: roughly
+ * fifteen hundred pixels below a 900-pixel display, with BOTH answers outside it and focus placed on a
+ * Cancel control that could not be seen. Pressing the save key produced no visible change at all.
+ * Separately, the design system's default upward placement needs about ninety pixels of clear space
+ * above that anchor; at 1280 the gap just fits and the surface clipped only 4.39 pixels of the three
+ * `Phone 2` boxes, but at 375 the single-column stack closes it and the surface covered the `Primary
+ * Card Holder Y/N:` control across 100 per cent of its width and 88.7 per cent of its height, with
+ * `elementFromPoint` at that control's centre returning the surface's own title. The operator was asked
+ * to commit a record while one of its values was painted over.
+ *
+ * ⚠️ Assumptions: the two halves are asserted independently because they are independent fixes with
+ * independent failure modes -- an anchor scrolled into view still collides with a field if the surface
+ * opens upward, and a downward surface is still invisible if the anchor is off the display. Each half
+ * was negative-controlled on its own.
+ *
+ * ⚠️ Assumptions: neither half is a geometry check, and cannot be. jsdom performs no layout, lays out
+ * no scrollport and -- as `ui/src/test/setup.ts` records -- does not implement `scrollIntoView` at all,
+ * so the rectangles are measurable only in a real browser and are verified there. What is falsifiable
+ * here is that the screen asks for the scroll before it opens, and that it names the direction; the
+ * placement is read from the design system's OWN class rather than from this file's source text, so a
+ * prop renamed by a library upgrade would fail here instead of passing on a stale literal.
+ *
+ * Assumptions: BOTH routes to the gate are exercised, because they run through one function by this
+ * screen's own stated contract and a fix reaching only one of them would reintroduce the divergence
+ * that contract exists to prevent.
+ * @returns {Promise<void>} Resolves once both routes and the placement have been asserted.
+ */
+async function bringsTheSaveSurfaceIntoViewAndOpensItDownward(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  await loadAndValidate(user);
+
+  const anchor = inContentSaveControl();
+  const surfaceStoodWhenScrolled: boolean[] = [];
+  const scrolled = vi.spyOn(anchor, 'scrollIntoView').mockImplementation(
+    /**
+     * Records whether a surface already stood at the moment the anchor was scrolled.
+     * @returns {void} Nothing; the recording is the observable.
+     */
+    (): void => {
+      surfaceStoodWhenScrolled.push(confirmationPopup() !== null);
+    },
+  );
+
+  for (const route of ['legend', 'pointer']) {
+    surfaceStoodWhenScrolled.length = 0;
+    if (route === 'legend') {
+      await pressPfKey(user, 'PFK05');
+    } else {
+      await user.click(anchor);
+    }
+    await waitFor(expectConfirmationToBeOpen);
+
+    expect(
+      surfaceStoodWhenScrolled,
+      `the ${route} route must bring the anchor into view exactly once, before the surface stands`,
+    ).toEqual([false]);
+    expect(
+      confirmationPopup()?.className,
+      `and the ${route} route's surface must open downward, away from the form's own fields`,
+    ).toContain('ant-popover-placement-bottom');
+    expect(
+      vi.mocked(updateAccount),
+      `and asking must still cost no write on the ${route} route`,
+    ).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    await waitFor(
+      /**
+       * Asserts the surface has been withdrawn, for use inside a `waitFor`.
+       * @returns {void} Nothing; the assertion runs for its effect.
+       */
+      (): void => {
+        expect(confirmationPopup()).toBeNull();
+      },
+    );
+  }
+
+  scrolled.mockRestore();
 }
 
 /**
@@ -2173,7 +2933,295 @@ function attentionIdentifierCases(): void {
  */
 function confirmationCases(): void {
   it('raises a confirmation before writing', theSaveKeyRaisesAConfirmationBeforeWriting);
+  it(
+    'brings the save surface into view and opens it downward',
+    bringsTheSaveSurfaceIntoViewAndOpensItDownward,
+  );
   it('writes nothing when the confirmation is dismissed', dismissingTheConfirmationWritesNothing);
+}
+
+/**
+ * Drives a save the service refuses as a concurrency conflict, on a screen holding one edit.
+ *
+ * WHY : Assumptions: the arrangement is shared by the three cases below rather than repeated in
+ *       each, because all three assert DIFFERENT consequences of the SAME turn -- what the form
+ *       holds, what the two channels say and what the legend paints -- and three private
+ *       arrangements is how one of them comes to drive a subtly different turn from the others.
+ *       The edited value is returned so a case can assert against the value it typed rather than
+ *       against a constant that has to be kept in step with the helper.
+ * @param {UserEvent} user - The operator driving the tree.
+ * @returns {Promise<string>} The value the operator left in the first-name control.
+ */
+async function refuseTheSaveAsAConflict(user: UserEvent): Promise<string> {
+  const edited = 'GRACE';
+  await loadAndValidate(user);
+
+  vi.mocked(isConflictFailure).mockReturnValue(true);
+  vi.mocked(updateAccount).mockRejectedValue(
+    refusal(409, MESSAGES.DATA_WAS_CHANGED_BEFORE_UPDATE.text),
+  );
+  await acceptTheConfirmation(user);
+
+  return edited;
+}
+
+/**
+ * A concurrent change leaves the operator's entry on screen.
+ *
+ * WHY : ⚠️⚠️ Assumptions: this is the claim a responsive review reported as a blocking defect --
+ *       it drove one refused save and measured 42 of the 43 controls come back EMPTY, so the turn
+ *       destroyed the work whose refusal it was reporting. The screen used to re-read the record on
+ *       this outcome, and both ways that request could settle lost the entry: the failure arm blanks
+ *       every value but the account key, and the success arm reseeds from the answer.
+ * WHY : ⚠️ Assumptions: the read spy is asserted to have been called exactly ONCE -- the load's own
+ *       read -- because that is what makes this a claim about the re-read rather than about the
+ *       fixture. The reference performs no read on this outcome either: its concurrency arm at
+ *       `app/cbl/COACTUPC.cbl` L2610 to L2612 sets the show-details action and the sentence and
+ *       nothing else, while the `9000-READ-ACCT` in that same `EVALUATE` belongs to the PF12 arm.
+ * @returns {Promise<void>} Resolves once the preserved entry has been asserted.
+ */
+async function aConcurrentChangeLeavesTheOperatorEntryOnScreen(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  const edited = await refuseTheSaveAsAConflict(user);
+
+  await waitFor(expectInformationLineToRead(MESSAGES.PROMPT_FOR_CHANGES.text));
+
+  expect(control('firstName')).toHaveValue(edited);
+  expect(control('accountId')).toHaveValue(ACCOUNT_ID);
+  expect(vi.mocked(readAccountView)).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * A concurrent change names itself once, on the refusal channel alone.
+ *
+ * WHY : ⚠️ Assumptions: the review read the two populated bands as contradicting each other, and the
+ *       resolution is that exactly one of them NAMES the outcome. Row 23 carries the changed-record
+ *       sentence and row 22 carries the prompt the reference derives from the action it set --
+ *       `3250-SETUP-INFOMSG` recomputes that line on every send, so a populated row 22 is the mapset's
+ *       arrangement rather than a second opinion. What would be a contradiction is the refusal
+ *       appearing on both channels, which is asserted against.
+ * @returns {Promise<void>} Resolves once both channels have been read.
+ */
+async function aConcurrentChangeNamesItselfOnTheRefusalChannelAlone(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  await refuseTheSaveAsAConflict(user);
+
+  expect(await messageBand()).toHaveTextContent(
+    collapse(MESSAGES.DATA_WAS_CHANGED_BEFORE_UPDATE.text),
+  );
+  expect(await informationBand()).toHaveTextContent(collapse(MESSAGES.PROMPT_FOR_CHANGES.text));
+  expect(await informationBand()).not.toHaveTextContent(
+    collapse(MESSAGES.DATA_WAS_CHANGED_BEFORE_UPDATE.text),
+  );
+}
+
+/**
+ * A concurrent change leaves the cancel key advertised.
+ *
+ * WHY : ⚠️ Assumptions: the review reported the refusal as leaving "no way forward", and the way
+ *       forward is the cancel turn -- it re-reads the record, which is what the sentence's own
+ *       'Please review' asks for. The key was always BOUND on this turn; what was missing was its
+ *       label, so this asserts the painted legend and not the handler.
+ * WHY : ⚠️ Refactoring Rationale: the save legend is asserted PRESENT AND DISABLED, and this case used
+ *       to assert it ABSENT. Both readings agree on the behaviour -- the fields are editable again on
+ *       this turn, so a save that wrote entries no validation step had seen would be wrong, and the
+ *       reference admits PF05 in the validated action alone at `app/cbl/COACTUPC.cbl` L905 to L916 --
+ *       and they disagree about what an operator is shown. A browser review measured the absence and
+ *       reported it: after the 409 the legend held `F12=Cancel` enabled and `F5=Save` had vanished from
+ *       both the legend and the confirmation area, which tells the operator the action does not exist
+ *       rather than that it is not available yet. `ui/src/layout/PfKeyBar.tsx` states the remedy against
+ *       the same L905-to-L916 citation: an unavailable key is rendered disabled, never removed.
+ * @returns {Promise<void>} Resolves once the legend has been read.
+ */
+async function aConcurrentChangeLeavesTheCancelKeyAdvertised(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  await refuseTheSaveAsAConflict(user);
+
+  await waitFor(expectLegendToPaint(ACCOUNT_UPDATE_KEY_LABELS.PFK12));
+
+  expect(legendLabels()).toContain(collapse(ACCOUNT_UPDATE_KEY_LABELS.PFK05));
+  expect(legendControlFor(collapse(ACCOUNT_UPDATE_KEY_LABELS.PFK05))).toBeDisabled();
+  expect(legendControlFor(collapse(ACCOUNT_UPDATE_KEY_LABELS.PFK12))).toBeEnabled();
+}
+
+/**
+ * Opens the save confirmation and returns it, failing with a named error when it did not open.
+ * @param {UserEvent} user - The interaction driver for this case.
+ * @returns {Promise<HTMLElement>} The open confirmation.
+ * @throws {Error} When the save key opened nothing.
+ */
+async function openTheConfirmation(user: UserEvent): Promise<HTMLElement> {
+  await pressPfKey(user, 'PFK05');
+  await waitFor(expectConfirmationToBeOpen);
+
+  const bubble = confirmationPopup();
+  if (bubble === null) {
+    throw new Error('the save key opened no confirmation');
+  }
+
+  return bubble;
+}
+
+/**
+ * The confirmation opens with the focus on its safe choice, and nothing takes it back.
+ *
+ * ⚠️ Purpose: a prompt that opens with the focus on its accept control is not a confirmation at all --
+ * the next Enter or Space commits, and Enter is the key the operator has just pressed to get here. The
+ * measured trap this guards is the second half: a focus call placed AFTER the prompt opened stole the
+ * focus back on another screen and left it on the committing control while the safe one merely looked
+ * selected.
+ *
+ * ⚠️ Assumptions: the focus is asserted after the prompt has been waited for and NOT re-queried later,
+ * because this screen also focuses controls from an effect. If that effect ran after the prompt opened
+ * it would have run by the time this assertion is reached, so a passing assertion here is a statement
+ * about the settled DOM rather than about one moment in it.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theConfirmationOpensOnTheSafeChoice(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  await loadAndValidate(user);
+
+  const bubble = await openTheConfirmation(user);
+
+  /*
+   * WHY : ⚠️ Assumptions: the tree is SETTLED before the focus is read, and the settle is the half of
+   *       this case that catches the measured trap. The trap is an ordering one -- a focus call that
+   *       runs AFTER the prompt opened -- so an assertion taken on the same task as the opening would
+   *       see the safe choice focused and pass while the very next effect took the focus back. Draining
+   *       the queue inside `act` runs every effect the opening scheduled, so what is read below is the
+   *       state the operator's keyboard actually meets.
+   */
+  await act(
+    /**
+     * Drains the microtask queue so every effect the opening scheduled has run.
+     * @returns {Promise<void>} Resolves once the queue is empty.
+     */
+    async (): Promise<void> => {
+      await Promise.resolve();
+    },
+  );
+
+  expect(
+    within(bubble).getByRole('button', { name: ACCOUNT_UPDATE_KEY_LABELS.PFK12 }),
+  ).toHaveFocus();
+  expect(vi.mocked(updateAccount)).not.toHaveBeenCalled();
+}
+
+/**
+ * Escape withdraws the confirmation, leaves the entry standing and writes nothing.
+ *
+ * ⚠️ Purpose: a keyboard operator must be able to leave a question they did not mean to open, and this
+ * case is what states that they can. The dismissal itself comes from two layers below the design
+ * system -- `ui/node_modules/@rc-component/portal/lib/useEscKeyDown.js` keeps a stack of open portals on
+ * a window `keydown` listener and withdraws the top one -- so this asserts a property of the delivered
+ * screen rather than of code written here, which is precisely why it is worth asserting: nothing else
+ * would notice if a library change took it away.
+ *
+ * ⚠️ Assumptions: the entry is asserted to SURVIVE, which is the one behaviour that distinguishes
+ * Escape from the prompt's own cancel control here. That control is painted `F12=Cancel` and therefore
+ * owes the reference's PF12 arm, which re-reads the record and so discards the entry; Escape carries no
+ * attention identifier and no reference meaning, so it withdraws the question and nothing else. The
+ * absence of a second read is asserted for the same reason -- it is what proves no cancel turn ran.
+ *
+ * Assumptions: what makes the distinction hold is that the portal layer's dismissal reaches the screen
+ * as an open-state change alone and never as `onCancel`, so routing Escape into the cancel arm is a
+ * change a reader could make and this case would catch: the entry would be re-read away and a second
+ * read would be dispatched.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function escapeWithdrawsTheConfirmationAndKeepsTheEntry(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  await loadAndValidate(user);
+  await openTheConfirmation(user);
+
+  await user.keyboard('{Escape}');
+
+  await waitFor(
+    /**
+     * Waits for the prompt to leave the accessibility tree.
+     * @returns {void} Nothing; the assertion carries the outcome.
+     */
+    (): void => {
+      expect(screen.queryByRole('tooltip')).toBeNull();
+    },
+  );
+
+  expect(control('firstName')).toHaveValue('GRACE');
+  expect(vi.mocked(updateAccount)).not.toHaveBeenCalled();
+  expect(vi.mocked(readAccountView)).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * Reads the save control the screen paints beside the form, which is not the legend's.
+ *
+ * WHY : Assumptions: the control is identified by EXCLUSION rather than by a position or a container
+ *       class, because THREE controls can paint this one label at once -- the legend key, the
+ *       confirmation's trigger, and the accept control inside the bubble itself -- so a plain role
+ *       query resolves to whichever comes first in the document. The legend is excluded by its own
+ *       accessible region and the bubble by its component class, which leaves exactly the trigger and
+ *       stays true if either of the other two is moved.
+ * @returns {HTMLButtonElement} The confirmation trigger beside the form.
+ * @throws {Error} When the screen paints no such control, so the failure names the missing trigger
+ *   rather than surfacing as an undefined dereference.
+ */
+function saveControlBesideTheForm(): HTMLButtonElement {
+  const legend = legendRegion();
+  const found = Array.from(document.body.querySelectorAll('button')).find(
+    /**
+     * Tests one control for the save label and for standing outside the legend and the bubble.
+     * @param {HTMLButtonElement} candidate - The control under test.
+     * @returns {boolean} `true` when it is the trigger beside the form.
+     */
+    (candidate: HTMLButtonElement): boolean =>
+      collapse(candidate.textContent ?? '') === collapse(ACCOUNT_UPDATE_KEY_LABELS.PFK05) &&
+      !legend.contains(candidate) &&
+      candidate.closest('.ant-popconfirm') === null,
+  );
+
+  if (found === undefined) {
+    throw new Error('the screen paints no save control beside the form');
+  }
+
+  return found;
+}
+
+/**
+ * A concurrent change leaves the save control beside the form present, inert and unable to write.
+ *
+ * WHY : ⚠️ Assumptions: this is the second half of the measured defect. A browser review found
+ *       `F5=Save` absent from the legend AND from the in-screen confirmation area after the 409, so
+ *       asserting the legend alone would leave the other half of the disappearance unguarded -- both
+ *       controls were withdrawn by one predicate and both are now painted by one predicate.
+ * WHY : ⚠️ Assumptions: the write count is the claim that the inert control cannot act, and it is the
+ *       claim that matters -- the point of keeping the control is that the operator sees the action
+ *       exists, and the point of disabling it is that the action cannot run until an Enter turn has
+ *       re-validated. One call is the refused save the arrangement itself drove, so the count is
+ *       asserted rather than the absence of calls.
+ * WHY : Alternatives Considered: asserting the confirmation bubble is ABSENT after the presses.
+ *       Declined because the design system retains a closed popup in the document -- the arrangement
+ *       has already opened and accepted one -- so an absence assertion there would pass whatever the
+ *       control did and would read as a guarantee it cannot give.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function aConcurrentChangeLeavesTheSaveControlInert(): Promise<void> {
+  arrangeSuccessfulRead();
+  const user = await renderScreen();
+  await refuseTheSaveAsAConflict(user);
+
+  await waitFor(expectLegendToPaint(ACCOUNT_UPDATE_KEY_LABELS.PFK12));
+
+  const beside = saveControlBesideTheForm();
+  expect(beside).toBeDisabled();
+
+  await user.click(beside);
+  await pressPfKey(user, 'PFK05');
+
+  expect(vi.mocked(updateAccount)).toHaveBeenCalledTimes(1);
 }
 
 /**
@@ -2184,6 +3232,22 @@ function optimisticConcurrencyCases(): void {
   it(
     'reports a concurrent change in the reference sentence',
     aConcurrentChangeIsReportedInTheReferenceSentence,
+  );
+  it(
+    'leaves the operator entry on screen after a concurrent change',
+    aConcurrentChangeLeavesTheOperatorEntryOnScreen,
+  );
+  it(
+    'names a concurrent change on the refusal channel alone',
+    aConcurrentChangeNamesItselfOnTheRefusalChannelAlone,
+  );
+  it(
+    'leaves the cancel key advertised after a concurrent change',
+    aConcurrentChangeLeavesTheCancelKeyAdvertised,
+  );
+  it(
+    'leaves the save control beside the form inert after a concurrent change',
+    aConcurrentChangeLeavesTheSaveControlInert,
   );
   it(
     'distinguishes a failed write from a concurrent change',
@@ -2235,6 +3299,166 @@ function exposureCases(): void {
   it('sends the account key with every request', theAccountKeyTravelsWithEveryRequest);
 }
 
+/**
+ * The phone width the responsive review measured this screen overflowing at.
+ *
+ * WHY : Assumptions: 375 is the narrowest width in the review's own sweep and the one where the
+ *       overflow was largest relative to the viewport -- `documentElement.scrollWidth` 385 against an
+ *       `innerWidth` of 375. The suite's `matchMedia` shim derives every breakpoint answer from
+ *       `window.innerWidth`, so assigning it is how a case selects the narrow branch.
+ */
+const PHONE_VIEWPORT_WIDTH = 375;
+
+/**
+ * The declared width of the surname field, read from the screen's own transcription.
+ *
+ * WHY : Assumptions: the width is READ rather than restated, because this file already asserts that
+ *       transcription against `app/cpy-bms/COACTUP.CPY` field by field -- so reading it here makes the
+ *       clamp cases depend on one checked source instead of on a second copy of the same number.
+ */
+const LAST_NAME_DECLARED_WIDTH = ACCOUNT_UPDATE_FIELD_WIDTHS.lastName;
+
+/** A letter that is one code point and two UTF-8 bytes, so the two measures disagree on it. */
+const ACCENTED_LETTER = '\u00c9';
+
+/** How many bytes {@link ACCENTED_LETTER} occupies once encoded. */
+const ACCENTED_LETTER_BYTES = 2;
+
+/** A character outside the basic multilingual plane: one code point, two UTF-16 units, four bytes. */
+const ASTRAL_CHARACTER = '\u{1f600}';
+
+/**
+ * A width at which the mapset's paired columns render side by side.
+ *
+ * WHY : Assumptions: 1024 is jsdom's own default `innerWidth`, so the wide case asserts the branch
+ *       every other case in this file already renders under rather than a width chosen for it.
+ */
+const DESKTOP_VIEWPORT_WIDTH = 1024;
+
+/**
+ * Reads every grid row the screen lays its fields out in.
+ *
+ * WHY : Assumptions: the query is the design system's own row class and is NOT narrowed to the two
+ *       field grids, because the claim is about the whole rendered tree: no row anywhere on this screen
+ *       may hang past its container. The design system also renders each `Form.Item` as a row, so this
+ *       returns those too and they are part of what the claim covers.
+ * @returns {readonly HTMLElement[]} Every rendered row element.
+ * @throws {Error} If the screen rendered no row at all, which would make the assertion vacuous.
+ */
+function gridRows(): readonly HTMLElement[] {
+  const rows = Array.from(document.querySelectorAll<HTMLElement>('.ant-row'));
+  if (rows.length === 0) {
+    throw new Error('the screen rendered no grid row, so the gutter claim would assert nothing');
+  }
+  return rows;
+}
+
+/**
+ * Reads the inline margins the design system derived from a row's resolved gutter.
+ * @param {readonly HTMLElement[]} rows - Rows to read.
+ * @returns {readonly string[]} Each row's inline-axis margin, empty where it set none.
+ */
+function inlineMarginsOf(rows: readonly HTMLElement[]): readonly string[] {
+  return rows.map(
+    /**
+     * Reads one row's inline-axis margin.
+     * @param {HTMLElement} row - The row element.
+     * @returns {string} Its `margin-inline` value, or the empty string when unset.
+     */
+    (row: HTMLElement): string => row.style.marginInline,
+  );
+}
+
+/**
+ * At a phone width no grid row hangs outside the column it is laid out in.
+ *
+ * WHY : Assumptions: the assertion is on the NEGATIVE inline margin rather than on a measured
+ *       `scrollWidth`, because jsdom performs no layout and reports every box as zero -- so the only
+ *       honest thing to assert here is the property that produced the measured overflow in a real
+ *       browser. `node_modules/antd/lib/grid/row.js` sets `marginInline` to `gutter / -2` and skips the
+ *       declaration entirely when the resolved gutter is falsy, so an absent margin is the resolved
+ *       zero and a present one would be the escape.
+ * @returns {Promise<void>} Resolves once the narrow rendering has been asserted.
+ */
+async function noGridRowHangsOutsideItsColumnAtAPhoneWidth(): Promise<void> {
+  window.innerWidth = PHONE_VIEWPORT_WIDTH;
+
+  await renderScreen();
+  await informationBand();
+
+  expect(inlineMarginsOf(gridRows())).not.toContain(expect.stringContaining('-'));
+}
+
+/**
+ * From the medium breakpoint upward the paired columns keep their gutter.
+ *
+ * WHY : Assumptions: this half is asserted alongside the narrow one because the remedy could be passed
+ *       by deleting the gutter outright, which would close the two columns up against each other at
+ *       every width. Both halves together pin the gutter to the widths that have two columns to
+ *       separate.
+ * @returns {Promise<void>} Resolves once the wide rendering has been asserted.
+ */
+async function thePairedColumnsKeepTheirGutterFromTheMediumBreakpoint(): Promise<void> {
+  window.innerWidth = DESKTOP_VIEWPORT_WIDTH;
+
+  await renderScreen();
+  await informationBand();
+
+  expect(inlineMarginsOf(gridRows())).toContain('-10px');
+}
+
+/**
+ * The resolver states no horizontal gutter below the medium breakpoint and the spacing step above it.
+ *
+ * WHY : Assumptions: the resolver is exercised directly as well as through the rendering, because the
+ *       rendered assertion can only observe the ONE branch the current viewport selects. Reading both
+ *       branches from the returned value is what proves the other one exists.
+ * @returns {void} Nothing; the assertions run for their effect.
+ */
+function theGutterResolverSuppressesTheHorizontalGutterBelowTheBreakpoint(): void {
+  const [horizontal, vertical] = accountUpdateGridGutter(20) as [Record<string, number>, number];
+
+  expect(horizontal).toStrictEqual({ xs: 0, sm: 0, md: 20 });
+  expect(vertical).toBe(20);
+}
+
+/**
+ * Returns the viewport to jsdom's own default width.
+ * @returns {void} Nothing; `window.innerWidth` is reassigned as a side effect.
+ */
+function restoreTheDefaultViewport(): void {
+  window.innerWidth = DESKTOP_VIEWPORT_WIDTH;
+}
+
+/**
+ * Registers the responsive-grid cases.
+ * @returns {void} Nothing; cases are registered as a side effect.
+ */
+function responsiveGridCases(): void {
+  /*
+   * WHY : Assumptions: the viewport is restored after every case in this group, and only in this group.
+   *       The suite's `matchMedia` shim answers from `window.innerWidth`, which is a global -- so a case
+   *       that assigns a phone width and leaves it there would silently move every LATER case in the
+   *       file onto the narrow branch, and a failure would surface far from the assignment that caused
+   *       it. jsdom's own default is restored rather than a value spelled twice.
+   */
+  afterEach(restoreTheDefaultViewport);
+
+  it(
+    'hangs no grid row outside its column at a phone width',
+    noGridRowHangsOutsideItsColumnAtAPhoneWidth,
+  );
+  it(
+    'keeps the gutter where the columns are paired',
+    thePairedColumnsKeepTheirGutterFromTheMediumBreakpoint,
+  );
+  it(
+    'suppresses the horizontal gutter below the medium breakpoint',
+    theGutterResolverSuppressesTheHorizontalGutterBelowTheBreakpoint,
+  );
+}
+
+describe('AccountUpdateScreen responsive grid', responsiveGridCases);
 describe('AccountUpdateScreen field constraints', fieldConstraintCases);
 describe('AccountUpdateScreen split field groups', splitGroupCases);
 describe('AccountUpdateScreen design-system composition', compositionCases);

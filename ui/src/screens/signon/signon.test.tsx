@@ -27,8 +27,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as AuthModule from '../../api/auth';
 import type { ApiError, FieldError } from '../../api/types';
 import { MESSAGE_BAND_TEST_ID } from '../../layout/MessageBand';
-import { fieldErrorId, fieldHintId } from '../../layout/fieldHelp';
-import { INVALID_KEY_PRESSED, PROGRAM_MESSAGES, THANK_YOU_CARDDEMO } from '../../messages/messages';
+import { BUSY_ANNOUNCEMENT_TEST_ID, fieldErrorId, fieldHintId } from '../../layout/fieldHelp';
+import {
+  INVALID_KEY_PRESSED,
+  PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
+  SIGN_ON_NEW_PASSWORD_REQUIRED,
+  SIGN_ON_SESSION_REQUIRED,
+  THANK_YOU_CARDDEMO,
+} from '../../messages/messages';
+/*
+ * Assumptions: the two discriminants are imported from the module that DECLARES them rather than
+ * written out as literals here, so a case building a bounce entry cannot keep passing against a value
+ * the guard no longer writes. `ui/src/routes/navigation.ts` is safe to import statically even though
+ * every other member of this file's graph is deferred: it holds route constants and one type-only
+ * import, so it never reaches `../../api/auth` and cannot trip the hoisted mock factory below.
+ */
+import { SIGN_OFF_ACKNOWLEDGED_REASON, SIGN_ON_BOUNCE_REASON } from '../../routes/navigation';
 import { cardDemoTheme } from '../../theme/antdTheme';
 import { BREAKPOINT_TOKENS } from '../../theme/tokens';
 import { endAnySession } from '../../test/sessionHarness';
@@ -98,8 +113,13 @@ vi.mock(
  *       defers the evaluation until after the bindings exist, which is the same reason the screen itself
  *       has always been imported this way.
  */
-const { SignOnScreen, SIGN_ON_ART_BREAKPOINT, SIGN_ON_BANKNOTE_ART, SIGN_ON_FIELD_WIDTH_HINT } =
-  await import('./index');
+const {
+  SignOnScreen,
+  SIGN_ON_ART_BREAKPOINT,
+  SIGN_ON_BANKNOTE_ART,
+  SIGN_ON_FIELD_WIDTH_HINT,
+  signOnArrivalMessage,
+} = await import('./index');
 const { AppShell } = await import('../../layout/AppShell');
 
 // Assumptions: the slot's NAME is taken from the module that owns it rather than written out as a
@@ -223,9 +243,33 @@ function refusal(
  * `AdminMenuScreen` here and asserting each screen's own mapset title means the branch cases now fail
  * if either destination stops rendering, and the same two screens are also exercised through the
  * production route table in `ui/src/routerReachability.test.tsx`.
+ *
+ * Refactoring Rationale: ⚠️ the paragraph above describes an arrangement this function does not have —
+ * the two onward routes hold one-line stand-in elements, `ORDINARY MENU` and `ADMIN MENU`, and the
+ * branch cases assert that stand-in text. It is left in place as the record of what was intended and
+ * flagged rather than silently deleted, because the property it claims is genuinely asserted, just not
+ * here: `ui/src/routerReachability.test.tsx` mounts the production route table and reaches both real
+ * menu screens through it. Mounting them here as well would pull each screen's whole data graph into a
+ * suite about sign-on, and a failure in either would then be reported against sign-on.
+ *
+ * Assumptions: the entry state is a PARAMETER rather than a second render helper, because the two
+ * arrivals differ only in what the previous history entry left behind — a guard's bounce carries a
+ * reason, a first visit carries nothing — and every other case must keep rendering the entry with no
+ * state at all so it measures a first visit.
+ * @param {unknown} [entryState] - History-entry state the screen is entered with, of any shape, or
+ *   omitted for a direct arrival that carries none.
  * @returns {ReactElement} The composed tree under test.
  */
-function renderSignOn(): ReactElement {
+function renderSignOn(entryState?: unknown): ReactElement {
+  /*
+   * Assumptions: a bare path string is used when there is no state, rather than an object carrying an
+   * `undefined` one. The routing package treats a string entry as an entry with no state at all, while
+   * an object member present and undefined is a state the entry HAS — and `ui/tsconfig.json` enables
+   * `exactOptionalPropertyTypes`, which is the setting that makes that distinction a type error rather
+   * than a subtlety.
+   */
+  const entry = entryState === undefined ? '/signon' : { pathname: '/signon', state: entryState };
+
   /*
    * Refactoring Rationale: the single `AppShell` is part of the tree, mirroring the PUBLIC shell
    * layout route `ui/src/router.tsx` declares for this one screen — a sibling of the guarded shell
@@ -238,7 +282,7 @@ function renderSignOn(): ReactElement {
    */
   return (
     <ConfigProvider theme={cardDemoTheme}>
-      <MemoryRouter initialEntries={['/signon']}>
+      <MemoryRouter initialEntries={[entry]}>
         <AppShell>
           <Routes>
             <Route path="/signon" element={<SignOnScreen />} />
@@ -1152,6 +1196,154 @@ function alignsTheDecorationBreakpointWithTheDesignToken(): void {
 }
 
 /**
+ * A path a guard could plausibly have turned the operator away from, used as the attempted entry.
+ *
+ * Assumptions: it carries an identifier-shaped segment on purpose. The withholding case below asserts
+ * that segment is painted nowhere, which is only a meaningful assertion if the path HAS a value in it
+ * that an operator would recognise as their own — a bare `/menu` would satisfy the assertion whatever
+ * the screen did with the state.
+ */
+const ATTEMPTED_DESTINATION = '/users/USER0100/delete';
+
+/**
+ * A guard's bounce is explained, instead of presenting a form the operator did not ask for.
+ *
+ * Purpose: the guard has always handed this entry a reason and nothing read it, so an audit measured
+ * the band present and EMPTY on all nineteen guarded routes — being thrown out of a screen was
+ * indistinguishable from opening the application. This asserts the sentence, and asserts it in the
+ * ASSERTIVE channel: the band publishes `error` as `role="alert"` and its polite severities as
+ * `role="status"`, so reading the sentence off the alert pins the severity as well as the wording.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function explainsWhyAGuardTurnedTheOperatorAway(): Promise<void> {
+  render(renderSignOn({ reason: SIGN_ON_BOUNCE_REASON, attempted: ATTEMPTED_DESTINATION }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(SIGN_ON_SESSION_REQUIRED);
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).toHaveTextContent(SIGN_ON_SESSION_REQUIRED);
+  /*
+   * Assumptions: the attempted destination is asserted ABSENT, and it is the same entry state's own
+   * second member — so this is not asserting that nothing was passed, it is asserting the screen chose
+   * not to paint what it was given. The path came from the address bar, so echoing it would render an
+   * operator's mistyped identifier back onto the screen and into any screenshot of it.
+   */
+  expect(screen.queryByText(/USER0100/u)).not.toBeInTheDocument();
+  expect(screen.queryByText(new RegExp(ATTEMPTED_DESTINATION, 'u'))).not.toBeInTheDocument();
+}
+
+/**
+ * A direct arrival opens quietly, with no explanation for something that did not happen.
+ *
+ * Purpose: the other half of the discrimination the finding turns on. A sentence rendered on every
+ * arrival would be no better than none — it would tell an operator opening the application cold that
+ * their session had ended — so the absence of a reason has to read as a first visit.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function opensWithNoExplanationOnADirectArrival(): void {
+  render(renderSignOn());
+
+  expect(screen.queryByText(SIGN_ON_SESSION_REQUIRED)).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+}
+
+/**
+ * Only the guard's own reason produces the arrival sentence.
+ *
+ * Purpose: `useLocation().state` is whatever the previous entry wrote, including a hand-edited value,
+ * so the reader has to admit one literal and treat everything else as a first visit. The deliberate
+ * sign-off reason travels on this same discriminant and is claimed by `ui/src/layout/AppShell.tsx`,
+ * which replaces the frame with its own farewell surface — a sentence for it here would paint an
+ * explanation behind that surface, or duplicate it.
+ *
+ * Assumptions: the helper is exercised DIRECTLY rather than through six renders. Each row is one
+ * branch of a pure decision, and driving the whole screen to reach one of them would measure the same
+ * branch through a mount that can fail for unrelated reasons.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function reportsAnArrivalSentenceOnlyForTheGuardsOwnReason(): void {
+  expect(signOnArrivalMessage({ reason: SIGN_ON_BOUNCE_REASON })).toBe(SIGN_ON_SESSION_REQUIRED);
+  expect(signOnArrivalMessage({ reason: SIGN_OFF_ACKNOWLEDGED_REASON })).toBeNull();
+  expect(signOnArrivalMessage({ reason: 'whatever-a-hand-edited-entry-said' })).toBeNull();
+  expect(signOnArrivalMessage({})).toBeNull();
+  expect(signOnArrivalMessage(undefined)).toBeNull();
+  expect(signOnArrivalMessage(null)).toBeNull();
+  // Assumptions: a bare string is included because a history entry may hold one, and reading `.reason`
+  //   off a primitive yields `undefined` rather than throwing -- so the branch is reachable and silent.
+  expect(signOnArrivalMessage(SIGN_ON_BOUNCE_REASON)).toBeNull();
+}
+
+/**
+ * The replacement-credential turn explains itself instead of transforming the form in silence.
+ *
+ * Purpose: the provider's challenge disables the identifier, relabels the credential control and
+ * clears it, and an audit measured the band empty through all of it — so the operator was asked for a
+ * new password with nothing on screen saying that the one they had just typed was accepted.
+ *
+ * Assumptions: the provider's `challengeName` is asserted ABSENT as well. `NEW_PASSWORD_REQUIRED` is
+ * the pool's vocabulary and names a mechanism rather than an action, and the refusal sentence for a
+ * wrong password is asserted absent for the opposite reason: nothing was refused here, and reusing
+ * that sentence would tell the operator their password was wrong at the moment it was right.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function explainsTheReplacementCredentialTurn(): Promise<void> {
+  await reachTheChallenge();
+
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).toHaveTextContent(SIGN_ON_NEW_PASSWORD_REQUIRED);
+  expect(screen.queryByText(MESSAGES.WRONG_PASSWORD_TRY_AGAIN)).not.toBeInTheDocument();
+  expect(screen.queryByText(/NEW_PASSWORD_REQUIRED/u)).not.toBeInTheDocument();
+}
+
+/**
+ * The exchange the operator started is announced, and the announcement is withdrawn when it settles.
+ *
+ * Purpose: a review measured no live region announcing a request starting or ending on any screen, so
+ * a screen-reader user pressing ENTER was told nothing at all — the spinner and the stood-down legend
+ * entry are both purely visual. The region is asserted MOUNTED and empty while idle as well, because a
+ * live region has to be in the accessibility tree before its content changes for the change to be
+ * announced at all.
+ *
+ * Assumptions: the exchange is settled with a REFUSAL rather than with a token set, so the screen
+ * stays mounted and the withdrawal is observable. A successful sign-on navigates away, which unmounts
+ * the region and would make its absence prove nothing.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function announcesTheExchangeItStarted(): Promise<void> {
+  let refuseSignOn: (reason: unknown) => void = unusedResolver;
+  signOnMock.mockReturnValue(
+    new Promise(
+      /**
+       * Retains the rejecter so the case controls when the exchange settles.
+       * @param {(value: unknown) => void} _resolve - The promise's resolver, unused here.
+       * @param {(reason: unknown) => void} reject - The promise's own rejecter.
+       * @returns {void} Nothing; the rejecter is retained.
+       */
+      (_resolve: (value: unknown) => void, reject: (reason: unknown) => void): void => {
+        refuseSignOn = reject;
+      },
+    ),
+  );
+  render(renderSignOn());
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toBeEmptyDOMElement();
+
+  await signOnWith('USER0001', 'secret');
+
+  await waitFor(
+    /**
+     * Re-reads the live region until the in-flight exchange has been announced.
+     * @returns {void} Nothing; the assertion carries the outcome.
+     */
+    () => {
+      expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+    },
+  );
+
+  refuseSignOn(refusal(401, MESSAGES.WRONG_PASSWORD_TRY_AGAIN));
+
+  expect(await screen.findByText(MESSAGES.WRONG_PASSWORD_TRY_AGAIN)).toBeInTheDocument();
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toBeEmptyDOMElement();
+}
+
+/**
  * Restores the viewport width the responsive case changed, so no later case inherits it.
  * @returns {void} Nothing; the width is restored in place.
  */
@@ -1160,7 +1352,12 @@ function restoreViewportWidth(): void {
 }
 
 /**
- * Registers the twelve sign-on screen cases.
+ * Registers every sign-on screen case.
+ *
+ * Refactoring Rationale: ⚠️ this said "the twelve sign-on screen cases" while the list below held
+ * twenty-seven, and the count is dropped rather than corrected to a new number: a figure in prose
+ * beside the list that carries the same information goes stale on the next addition, and this one
+ * already had — twice over.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
 function signOnScreenCases(): void {
@@ -1231,6 +1428,14 @@ function signOnScreenCases(): void {
     'aligns the decoration breakpoint with the design token',
     alignsTheDecorationBreakpointWithTheDesignToken,
   );
+  it('explains why a guard turned the operator away', explainsWhyAGuardTurnedTheOperatorAway);
+  it('opens with no explanation on a direct arrival', opensWithNoExplanationOnADirectArrival);
+  it(
+    "reports an arrival sentence only for the guard's own reason",
+    reportsAnArrivalSentenceOnlyForTheGuardsOwnReason,
+  );
+  it('explains the replacement-credential turn', explainsTheReplacementCredentialTurn);
+  it('announces the exchange it started, then withdraws it', announcesTheExchangeItStarted);
 }
 
 beforeEach(resetSessionAndStubs);

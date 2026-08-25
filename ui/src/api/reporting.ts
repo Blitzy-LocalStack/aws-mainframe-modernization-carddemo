@@ -59,11 +59,13 @@
  */
 
 import {
+  IDEMPOTENCY_KEY_HEADER,
   correlationHeaders,
   getApiClient,
   keysetPagingMembers,
   newCorrelationId,
   requestPath,
+  requireWithinPublishedWidths,
 } from './client';
 import { MASKED_CARD_NUMBER } from './masking';
 import type {
@@ -245,14 +247,17 @@ const PUBLISHED_ARTIFACT_LOCATION = new RegExp(
  *       changed is that seven modules no longer each hold a copy of it.
  */
 
-/**
- * Header the published contract accepts an optional submission key in.
- *
- * Assumptions: the name is stated once here rather than at the call site, because it is part of the
- * published contract -- `IdempotencyKeyHeader` in the reporting service's OpenAPI document -- and a
- * second spelling of it would be a second statement of one fact.
+/*
+ * WHY : Refactoring Rationale: the header name this module sends was declared here as its own
+ *       constant and is now imported from `./client`. It was already stated once rather than written
+ *       at the call site, for the reason that comment gave -- it is part of the published contract,
+ *       `IdempotencyKeyHeader` in the reporting service's OpenAPI document, and a second spelling
+ *       would be a second statement of one fact. What changed is that a SECOND reader appeared:
+ *       `remedyFor` in `./client` reports a failed request as safe to repeat when it carried this
+ *       header, so the sender and the classifier must agree on the spelling. Two copies of the string
+ *       would let them drift silently -- the classifier would simply stop recognising the header this
+ *       module sends -- so the one statement now lives beside the classification that consumes it.
  */
-const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
 
 /**
  * Mints one identity for one report submission, reusable across every attempt at that submission.
@@ -365,6 +370,8 @@ export function newSubmissionKey(): string {
  *   to the report itself: the document is assembled asynchronously and is polled through
  *   `readReportExecution`, read through `listTransactionReportLines` and `readTransactionReportTotals`,
  *   and collected through `collectReportArtifact`.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `ReportRequest` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If a started run arrives without the handle or the sentence the contract
  *   requires alongside it, if an unanswered turn arrives without the prompt, or -- before anything is
  *   sent -- if a supplied submission identity is one the shared correlation filter would refuse. That
@@ -384,7 +391,11 @@ export async function submitTransactionReport(
 ): Promise<ReportSubmissionOutcome> {
   const response = await getApiClient().post<ReportSubmissionOutcomeBody>(
     requestPath(SUBMIT_TRANSACTION_REPORT),
-    request,
+    // Assumptions: the two title lines and the message line are the members with room to overrun --
+    //   forty, forty and seventy-eight characters, the widths `app/cpy/COTTL01Y.cpy` and the reference
+    //   program's message field declare -- and they are values a caller composes rather than ones an
+    //   operator types into a bounded input.
+    requireWithinPublishedWidths('ReportRequest', request),
     // Assumptions: the configuration argument is omitted entirely rather than carrying an undefined
     //   header, because tsconfig sets exactOptionalPropertyTypes and an explicit undefined would
     //   serialise the header name with no value on every submission that supplied no key. A submission
@@ -545,6 +556,8 @@ export async function readTransactionReportTotals(
  * @returns {Promise<Statement>} The heading figures, the assembled total as an already-rendered
  *   string, and the locations of the two renderings the service wrote -- never the documents
  *   themselves. The primary account number is echoed back masked.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `StatementRequest` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If the response carries an unmasked primary account number.
  * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
  *   HTTP 400 for a selector that names neither value or both, 401 without a usable token, 403 without
@@ -552,7 +565,10 @@ export async function readTransactionReportTotals(
  *   of the value searched for -- and 500 otherwise.
  */
 export async function generateStatement(request: StatementRequest): Promise<Statement> {
-  const response = await getApiClient().post<Statement>(requestPath(GENERATE_STATEMENT), request);
+  const response = await getApiClient().post<Statement>(
+    requestPath(GENERATE_STATEMENT),
+    requireWithinPublishedWidths('StatementRequest', request),
+  );
   assertCardNumberMasked(response.data.cardNumber);
   return response.data;
 }
@@ -564,6 +580,8 @@ export async function generateStatement(request: StatementRequest): Promise<Stat
  * @returns {Promise<StatementTransactionCollection>} The rows ordered by primary account number and
  *   then by transaction identifier, each with its number masked and its amount already rendered,
  *   together with the count the statement covers and whether the array stops short of that count.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `StatementRequest` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If any row carries an unmasked primary account number.
  * @throws {Error} The normalised failure from `./client`, carrying the shared `ApiError` document:
  *   HTTP 400 for a selector that names neither value or both, 401 without a usable token, 403 without
@@ -574,7 +592,7 @@ export async function listStatementTransactions(
 ): Promise<StatementTransactionCollection> {
   const response = await getApiClient().post<StatementTransactionCollection>(
     requestPath(LIST_STATEMENT_TRANSACTIONS),
-    request,
+    requireWithinPublishedWidths('StatementRequest', request),
   );
 
   const body = response.data;

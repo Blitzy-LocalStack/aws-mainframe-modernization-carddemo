@@ -44,6 +44,9 @@ import {
   MESSAGE_BAND_TEST_ID,
   MESSAGE_BAND_TEST_IDS,
   MessageBand,
+  defaultMessageBandSeverity,
+  messageBandChannelForLine,
+  messageBandSeverityForApiSeverity,
 } from './MessageBand';
 import { theme } from 'antd';
 
@@ -453,3 +456,327 @@ function messageBandChannelsAndSeverities(): void {
 }
 
 describe('message band channels and severities', messageBandChannelsAndSeverities);
+
+/*
+ * WHY : Refactoring Rationale: the third group covers what an accessibility and rendering review found
+ *       the band doing to a LISTENER and to a reader of a clipped sentence, which the two groups above
+ *       do not touch: the severity icon announced under its machine name inside the live region and
+ *       ahead of the message; the service severity never reaching the band at all, so every fault
+ *       rendered as a rejection; and an over-length sentence whose tail no attribute on the element
+ *       offered back. They are one group because they are one element's announcement contract.
+ */
+
+/** A sentence long enough to stand for the 119-character message a review measured as clipped. */
+const CLIPPED_MESSAGE =
+  'Card data is temporarily unavailable. Use the request correlation identifier from the response when reporting this.';
+
+/** Laid-out inline size of the clipped text element, standing for the measured 566 pixels. */
+const CLIPPED_CLIENT_WIDTH = 566;
+
+/** Content width of the same element, standing for the measured 747 pixels. */
+const CLIPPED_SCROLL_WIDTH = 747;
+
+/**
+ * Runs one case with the message text element reporting geometry that is genuinely clipped.
+ *
+ * Purpose: the band decides whether to offer a reveal by MEASURING the rendered element — scroll width
+ * against client width — and jsdom performs no layout, so both are zero and every message reads as
+ * unclipped. A case about the clipped state therefore has to supply the geometry the browser would.
+ *
+ * Assumptions: the two figures are the ones a review measured on a real screen (`scrollWidth 747 >
+ * clientWidth 566`) rather than arbitrary numbers, so the case stands for an observed rendering.
+ *
+ * Assumptions: the properties are defined on the HTML element prototype and REMOVED afterwards, not
+ * left in place. jsdom implements both on `Element.prototype`, so defining them one level down shadows
+ * the implementation for the duration and deleting restores it exactly — assigning the original
+ * descriptor back would be wrong, because there is no own descriptor at this level to restore.
+ * @param {() => void} run - The case body, executed while the clipped geometry is in force.
+ * @returns {void} Nothing; the geometry is removed before returning, including on failure.
+ */
+function withClippedGeometry(run: () => void): void {
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+    configurable: true,
+    /**
+     * Reports the laid-out inline size of the element.
+     * @returns {number} The measured client width of a clipped message.
+     */
+    get(): number {
+      return CLIPPED_CLIENT_WIDTH;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
+    configurable: true,
+    /**
+     * Reports the content width of the element.
+     * @returns {number} The measured scroll width of a clipped message.
+     */
+    get(): number {
+      return CLIPPED_SCROLL_WIDTH;
+    },
+  });
+
+  try {
+    run();
+  } finally {
+    // Assumptions: `delete` rather than a re-definition, so the jsdom implementation one prototype up
+    //   is what answers again — a stub left behind would make every later case in this file measure
+    //   every message as clipped.
+    delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    delete (HTMLElement.prototype as { scrollWidth?: number }).scrollWidth;
+  }
+}
+
+/**
+ * The severity icon is drawn but hidden, so the live region announces the sentence and nothing else.
+ *
+ * Purpose: an accessibility review found the band's icon exposed under its own machine name — `image
+ * "close-circle"` on a rejection and `image "info-circle"` on an advisory line — announced inside the
+ * live region and BEFORE the message, so a listener heard the name of a drawing before hearing what had
+ * happened.
+ *
+ * Assumptions: the case asserts the glyph is STILL RENDERED as well as hidden, because removing it is
+ * the other way to silence the announcement and it is the wrong way: the sentence is painted in the
+ * base text grade for contrast reasons, so the icon is the second visual channel severity travels on.
+ * @returns {void} Nothing; the case asserts on the rendered band.
+ */
+function hidesTheSeverityIconFromAssistiveTechnology(): void {
+  render(<MessageBand mapset="COMEN01" message={SHORT_MESSAGE} />);
+
+  const alert = screen.getByRole('alert');
+  const icon = alert.querySelector('.anticon');
+
+  expect(icon, 'severity must still travel on a second visual channel').not.toBeNull();
+  expect(icon?.getAttribute('aria-hidden')).toBe('true');
+  expect(
+    screen.queryByRole('img'),
+    'no decorative glyph may be announced inside the live region',
+  ).not.toBeInTheDocument();
+}
+
+/**
+ * The band exposes exactly one live region, and it is the alert rather than the wrapper.
+ *
+ * Purpose: a review observed that the band element itself carries neither `role` nor `aria-live`, so
+ * announcement depends entirely on the nested alert. That is deliberate and this case pins it as such:
+ * a live region on the wrapper would nest a second one around the first and announce one message twice.
+ * The property worth guarding is the COUNT, so it is asserted directly.
+ * @returns {void} Nothing; the case asserts on the rendered band.
+ */
+function keepsOneLiveRegionPerBand(): void {
+  render(<MessageBand mapset="COMEN01" message={SHORT_MESSAGE} />);
+
+  const band = screen.getByTestId(MESSAGE_BAND_TEST_ID);
+  const alert = screen.getByRole('alert');
+
+  expect(band.getAttribute('role'), 'the wrapper must not announce').toBeNull();
+  expect(band.getAttribute('aria-live'), 'the wrapper must not be a live region').toBeNull();
+  expect(band).toContainElement(alert);
+  expect(document.querySelectorAll('[aria-live]')).toHaveLength(0);
+}
+
+/**
+ * Every service severity maps onto exactly one band appearance.
+ *
+ * Purpose: a review found the `severity` member of the problem document completely inert — a WARNING and
+ * a CRITICAL fault rendered byte-identically, and no fault in any mode ever produced anything but the
+ * rejection appearance, because nothing joined the two vocabularies.
+ *
+ * Assumptions: WARNING and CRITICAL are asserted to be THE SAME, which is the observation the review
+ * reported as the defect. It is faithful: the row-23 field is `COLOR=RED` on 21 of 21 mapsets, so the
+ * reference has one appearance for an unsuccessful turn and a fourth would be an invention. What the
+ * case pins as fixed is the other half — that the quiet tiers no longer render as rejections.
+ * @returns {void} Nothing; the case asserts on the helper's answers.
+ */
+function translatesEveryServiceSeverity(): void {
+  expect(messageBandSeverityForApiSeverity('LOG')).toBe('neutral');
+  expect(messageBandSeverityForApiSeverity('INFO')).toBe('info');
+  expect(messageBandSeverityForApiSeverity('WARNING')).toBe('error');
+  expect(messageBandSeverityForApiSeverity('CRITICAL')).toBe('error');
+
+  expect(
+    messageBandSeverityForApiSeverity('LOG'),
+    'a recordable condition must not render as a rejection',
+  ).not.toBe(messageBandSeverityForApiSeverity('CRITICAL'));
+}
+
+/**
+ * A translated severity drives the band's own rendering, not merely the helper's answer.
+ *
+ * Purpose: prove the two halves compose. A mapping helper nothing renders through would leave the
+ * measured defect exactly where it was, so the case passes a translated value into the band and asserts
+ * the announcement and the colour that follow from it.
+ * @returns {void} Nothing; the case asserts on the rendered bands.
+ */
+function rendersATranslatedSeverity(): void {
+  const neutral = tokenReference(BMS_TEXT_COLOR_TOKENS.NEUTRAL);
+
+  const { unmount } = render(
+    <MessageBand
+      mapset="COMEN01"
+      message={SHORT_MESSAGE}
+      severity={messageBandSeverityForApiSeverity('LOG')}
+    />,
+  );
+
+  expect(screen.getByRole('status'), 'a recordable condition must announce politely').toBeVisible();
+  expect(messageColour(SHORT_MESSAGE)).toBe(neutral);
+  unmount();
+
+  render(
+    <MessageBand
+      mapset="COMEN01"
+      message={SHORT_MESSAGE}
+      severity={messageBandSeverityForApiSeverity('CRITICAL')}
+    />,
+  );
+
+  expect(screen.getByRole('alert'), 'a critical fault must interrupt').toBeVisible();
+}
+
+/**
+ * The advisory line defaults to the colour its own field declares, not to the outcome line's.
+ *
+ * Purpose: the band had ONE default severity for both channels — the measured `COLOR=RED` of row 23 — so
+ * a screen delegating its row-22 line without restating a severity painted standing guidance in the
+ * rejection colour and announced it assertively. Row 22 is `COLOR=NEUTRAL` on every mapset that
+ * declares it.
+ *
+ * Assumptions: the outcome line's default is asserted in the same case, because the fix would be a
+ * regression if it moved that one too: `ERRMSG` is red whether it carries a refusal or the sign-off
+ * acknowledgement, so the row-23 default must not follow the row-22 correction.
+ * @returns {void} Nothing; the case asserts on the rendered bands.
+ */
+function defaultsEachChannelToItsOwnDeclaredColour(): void {
+  const neutral = tokenReference(BMS_TEXT_COLOR_TOKENS.NEUTRAL);
+  const red = tokenReference(BMS_TEXT_COLOR_TOKENS.RED);
+
+  const { unmount } = render(
+    <MessageBand channel="information" mapset="COACTVW" message={SHORT_MESSAGE} />,
+  );
+
+  expect(defaultMessageBandSeverity('information')).toBe('neutral');
+  expect(messageColour(SHORT_MESSAGE)).toBe(neutral);
+  expect(screen.getByRole('status')).toBeVisible();
+  unmount();
+
+  render(<MessageBand mapset="COACTVW" message={SHORT_MESSAGE} />);
+
+  expect(defaultMessageBandSeverity('error')).toBe('error');
+  expect(messageColour(SHORT_MESSAGE)).toBe(red);
+  expect(screen.getByRole('alert')).toBeVisible();
+}
+
+/**
+ * An explicitly named channel outranks the older `line` vocabulary.
+ *
+ * Purpose: two prop names reached this component for one concept, and the resolution let `line` win
+ * over an explicit `channel` while the note beside it claimed the opposite. A caller passing both — one
+ * screen does — was therefore routed by whichever name the code happened to read rather than by the
+ * documented rule.
+ *
+ * Assumptions: both orders are asserted, because a resolution that simply preferred `information`
+ * would satisfy one direction and reproduce the ambiguity in the other.
+ * @returns {void} Nothing; the case asserts on the rendered bands.
+ */
+function takesTheChannelOverTheLegacyLine(): void {
+  const { unmount } = render(
+    <MessageBand channel="information" line="message" mapset="COACTVW" message={SHORT_MESSAGE} />,
+  );
+
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_IDS.information)).toBeInTheDocument();
+  expect(screen.queryByTestId(MESSAGE_BAND_TEST_IDS.error)).not.toBeInTheDocument();
+  unmount();
+
+  render(
+    <MessageBand channel="error" line="information" mapset="COACTVW" message={SHORT_MESSAGE} />,
+  );
+
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_IDS.error)).toBeInTheDocument();
+  expect(screen.queryByTestId(MESSAGE_BAND_TEST_IDS.information)).not.toBeInTheDocument();
+
+  // Assumptions: `line` still answers on its own, so the callers holding only the older name keep
+  //   reaching the band they always did.
+  expect(messageBandChannelForLine('information')).toBe('information');
+  expect(messageBandChannelForLine('message')).toBe('error');
+  expect(messageBandChannelForLine(undefined)).toBe('error');
+}
+
+/**
+ * A clipped sentence is recoverable by pointer, by keyboard and in full from the DOM.
+ *
+ * Purpose: a review measured a 119-character message clipped at `scrollWidth 747 > clientWidth 566`,
+ * read the element, found no `title`, and reported the tail as unrecoverable by hover or by assistive
+ * technology. Three mechanisms answer the three audiences and the case asserts all three: the native
+ * attribute a pointer reveals and an inspection finds, the tab stop that lets focus summon the
+ * design-system reveal, and the untouched full string that assistive technology reads.
+ *
+ * Assumptions: the absence of `aria-label` is asserted deliberately rather than left unstated. It is
+ * the other attribute the review named, and it is prohibited on this element: the text is a `span` with
+ * no role, which maps to `generic`, where `aria-label` is ignored by several screen readers and
+ * reported by axe.
+ * @returns {void} Nothing; the case asserts on the rendered band.
+ */
+function offersTheClippedSentenceToEveryAudience(): void {
+  withClippedGeometry(
+    /**
+     * Renders a clipped band and inspects the three recovery mechanisms.
+     * @returns {void} Nothing; assertions raise on failure.
+     */
+    () => {
+      render(<MessageBand mapset="COMEN01" message={CLIPPED_MESSAGE} />);
+
+      const text = screen.getByText(CLIPPED_MESSAGE);
+
+      expect(text.getAttribute('title'), 'a pointer must be able to recover the tail').toBe(
+        CLIPPED_MESSAGE,
+      );
+      expect(text.tabIndex, 'a keyboard must be able to reach the reveal').toBe(0);
+      expect(text.textContent, 'the sentence is never sliced in the data').toBe(CLIPPED_MESSAGE);
+      expect(
+        text.getAttribute('aria-label'),
+        'aria-label is prohibited on a generic element',
+      ).toBeNull();
+    },
+  );
+}
+
+/**
+ * A sentence that fits adds neither a tooltip attribute nor a tab stop.
+ *
+ * Purpose: the recovery affordances are offered because a sentence is clipped, so a band whose message
+ * fits must add none of them — a `title` duplicating fully visible text is noise on every hover on every
+ * screen, and a tab stop that reveals nothing is a defect rather than a mitigation.
+ *
+ * Assumptions: no geometry is supplied, so the element measures as unclipped exactly as an unclipped
+ * element does — jsdom reports zero for both widths and the band reads a zero client width as "not
+ * measurable" rather than as truncation.
+ * @returns {void} Nothing; the case asserts on the rendered band.
+ */
+function addsNoRecoveryWhileTheSentenceFits(): void {
+  render(<MessageBand mapset="COMEN01" message={SHORT_MESSAGE} />);
+
+  const text = screen.getByText(SHORT_MESSAGE);
+
+  expect(text.getAttribute('title')).toBeNull();
+  expect(text.getAttribute('tabindex')).toBeNull();
+}
+
+/**
+ * Groups the announcement, severity-translation and truncation-recovery cases.
+ * @returns {void} Nothing; the cases are registered with the runner.
+ */
+function messageBandAnnouncementCases(): void {
+  it(
+    'hides the severity icon from assistive technology',
+    hidesTheSeverityIconFromAssistiveTechnology,
+  );
+  it('keeps one live region per band', keepsOneLiveRegionPerBand);
+  it('translates every service severity', translatesEveryServiceSeverity);
+  it('renders a translated severity', rendersATranslatedSeverity);
+  it('defaults each channel to its own declared colour', defaultsEachChannelToItsOwnDeclaredColour);
+  it('takes the channel over the legacy line', takesTheChannelOverTheLegacyLine);
+  it('offers a clipped sentence to every audience', offersTheClippedSentenceToEveryAudience);
+  it('adds no recovery while the sentence fits', addsNoRecoveryWhileTheSentenceFits);
+}
+
+describe('message band announcement and truncation recovery', messageBandAnnouncementCases);

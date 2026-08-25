@@ -70,7 +70,7 @@
  * `npm run typecheck` on the symbol it omitted. Every other test in this package imports them.
  */
 
-import { screen, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -79,9 +79,13 @@ import {
   listPendingAuthorizations,
   setAuthorizationFraudState,
 } from '../api/authorization';
+import { ApiRequestError, claimRetainedOutcome } from '../api/client';
+import type { RetainedOutcome } from '../api/client';
+import { MONEY_PICTURES, applyMoneyEditMask } from '../format/money';
 import type {
   AuthFraudFlag,
   FraudAction,
+  FraudMarkResponse,
   MatchStatus,
   PendingAuthDetail,
   PendingAuthDetailScreen,
@@ -102,6 +106,8 @@ import {
   PROGRAM_MESSAGE_SOURCES,
   PROGRAM_SOURCE_FILES,
   REDACTED_DIAGNOSTICS,
+  REQUEST_IN_PROGRESS,
+  TRANSIENT_FAILURE_TRY_AGAIN,
   UNEXPECTED_ABEND_OCCURRED,
   normaliseMessageBandValue,
 } from '../messages/messages';
@@ -113,9 +119,12 @@ import AuthDetailScreen, {
   AUTH_DETAIL_KEY_LABELS,
   AUTH_DETAIL_MERCHANT_HEADING,
   AUTH_DETAIL_SUBTITLE,
+  FRAUD_CONFIRMATION_RECORD_ID,
   FRAUD_REPORTED,
   FRAUD_WITHDRAWN,
+  nextFraudAction,
 } from '../screens/authDetail';
+import type { FraudTransitionHandover } from '../screens/authDetail';
 import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 
 import {
@@ -749,16 +758,19 @@ function keyLegendControl(label: string): HTMLElement {
 /**
  * Confirms the fraud prompt that the fifth key opens.
  *
- * Assumptions: the confirmation is found by its accessible name rather than by a test identifier,
- * because `Popconfirm` supplies the two controls itself and the design system names them; a screen that
- * replaced the prompt with an unguarded button would leave this query with nothing to find, which is
- * the failure the case wants.
+ * Assumptions: the accept is located INSIDE the dialog, because the accept carries the mapset's own
+ * row-24 legend text and so shares its accessible name with the trigger beside the record and with the
+ * legend's own control. Scoping the query to the dialog is what distinguishes the three, and it is also
+ * an assertion in its own right: a screen offering the accept outside a dialog would not be found here.
  * @param {HarnessRenderResult} rendered - The render result whose operator performs the click.
  * @returns {Promise<void>} Resolves once the confirmation has been accepted and settled.
  * @throws {Error} If no confirmation is offered, which means the write was not gated.
  */
 async function confirmFraudPrompt(rendered: HarnessRenderResult): Promise<void> {
-  await rendered.user.click(await screen.findByRole('button', { name: /^OK$/u }));
+  const dialog = await screen.findByRole('dialog');
+  await rendered.user.click(
+    within(dialog).getByRole('button', { name: AUTH_DETAIL_KEY_LABELS.PFK05 }),
+  );
 }
 
 /**
@@ -768,7 +780,8 @@ async function confirmFraudPrompt(rendered: HarnessRenderResult): Promise<void> 
  * @throws {Error} If no prompt is open, which means the fifth key did not raise one.
  */
 async function dismissFraudPrompt(rendered: HarnessRenderResult): Promise<void> {
-  await rendered.user.click(await screen.findByRole('button', { name: /^Cancel$/u }));
+  const dialog = await screen.findByRole('dialog');
+  await rendered.user.click(within(dialog).getByRole('button', { name: /^Cancel$/u }));
 }
 
 /**
@@ -1020,12 +1033,34 @@ async function carriesMoneyAsAnExactDecimalStringInTheCodeFace(): Promise<void> 
   expect(DETAIL.approvedAmount).toMatch(/^-?\d+\.\d{2}$/u);
 
   const cell = recordValueCellFor(AUTH_DETAIL_FIELD_LABELS.amount);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the amount is located by its MASKED form, and it used to be
+   *       located by the wire string. The screen now renders every amount through
+   *       `MONEY_PICTURES.transactionAmount`, which is the money finding's own resolution -- browser
+   *       validation counted four mutually incompatible money renderings across the application and
+   *       named this screen's bare `123.45` as one of them.
+   * WHY : ⚠️ Assumptions: the expectation is COMPUTED by the same helper the screen calls rather
+   *       than written out as `+12345678.90`. A literal would keep passing if the screen swapped to a
+   *       different picture of the same width, and it would state the mask's output in a second place
+   *       where it could drift; the computed form measures that the screen used THIS picture on THIS
+   *       value. The digits themselves are still asserted unmasked immediately below, which is the
+   *       property that actually matters -- the mask decorates, it never re-computes.
+   */
+  const masked = applyMoneyEditMask(DETAIL.approvedAmount, MONEY_PICTURES.transactionAmount);
   expect(cell).toHaveTextContent(DETAIL.approvedAmount);
 
-  const amountText = screen.getByText(DETAIL.approvedAmount);
+  const amountText = screen.getByText(masked);
   expect(amountText.getAttribute('style')).toContain(
     `var(${antdCssVariable(TYPOGRAPHY_TOKENS.fixedPitchData)})`,
   );
+
+  /*
+   * WHY : ⚠️ Assumptions: `white-space: pre` is asserted beside the face because the two together
+   *       are what make a column. The mask pads to a fixed width, and under normal white-space
+   *       handling a browser collapses a run of spaces -- so without `pre` the fixed-pitch face would
+   *       align nothing. `renderMoney` returns the property for that reason.
+   */
+  expect(amountText.style.whiteSpace).toBe('pre');
 
   /*
    * WHY : Assumptions: the whole rendered document is scanned rather than the amount alone, because a
@@ -1048,8 +1083,14 @@ async function carriesMoneyAsAnExactDecimalStringInTheCodeFace(): Promise<void> 
  * which the migration will not do for fidelity's sake, so the exact figure is rendered and the
  * divergence is recorded rather than silent.
  *
+ * ⚠️ Assumptions: the divergence SURVIVES the screen now masking its amount, and that is a property
+ * of `applyMoneyEditMask` rather than of this screen -- it preserves a value too wide for its picture
+ * instead of clipping it to the picture's width. This case is therefore what proves the mask cannot
+ * reintroduce the terminal's truncation, which is the one outcome that would make the money finding's
+ * fix worse than the defect it fixes.
+ *
  * Assumptions: the fixture's amount is thirteen characters against the field's declared twelve, so the
- * case fails if a later change reinstated the mask.
+ * case fails if a later change reinstated the terminal's own mask.
  * @returns {Promise<void>} Resolves once the untruncated amount has been found.
  */
 async function rendersAnAmountWiderThanTheMapsetFieldInFull(): Promise<void> {
@@ -1416,12 +1457,19 @@ async function advertisesThreeKeysAndRendersNoEnterDescriptor(): Promise<void> {
 }
 
 /**
- * Asserts the design system's emphasis reaches the two action keys the mapping names.
+ * Asserts the legend's emphasis follows each key's declared RISK rather than its attention identifier.
  *
- * Assumptions: the mapping fixes primary emphasis to Enter and the fifth key and the default to the
- * rest, which `PRIMARY_ACTION_AIDS` states as data; this case reads that constant rather than
- * restating the pairing, so a change to the mapping reaches the assertion. Enter's own emphasis is
- * unobservable on this screen for the reason the previous case records -- it advertises no control --
+ * ⚠️ Refactoring Rationale: this case used to read `PRIMARY_ACTION_AIDS` and assert the emphasis that
+ * mapping produces, and it now asserts the emphasis the screen's own risk declarations produce. The two
+ * differ on the one key that matters: the identifier mapping puts Enter and the fifth key on the same
+ * primary emphasis, so the key that re-reads a record and the key that reports a live authorization as
+ * fraud rendered identically. Declaring `destructive` on the fifth key and `read-only` on the others
+ * makes the writing key the solid DANGEROUS control, and `ant-btn-dangerous` is the class that
+ * distinguishes it -- a regression to the identifier mapping would still be primary and would fail here.
+ *
+ * Assumptions: the identifier mapping is still read and asserted, because it remains the fallback for a
+ * binding that declares no risk and this case is the record of why this screen declines it. Enter's own
+ * emphasis is unobservable here for the reason the previous case records -- it advertises no control --
  * so the two facts are asserted together: it is named in the mapping, and it renders nothing.
  * @returns {Promise<void>} Resolves once the emphasis classes have been measured.
  */
@@ -1435,8 +1483,15 @@ async function emphasisesTheFifthKeyAndNotTheOtherAdvertisedKeys(): Promise<void
   expect(primaryAids).not.toContain('PFK08');
 
   expect(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK05).className).toContain('ant-btn-primary');
+  expect(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK05).className).toContain('ant-btn-dangerous');
   expect(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK03).className).toContain('ant-btn-default');
+  expect(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK03).className).not.toContain(
+    'ant-btn-dangerous',
+  );
   expect(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK08).className).toContain('ant-btn-default');
+  expect(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK08).className).not.toContain(
+    'ant-btn-dangerous',
+  );
 }
 
 /**
@@ -1662,8 +1717,13 @@ function nextRowFor(key: string): PendingAuthDetail {
  * Assumptions: the confirmation is a browser ADDITION rather than a reference behaviour -- the
  * terminal's fifth key wrote immediately -- and it is added because a pointer can activate a control by
  * accident where a function key cannot, and reporting a live authorization as fraud is not reversible
- * without a second write. The design-system mapping assigns `Popconfirm` with a dangerous confirm
- * control to exactly this role.
+ * without a second write.
+ *
+ * ⚠️ Refactoring Rationale: the accept is asserted SOLID dangerous -- `ant-btn-dangerous` together with
+ * `ant-btn-primary` -- where it previously asserted the dangerous class alone. The legacy
+ * `okType="danger"` this surface used resolved to `danger: true` with the DEFAULT variant, which
+ * rendered the destructive control as the quieter of the two buttons and inverted emphasis against
+ * risk. Asserting both classes is what makes that regression fail rather than pass.
  *
  * Assumptions: "exactly once" is asserted rather than "at least once", and on a toggle the difference
  * is material rather than pedantic: the direction is derived from the mark on the glass, so a second
@@ -1678,8 +1738,12 @@ async function gatesTheFraudTransitionBehindADangerousConfirmation(): Promise<vo
   });
 
   await pressPfKey(rendered.user, 'PFK05');
-  const confirmControl = await screen.findByRole('button', { name: /^OK$/u });
+  const dialog = await screen.findByRole('dialog');
+  const confirmControl = within(dialog).getByRole('button', {
+    name: AUTH_DETAIL_KEY_LABELS.PFK05,
+  });
   expect(confirmControl.className).toContain('ant-btn-dangerous');
+  expect(confirmControl.className).toContain('ant-btn-primary');
 
   await dismissFraudPrompt(rendered);
   expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalled();
@@ -1691,6 +1755,566 @@ async function gatesTheFraudTransitionBehindADangerousConfirmation(): Promise<vo
   expect(vi.mocked(setAuthorizationFraudState)).toHaveBeenCalledWith(SELECTOR, {
     action: FRAUD_REPORTED,
   });
+}
+
+/**
+ * The confirmation names the authorization it acts on, and both its controls point at that naming.
+ *
+ * ⚠️ Purpose: this is the regression this case exists for. Browser validation reported that no
+ * confirmation on this screen carried a description, that none named the record it acted on, and that
+ * the fraud prompt did not distinguish marking from removing -- its only text was the fifth key's own
+ * legend echoed back. On a screen whose eighth key replaces the record UNDER an open prompt, "this one"
+ * is not an identification.
+ *
+ * ⚠️ Assumptions: the four identifying values asserted are the ones that name the ROW --
+ * `cpy/CIPAUDTY.cpy` L19 to L54 keys the detail by account with the authorization date and time, and
+ * the mapset paints the card number and the fifteen-character transaction identifier beside them. The
+ * fifth assertion is the tag that WOULD be written, which is how marking is distinguished from removing
+ * without a sentence for either: `F` here because the fixture's mark is the lone separator.
+ *
+ * Assumptions: `aria-describedby` is asserted on BOTH controls rather than on the confirming one alone.
+ * The safe control is the one that holds focus when the prompt opens, so it is the control whose
+ * description a reviewer hears first, and a naming reachable only from the dangerous control would be
+ * announced only to a reviewer already about to write.
+ * @returns {Promise<void>} Resolves once the naming and both associations have been asserted.
+ */
+async function namesTheAuthorizationInTheConfirmation(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+
+  await pressPfKey(rendered.user, 'PFK05');
+  const dialog = await screen.findByRole('dialog');
+
+  const naming = document.getElementById(FRAUD_CONFIRMATION_RECORD_ID);
+  expect(naming).not.toBeNull();
+  expect(naming?.textContent).toBe(
+    `${AUTH_DETAIL_FIELD_LABELS.cardNumber} ${MASKED_CARD} ` +
+      `${AUTH_DETAIL_FIELD_LABELS.authDate} ${DETAIL.authDate} ` +
+      `${AUTH_DETAIL_FIELD_LABELS.authTime} ${DETAIL.authTime} ` +
+      `${AUTH_DETAIL_FIELD_LABELS.transactionId} ${DETAIL.transactionId} ` +
+      `${AUTH_DETAIL_FIELD_LABELS.fraudStatus} ${FRAUD_REPORTED}`,
+  );
+
+  /*
+   * WHY : Assumptions: both controls are located INSIDE the dialog, because the accept carries the
+   *       mapset's fifth-key legend and so shares its accessible name with the trigger beside the record
+   *       and with the legend's own control. The scoping is what distinguishes them, and it also asserts
+   *       that the described controls are the confirmation's own rather than any control that happens to
+   *       carry the name.
+   */
+  expect(
+    within(dialog).getByRole('button', { name: AUTH_DETAIL_KEY_LABELS.PFK05 }),
+  ).toHaveAttribute('aria-describedby', FRAUD_CONFIRMATION_RECORD_ID);
+  expect(within(dialog).getByRole('button', { name: /^Cancel$/u })).toHaveAttribute(
+    'aria-describedby',
+    FRAUD_CONFIRMATION_RECORD_ID,
+  );
+}
+
+/**
+ * The confirmation names the WITHDRAWAL when the record already carries a report.
+ *
+ * ⚠️ Assumptions: this is the half of the finding that a single-direction case cannot reach. The prompt
+ * has one title for both directions -- the mapset paints one legend, `F5=Mark/Remove Fraud` -- so the
+ * only thing that tells a reviewer which way the write goes is the tag in the naming. Asserting `R`
+ * here against `F` in the case above is what makes the distinction observable.
+ * @returns {Promise<void>} Resolves once the withdrawing tag has been asserted.
+ */
+async function namesTheWithdrawalOnAReportedAuthorization(): Promise<void> {
+  const rendered = await renderDetail(REPORTED_DETAIL);
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await screen.findByRole('dialog');
+
+  expect(document.getElementById(FRAUD_CONFIRMATION_RECORD_ID)?.textContent).toContain(
+    `${AUTH_DETAIL_FIELD_LABELS.fraudStatus} ${FRAUD_WITHDRAWN}`,
+  );
+}
+
+/**
+ * The confirmation is published as a modal DIALOG, from the pointer route and from the key route.
+ *
+ * ⚠️ Purpose: this is the measured finding. Browser validation reported the confirmation as a
+ * `role="tooltip"` overlay with no `aria-modal` -- the tooltip primitive `Popconfirm` renders through
+ * hardcodes that role with no prop path to change it -- so a reviewer using a screen reader was told a
+ * hint had appeared rather than that a question was being asked. Three properties are asserted here and
+ * none of them is authored by this screen: the role, the modal flag, and the accessible NAME resolving
+ * through `aria-labelledby` to the mapset's own fifth-key legend. A regression to any anchored popup
+ * primitive fails on the first of them.
+ *
+ * ⚠️ Assumptions: BOTH entry routes are exercised, because the finding was measured on both. The pointer
+ * route is the trigger beside the record; the key route is the real `F5` attention identifier, which
+ * reaches the same capture site. A screen that raised a dialog from one and a balloon from the other
+ * would pass a single-route case.
+ * @returns {Promise<void>} Resolves once both routes have published the dialog.
+ */
+async function publishesTheConfirmationAsAModalDialog(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+
+  await rendered.user.click(fraudTriggerBesideTheRecord());
+  const fromPointer = await screen.findByRole('dialog');
+  expect(fromPointer).toHaveAttribute('aria-modal', 'true');
+  expect(fromPointer).toHaveAccessibleName(AUTH_DETAIL_KEY_LABELS.PFK05);
+
+  await rendered.user.keyboard('{Escape}');
+  await waitForTheFraudConfirmationToClose();
+
+  await pressPfKey(rendered.user, 'PFK05');
+  const fromKey = await screen.findByRole('dialog');
+  expect(fromKey).toHaveAttribute('aria-modal', 'true');
+  expect(fromKey).toHaveAccessibleName(AUTH_DETAIL_KEY_LABELS.PFK05);
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalled();
+}
+
+/**
+ * How many tab presses the containment probe makes.
+ *
+ * Assumptions: five, which is one more than the confirmation's own control count -- the close control,
+ * the decline and the accept, plus the step through the document that jsdom's tab wrap takes. Probing
+ * one press would measure only the first move and would miss the return path, which is the half of the
+ * lock that a screen without one fails.
+ */
+const TAB_PROBE_STEPS = 5;
+
+/**
+ * Keyboard focus stays INSIDE the confirmation while it is open, and nothing steals it on open.
+ *
+ * ⚠️ Purpose: the second and third halves of the measured finding. Focus was measured resting on the
+ * destructive trigger itself immediately after activation, again after a 900 ms settle and again through
+ * the key route; and one `Tab` from there landed on `F8=Next Auth`, with
+ * `popconfirm.contains(activeElement) === false`. So the surface took neither initial focus nor
+ * containment, and a reviewer tabbing away from a question they had not answered could step the record
+ * out from under it.
+ *
+ * ⚠️ Assumptions: the settle is awaited before focus is read, because the deleted defect was an ORDERING
+ * -- an explicit `focus()` call that the browser applied after the overlay's own autofocus. Reading focus
+ * only on the synchronous turn could pass against a screen that stole it one task later, which is
+ * precisely what was measured. Waiting for the assertion to hold, then re-asserting, covers both.
+ *
+ * Assumptions: containment is probed with several tabs rather than one, and the legend's eighth-key
+ * control is named in the assertion because it is the exact element the browser probe landed on.
+ * @returns {Promise<void>} Resolves once focus has been probed on arrival and after tabbing.
+ */
+async function containsKeyboardFocusInsideTheConfirmation(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+
+  await pressPfKey(rendered.user, 'PFK05');
+  const dialog = await screen.findByRole('dialog');
+  const cancel = within(dialog).getByRole('button', { name: /^Cancel$/u });
+
+  await waitFor(
+    /**
+     * Asserts the declining choice holds focus once the surface has settled.
+     * @returns {void} Nothing; the expectation throws until focus has arrived.
+     */
+    function theDecliningChoiceHoldsFocus(): void {
+      expect(cancel).toHaveFocus();
+    },
+  );
+  expect(document.activeElement).not.toBe(fraudTriggerBesideTheRecord());
+  expect(document.activeElement).not.toBe(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK05));
+
+  /*
+   * WHY : ⚠️ Assumptions: the containment probe needs a DOM that reports boxes, and this is an
+   *       accommodation for the test environment rather than a statement about the screen. The dialog
+   *       primitive's focus lock is real -- `@rc-component/dialog/es/Dialog/Content/Panel.js` L41 calls
+   *       `useLockFocus`, gated on the wrapper computing `position: fixed`, which the design system's
+   *       injected stylesheet satisfies here (measured) -- but the lock forces focus back by walking
+   *       `getFocusNodeList`, and that filter drops every element `isVisible` rejects
+   *       (`@rc-component/util/es/Dom/focus.js`, `Dom/isVisible.js`). jsdom performs no layout, so every
+   *       box is zero, every element is judged invisible, and the lock finds nothing to return focus to.
+   *       Installing a coherent box makes the lock's own list non-empty, which is what turns the browser
+   *       finding into something measurable in this runner.
+   * WHY : Alternatives Considered: asserting the lock's ENABLING conditions instead -- that the wrapper
+   *       computes `position: fixed` and that the primitive defaults `focusTrap` to true. Rejected as an
+   *       assertion about the library's configuration rather than about where focus goes, which is the
+   *       property the finding measured and the property a reviewer depends on.
+   */
+  const restoreLayout = installMeasurableBoxes();
+  try {
+    const background = [
+      fraudTriggerBesideTheRecord(),
+      keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK03),
+      keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK05),
+      keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK08),
+    ];
+    let landingsInsideTheDialog = 0;
+
+    for (let step = 0; step < TAB_PROBE_STEPS; step += 1) {
+      await rendered.user.tab();
+      const landed = document.activeElement;
+      /*
+       * WHY : ⚠️ Assumptions: the assertion is that focus never lands on a control BEHIND the dialog,
+       *       and `document.body` is admitted as a landing because it is not a control at all. jsdom's
+       *       tab implementation wraps through the document and parks focus on the body on the way
+       *       round, and focusing the body fires no `focusin` -- so the primitive's lock, which returns
+       *       focus from a `focusin` listener, cannot see that step. A real browser passes through its
+       *       own chrome at the same point. Every step that lands on an ELEMENT is the measurable one,
+       *       and each of those is asserted inside the dialog.
+       */
+      expect(background).not.toContain(landed);
+      if (landed === document.body) {
+        continue;
+      }
+      expect(dialog.contains(landed)).toBe(true);
+      landingsInsideTheDialog += 1;
+    }
+
+    /*
+     * WHY : Assumptions: a count is asserted as well as the per-step containment, because a screen that
+     *       parked focus on the body for every step would satisfy every individual assertion above while
+     *       containing nothing. Requiring the cycle to come back INTO the dialog is what makes the lock's
+     *       return path the thing being measured.
+     */
+    expect(landingsInsideTheDialog).toBeGreaterThanOrEqual(3);
+  } finally {
+    restoreLayout();
+  }
+
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalled();
+}
+
+/**
+ * Makes every attached element report a non-degenerate box, and returns the undo.
+ *
+ * Purpose: jsdom runs no layout engine, so `getBoundingClientRect` answers zeroes for everything and any
+ * library that filters by visibility sees an empty document. A single coherent box is enough for the
+ * dialog primitive's focus lock to have a list of controls to return focus to.
+ *
+ * Assumptions: the box is the same for every element and its numbers carry no meaning -- nothing in this
+ * case measures a position or a size, only whether an element is judged visible at all. A case that did
+ * measure geometry would need per-element boxes and would say so.
+ * @returns {() => void} The function that restores the real, layout-free behaviour.
+ */
+function installMeasurableBoxes(): () => void {
+  const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(
+    /**
+     * Answers one plausible box for any element the document contains.
+     * @returns {DOMRect} A 120 by 24 box at the origin.
+     */
+    function measurableBox(this: Element): DOMRect {
+      const width = this.isConnected ? 120 : 0;
+      const height = this.isConnected ? 24 : 0;
+      return {
+        x: 0,
+        y: 0,
+        width,
+        height,
+        top: 0,
+        left: 0,
+        right: width,
+        bottom: height,
+        /**
+         * Answers the box as a plain value, which the DOM interface requires.
+         * @returns {object} The box's own numbers.
+         */
+        toJSON: (): object => ({ width, height }),
+      };
+    },
+  );
+  /**
+   * Restores the real, layout-free `getBoundingClientRect`.
+   * @returns {void} Nothing; the spy is removed as a side effect.
+   */
+  function restoreMeasurableBoxes(): void {
+    spy.mockRestore();
+  }
+  return restoreMeasurableBoxes;
+}
+
+/**
+ * Escape withdraws the confirmation and writes nothing.
+ *
+ * ⚠️ Purpose: Escape is the keyboard's own decline and it did not exist as a tested path before, because
+ * the tooltip primitive the confirmation used had no dialog semantics to dismiss. The property asserted
+ * is the pair: the question goes away, and the store is untouched -- browser validation measured zero
+ * requests matching the fraud path after a dismissal and that is what this pins.
+ *
+ * ⚠️ Assumptions: the captured target is asserted DISCARDED rather than merely hidden, which is measured
+ * by pressing the fifth key again afterwards and finding a fresh dialog that still writes nothing. A
+ * surviving capture would be a write a later confirmation could deliver against a record nobody was
+ * asked about, and the dismissal path is where that leak would live.
+ * @returns {Promise<void>} Resolves once the withdrawal and the absence of a write are asserted.
+ */
+async function writesNothingWhenTheConfirmationIsWithdrawnByEscape(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+  vi.mocked(setAuthorizationFraudState).mockResolvedValue({
+    updateStatus: 'ADDED',
+    message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS,
+  });
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await screen.findByRole('dialog');
+
+  await rendered.user.keyboard('{Escape}');
+  await waitForTheFraudConfirmationToClose();
+
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalled();
+  expect(recordValueCellFor(AUTH_DETAIL_FIELD_LABELS.fraudStatus)).toHaveTextContent(
+    DETAIL.fraudMark,
+  );
+
+  await pressPfKey(rendered.user, 'PFK05');
+  expect(await screen.findByRole('dialog')).toBeInTheDocument();
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalled();
+}
+
+/**
+ * The record announces the outstanding write, and the legend's keys stay present while it runs.
+ *
+ * ⚠️ Purpose: an in-flight write used to be reported by DISABLING the fifth and eighth keys, and a key
+ * disabled in this hook is answered through its invalid-key channel -- so pressing the fifth key during
+ * its own write painted `CCDA-MSG-INVALID-KEY`, a verbatim sentence that means something else entirely.
+ * The keys now declare `busy` instead: they stay present, enabled and named, an early press is declined
+ * silently, and the shared `REQUEST_IN_PROGRESS` sentence says what is happening. That is the terminal's
+ * own input-inhibit behaviour, which announced a running task and withdrew nothing.
+ *
+ * Assumptions: the write is held UNSETTLED, because the announcement exists only while a request is
+ * outstanding and a settled write would leave nothing to measure.
+ * @returns {Promise<void>} Resolves once the announcement and the keys have been measured.
+ */
+async function announcesAnOutstandingWriteWithoutWithdrawingItsKeys(): Promise<void> {
+  const held = heldWrite();
+  const rendered = await renderDetail(DETAIL);
+  vi.mocked(setAuthorizationFraudState).mockReturnValue(held.promise);
+
+  expect(screen.queryByText(REQUEST_IN_PROGRESS)).not.toBeInTheDocument();
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await confirmFraudPrompt(rendered);
+
+  expect(await screen.findByText(REQUEST_IN_PROGRESS)).toBeInTheDocument();
+  expect(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK05)).toBeEnabled();
+  expect(keyLegendControl(AUTH_DETAIL_KEY_LABELS.PFK08)).toBeEnabled();
+  expect(messageBand()).not.toHaveTextContent(INVALID_KEY_AS_RENDERED);
+
+  /*
+   * WHY : Assumptions: the busy key is pressed while the write is outstanding and the refusal is
+   *       asserted SILENT -- no second write and no invalid-key sentence. That pair is the whole of the
+   *       distinction between `busy` and `disabled` on this hook.
+   */
+  await pressPfKey(rendered.user, 'PFK05');
+  expect(vi.mocked(setAuthorizationFraudState)).toHaveBeenCalledTimes(1);
+  expect(messageBand()).not.toHaveTextContent(INVALID_KEY_AS_RENDERED);
+
+  held.settle({ updateStatus: 'ADDED', message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS });
+  await waitFor(expectTheRecordReread);
+  await waitFor(
+    /**
+     * Asserts the announcement is withdrawn once the write has settled.
+     * @returns {void} Nothing; the expectation throws until the sentence has gone.
+     */
+    function theAnnouncementIsWithdrawn(): void {
+      expect(screen.queryByText(REQUEST_IN_PROGRESS)).not.toBeInTheDocument();
+    },
+  );
+}
+
+/**
+ * The safe choice holds focus when the confirmation opens, so a bare Enter cannot commit.
+ *
+ * ⚠️ Purpose: Enter is a working key on this application's every other surface, so a reviewer arrives
+ * at this prompt with the habit of pressing it. If focus rested on the dangerous control, that habit
+ * would report a live authorization as fraud with one keystroke and no reading. Both halves are
+ * asserted: where focus lands, and that a bare Enter from there writes nothing.
+ *
+ * Assumptions: the write's absence is asserted rather than the prompt's closure, because closing is the
+ * cancel control's own behaviour and the property that matters is that nothing was written.
+ * @returns {Promise<void>} Resolves once focus and the absence of a write have been asserted.
+ */
+async function focusesTheSafeChoiceAndRefusesABareEnter(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+  vi.mocked(setAuthorizationFraudState).mockResolvedValue({
+    updateStatus: 'ADDED',
+    message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS,
+  });
+
+  await pressPfKey(rendered.user, 'PFK05');
+  const cancel = await screen.findByRole('button', { name: /^Cancel$/u });
+
+  expect(cancel).toHaveFocus();
+
+  await rendered.user.keyboard('{Enter}');
+
+  expect(vi.mocked(setAuthorizationFraudState)).not.toHaveBeenCalled();
+}
+
+/**
+ * A second confirmation cannot be raised while the first write is still outstanding.
+ *
+ * ⚠️ Purpose: on a toggle the second write is the INVERSE of the first, because the direction is derived
+ * from the mark -- so a duplicated confirmation does not merely repeat a write, it undoes one. The
+ * screen must therefore admit exactly one write per confirmation and none at all while one is in
+ * flight.
+ *
+ * Assumptions: the write is held UNSETTLED across the second attempt, because that is the only window
+ * in which the duplicate is reachable at all -- once the write settles the record is re-read and the
+ * transition is legitimately available again.
+ * @returns {Promise<void>} Resolves once the single write has been asserted across both attempts.
+ */
+async function refusesASecondTransitionWhileOneIsOutstanding(): Promise<void> {
+  const held = heldWrite();
+  const rendered = await renderDetail(DETAIL);
+  vi.mocked(setAuthorizationFraudState).mockReturnValue(held.promise);
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await confirmFraudPrompt(rendered);
+  expect(vi.mocked(setAuthorizationFraudState)).toHaveBeenCalledTimes(1);
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the withdrawal of the prompt is now asserted DIRECTLY, and the note
+   *       that stood here explained why it could not be. `Popconfirm` left its closed popup mounted and
+   *       hid it through a class whose rule lives in the design system's stylesheet, which this
+   *       environment does not load -- so a query for the confirming control found it whether the prompt
+   *       was showing or not. The dialog primitive parks its own markup once its leave animation reports
+   *       finishing, which {@link waitForTheFraudConfirmationToClose} drives, so the confirmation's
+   *       absence is now a measurable property of the screen.
+   * WHY : Assumptions: the trigger's `disabled` attribute and the number of writes issued are still
+   *       both asserted, because the three facts answer three different questions -- the prompt closed,
+   *       the pointer path is withheld, and the second key press wrote nothing.
+   */
+  await waitForTheFraudConfirmationToClose();
+  await pressPfKey(rendered.user, 'PFK05');
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  expect(fraudTriggerBesideTheRecord()).toBeDisabled();
+  expect(vi.mocked(setAuthorizationFraudState)).toHaveBeenCalledTimes(1);
+
+  held.settle({ updateStatus: 'ADDED', message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS });
+  await waitFor(expectTheRecordReread);
+  expect(vi.mocked(setAuthorizationFraudState)).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * Waits for the fraud confirmation to leave the document, ending its leave animation by hand.
+ *
+ * ⚠️ Assumptions: the closing ANIMATION has to be ended here, and that is an accommodation for the test
+ * DOM rather than a statement about the screen. The dialog primitive parks its markup only once the
+ * leave animation reports finishing, and it listens for a native end event on the panel
+ * (`ui/node_modules/@rc-component/motion/es/hooks/useDomMotionEvents.js` L21 to L22). jsdom applies the
+ * class that starts the animation but never runs one and never fires that event, so the panel would sit
+ * in `ant-zoom-leave-active` for the whole of a wait window and the case would fail on a timeout
+ * describing a dialog the application has already closed.
+ *
+ * ⚠️ Assumptions: the event fired is `transitionend` and NOT `animationend`, which the migrated
+ * user-delete confirmation measured before this one. The animation library resolves its own event names
+ * by probing for a constructor and a style property, and jsdom exposes no `AnimationEvent` -- so the
+ * animation name it settles on is the vendor-prefixed `webkitAnimationEnd`, which Testing Library's
+ * helper does not emit, while `TransitionEvent` does exist and keeps the transition name unprefixed.
+ * Both events reach the one handler and it does not inspect the event's type.
+ *
+ * Assumptions: the event is fired on every RETRY rather than once beforehand, because the library only
+ * accepts an end event once its own step queue has reached the active step and that step is scheduled
+ * through `requestAnimationFrame` -- so a single event fired immediately after the accept can arrive
+ * while the leave is still starting and be discarded. Re-firing costs nothing once the panel has gone,
+ * because the query then answers null.
+ *
+ * Alternatives Considered: asserting the leave CLASS instead of the closed state. Rejected as an
+ * assertion about the animation library rather than about the screen. Also considered: asserting only
+ * that no write was issued -- rejected because "the question is gone" is exactly the property a reviewer
+ * depends on, and the `Popconfirm` form of these cases never asserted it, which is how a permanently
+ * mounted confirmation went unnoticed.
+ * @returns {Promise<void>} Resolves once no dialog is in the document.
+ */
+async function waitForTheFraudConfirmationToClose(): Promise<void> {
+  await waitFor(
+    /**
+     * Ends the leave animation if one is still running, then asserts the confirmation has gone.
+     * @returns {void} Nothing; the expectation throws until the dialog is unreachable.
+     */
+    function theConfirmationIsClosed(): void {
+      const leaving = screen.queryByRole('dialog');
+
+      if (leaving !== null) {
+        fireEvent.transitionEnd(leaving);
+      }
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    },
+  );
+}
+
+/**
+ * Locates the fraud trigger rendered beside the record rather than the legend's or the dialog's.
+ *
+ * ⚠️ Assumptions: THREE controls now carry the identical accessible name -- the mapset paints one
+ * legend for the fifth key, this screen renders a second control for it beside the record, and the
+ * confirmation's accept carries the same legend text so the control that writes says what it writes.
+ * The one wanted is identified by sitting outside both the legend landmark and any open dialog, which
+ * is a structural test rather than a positional one.
+ * @returns {HTMLElement} The fraud trigger beside the record.
+ * @throws {Error} If no such control is rendered, which means the record lost its own trigger.
+ */
+function fraudTriggerBesideTheRecord(): HTMLElement {
+  const legend = screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL });
+  const dialog = screen.queryByRole('dialog');
+  const beside = screen.getAllByRole('button', { name: AUTH_DETAIL_KEY_LABELS.PFK05 }).find(
+    /**
+     * Reports whether one control sits outside both the legend landmark and the confirmation.
+     * @param {HTMLElement} control - A control carrying the fifth key's name.
+     * @returns {boolean} `true` when neither the legend nor an open dialog contains it.
+     */
+    function sitsBesideTheRecord(control: HTMLElement): boolean {
+      return !legend.contains(control) && (dialog === null || !dialog.contains(control));
+    },
+  );
+  if (beside === undefined) {
+    throw new Error('the record renders no fraud trigger of its own');
+  }
+  return beside;
+}
+
+/**
+ * Asserts the record has been read a second time, which is what follows a settled transition.
+ * @returns {void} Nothing; the assertion either passes or the `waitFor` retries.
+ */
+function expectTheRecordReread(): void {
+  expect(vi.mocked(getPendingAuthorizationScreen)).toHaveBeenCalledTimes(2);
+}
+
+/**
+ * A write whose settlement the case controls.
+ *
+ * Assumptions: the resolver is captured out of the executor rather than taken from a deferred
+ * construct, because the executor runs synchronously inside the `Promise` constructor -- so the resolver
+ * is in place before this function returns and a case can never settle nothing.
+ * @returns {{ promise: Promise<FraudMarkResponse>; settle: (value: FraudMarkResponse) => void }} The
+ *   unsettled write and its settler.
+ */
+function heldWrite(): {
+  readonly promise: Promise<FraudMarkResponse>;
+  readonly settle: (value: FraudMarkResponse) => void;
+} {
+  /** Resolver of the promise below, replaced the moment the executor runs. */
+  let capture: (value: FraudMarkResponse) => void = refuseUncapturedSettlement;
+
+  /**
+   * Records the promise's resolver so the case can reach it.
+   * @param {(value: FraudMarkResponse) => void} resolve - The resolver the promise supplies.
+   * @returns {void} Nothing; the resolver is recorded above.
+   */
+  function captureResolver(resolve: (value: FraudMarkResponse) => void): void {
+    capture = resolve;
+  }
+
+  /**
+   * Settles the held write.
+   * @param {FraudMarkResponse} value - What the write answers with.
+   * @returns {void} Nothing; the promise settles.
+   */
+  function settle(value: FraudMarkResponse): void {
+    capture(value);
+  }
+
+  return { promise: new Promise<FraudMarkResponse>(captureResolver), settle };
+}
+
+/**
+ * Stands in for the resolver until the executor supplies the real one.
+ * @returns {void} Nothing; it is never reached, because the executor runs synchronously.
+ * @throws {Error} Always, because reaching it means a case settled a write whose resolver the promise
+ *   executor had not yet handed over -- which would be a defect in the fixture rather than in a screen.
+ */
+function refuseUncapturedSettlement(): void {
+  throw new Error('the held write was settled before its resolver was captured');
 }
 
 /**
@@ -1718,6 +2342,7 @@ async function reportsEachFraudDirectionWithItsOwnSentence(): Promise<void> {
     updateStatus: 'ADDED',
     message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS,
   });
+  answersTheNextReadWith(REPORTED_DETAIL);
 
   await pressPfKey(marking.user, 'PFK05');
   await confirmFraudPrompt(marking);
@@ -1737,6 +2362,7 @@ async function reportsEachFraudDirectionWithItsOwnSentence(): Promise<void> {
     updateStatus: 'UPDATED',
     message: PROGRAM_MESSAGES.COPAUS2C.UPDT_SUCCESS,
   });
+  answersTheNextReadWith(DETAIL);
 
   await pressPfKey(withdrawing.user, 'PFK05');
   await confirmFraudPrompt(withdrawing);
@@ -1746,6 +2372,277 @@ async function reportsEachFraudDirectionWithItsOwnSentence(): Promise<void> {
   });
   expect(await screen.findByText(DETAIL_MESSAGES.AUTH_FRAUD_REMOVED)).toBeInTheDocument();
   expect(screen.queryByText(DETAIL_MESSAGES.AUTH_MARKED_FRAUD)).not.toBeInTheDocument();
+}
+
+/**
+ * The status that leaves a write's fate unknown: the condition may clear, and repeating is not safe.
+ *
+ * Assumptions: 504, which `TRANSIENT_STATUSES` in `ui/src/api/client.ts` L223 lists and
+ * `REPEATABLE_METHODS` L235 refuses for a `PUT`. The pair is the point -- `remedyFor` L969 to L985
+ * records that a gateway failure on a write is transient AND not repeatable "because the write may
+ * already have been applied", which is the one arrangement that can leave the glass contradicting the
+ * store.
+ */
+const UNCERTAIN_WRITE_STATUS = 504;
+
+/** The status a service answers when it has DESCRIBED the refusal, so nothing was applied. */
+const DESCRIBED_REFUSAL_STATUS = 400;
+
+/** The sentence a described refusal carries, standing in for a service-authored one. */
+const DESCRIBED_REFUSAL_SENTENCE = 'Unable to Update Authorization ...';
+
+/**
+ * The claim the detail screen hands a fraud outcome over under, composed as both screens compose it.
+ *
+ * Assumptions: built from the exported summary route and the same `#fraud` suffix rather than written
+ * out as `'/authorizations#fraud'`, so a case cannot pass against a screen that retained under a name
+ * the summary does not collect.
+ */
+const FRAUD_HANDOVER_CLAIM = `${AUTHORIZATION_SUMMARY_ROUTE}#fraud`;
+
+/**
+ * Answers the NEXT read with a given rendering, leaving later reads to the standing answer.
+ *
+ * ⚠️ Purpose: a successful fraud write is followed by a re-read, and the row that comes back is what
+ * the operator is about to look at. `renderDetail` installs one standing answer for every read, so
+ * without this the re-read returns the row as it was BEFORE the write -- a service that ignored its own
+ * contract, since `services/authorization-service/src/main/resources/openapi/authorization-api.yaml`
+ * L2881 to L2895 composes `fraudMark` from the persistent status character and therefore cannot report
+ * an unmarked row once a mark has been stored. Queuing the applied row is what makes the fixture
+ * describe the service the contract describes.
+ *
+ * Assumptions: `mockResolvedValueOnce` and not a replacement of the standing answer, so the case still
+ * measures one specific read rather than changing every read that follows it.
+ * @param {PendingAuthDetailScreen} applied - The rendering the service would answer the re-read with.
+ * @returns {void} Nothing; the answer is queued on the mock as a side effect.
+ */
+function answersTheNextReadWith(applied: PendingAuthDetailScreen): void {
+  vi.mocked(getPendingAuthorizationScreen).mockResolvedValueOnce(applied);
+}
+
+/**
+ * A sentence the service carries on a row, standing in for whatever it says about one.
+ *
+ * Assumptions: a service-shaped sentence rather than a catalogued one, because the case needs the ROW's
+ * own message to be distinguishable from the write's confirmation and `PROGRAM_MESSAGES.COPAUS1C`
+ * carries only the two write confirmations and a boundary sentence, none of which would prove which of
+ * the two sources the band took.
+ */
+const ROW_CARRIED_SENTENCE = 'Authorization is not marked fraudulent ...';
+
+/**
+ * Asserts a success is NOT announced while the row on the glass contradicts it.
+ *
+ * ⚠️ Purpose: this is the cross-screen confirmation rule with teeth, and this is the screen it has
+ * teeth on -- `Fraud Status:` is one of the twelve captions, so the value the sentence would contradict
+ * is displayed rather than merely held. A write that answers success and a re-read that comes back
+ * unmarked is not a contrived pairing: the write and the read are two requests, and only the second one
+ * describes what an operator is about to look at. Without this case a screen could paint
+ * `AUTH MARKED FRAUD...` above a row reading `-` and every other assertion in this file would pass.
+ *
+ * Assumptions: the contradiction is built by answering the RE-READ with the unchanged mark, which is
+ * exactly what a write that did not take would produce, rather than by stubbing the predicate. The
+ * write is answered successfully, so nothing in the failure paths is exercised and the case cannot pass
+ * for the wrong reason.
+ *
+ * Assumptions: `mockResolvedValueOnce` is queued AFTER the opening read, so it answers the second call
+ * only -- a once-value queued before rendering would answer the opening read and the case would measure
+ * a first render rather than a re-read.
+ * @returns {Promise<void>} Resolves once the band has been shown to carry the row's sentence, not the
+ *   write's.
+ */
+async function refusesToConfirmAWriteTheRowContradicts(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+  vi.mocked(setAuthorizationFraudState).mockResolvedValue({
+    updateStatus: 'ADDED',
+    message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS,
+  });
+  vi.mocked(getPendingAuthorizationScreen).mockResolvedValueOnce({
+    ...DETAIL,
+    message: ROW_CARRIED_SENTENCE,
+  });
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await confirmFraudPrompt(rendered);
+
+  await waitFor(expectTheRecordReread);
+  expect(await screen.findByText(ROW_CARRIED_SENTENCE)).toBeInTheDocument();
+  expect(messageBand()).toHaveTextContent(ROW_CARRIED_SENTENCE);
+  expect(messageBand()).not.toHaveTextContent(DETAIL_MESSAGES.AUTH_MARKED_FRAUD);
+  expect(recordValueCellFor(AUTH_DETAIL_FIELD_LABELS.fraudStatus)).toHaveTextContent(
+    DETAIL.fraudMark,
+  );
+}
+
+/**
+ * Asserts the confirmation IS announced when the row agrees with the write.
+ *
+ * ⚠️ Purpose: the other half of the test above, and the reason it is a pair. A screen that simply
+ * stopped announcing write confirmations would satisfy the refusal case perfectly and would have lost
+ * the two verbatim sentences `COPAUS1C.cbl` L531 to L538 paints -- so the refusal has to be shown to be
+ * conditional on the disagreement rather than unconditional.
+ *
+ * Assumptions: the agreeing row is {@link REPORTED_DETAIL}, the composed mark this file already uses
+ * for a reported authorization, and the agreement is ASSERTED through `nextFraudAction` rather than
+ * assumed -- so the fixture cannot silently encode a second reading of the composed tag format.
+ * @returns {Promise<void>} Resolves once the confirmation has been seen on the band.
+ */
+async function confirmsAWriteTheRowAgreesWith(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+  expect(nextFraudAction(DETAIL.fraudMark)).toBe(FRAUD_REPORTED);
+  expect(nextFraudAction(REPORTED_DETAIL.fraudMark)).toBe(FRAUD_WITHDRAWN);
+  vi.mocked(setAuthorizationFraudState).mockResolvedValue({
+    updateStatus: 'ADDED',
+    message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS,
+  });
+  vi.mocked(getPendingAuthorizationScreen).mockResolvedValueOnce({
+    ...REPORTED_DETAIL,
+    message: ROW_CARRIED_SENTENCE,
+  });
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await confirmFraudPrompt(rendered);
+
+  await waitFor(expectTheRecordReread);
+  expect(await screen.findByText(DETAIL_MESSAGES.AUTH_MARKED_FRAUD)).toBeInTheDocument();
+  expect(messageBand()).toHaveTextContent(DETAIL_MESSAGES.AUTH_MARKED_FRAUD);
+  expect(messageBand()).not.toHaveTextContent(ROW_CARRIED_SENTENCE);
+}
+
+/**
+ * Asserts a refusal that may have landed causes the row to be RE-READ rather than left as it was.
+ *
+ * ⚠️ Purpose: this is the contradiction a confirmation surface exists to prevent, and it is the one
+ * failure mode a "leave the rendering alone" refusal path cannot avoid. A gateway that gives up after
+ * the service committed answers 504 while the row is now reported -- so a screen that only paints a
+ * sentence leaves `Fraud Status:` reading the OLD tag beside a message about a failure, and a reviewer
+ * reads that as "nothing happened" for a row that has been reported.
+ *
+ * Assumptions: the discriminator asserted is the pair transient-and-not-repeatable, which is why this
+ * case uses 504 and its sibling below uses 400. Both are refusals and both reject; what differs is
+ * whether the service DESCRIBED the outcome, and the shared predicates are what carry that difference
+ * into this screen rather than a status list copied into it.
+ *
+ * Assumptions: the re-read is counted rather than inferred from the rendering, because the fixture
+ * answers the re-read with the same record -- so the repainted values are indistinguishable from the
+ * unchanged ones, and only the call count says the screen went and asked.
+ * @returns {Promise<void>} Resolves once the re-read and the sentence have been observed.
+ */
+async function reReadsTheRowWhenTheRefusalMayHaveLanded(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+  vi.mocked(setAuthorizationFraudState).mockRejectedValue(
+    new ApiRequestError(
+      'PROBLEM',
+      UNCERTAIN_WRITE_STATUS,
+      apiError({ status: UNCERTAIN_WRITE_STATUS }),
+      'the gateway gave up on the write',
+    ),
+  );
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await confirmFraudPrompt(rendered);
+
+  await waitFor(expectTheRecordReread);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the sentence expected here was the shared abend replacement and is
+   *       now `TRANSIENT_FAILURE_TRY_AGAIN`. The screen used to report every message-less refusal as an
+   *       abend because the catalogue declared no sentence about reaching the service; it now declares
+   *       two, and 504 is on the client's transient list -- so the operator is told the service is
+   *       momentarily unavailable rather than that the program failed. The status is the same status
+   *       this case already chose for the re-read behaviour, so one fixture measures both.
+   */
+  expect(messageBand()).toHaveTextContent(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(vi.mocked(setAuthorizationFraudState)).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText(DETAIL_MESSAGES.AUTH_MARKED_FRAUD)).not.toBeInTheDocument();
+}
+
+/**
+ * Asserts a refusal the service described leaves the row alone and paints the service's own sentence.
+ *
+ * ⚠️ Purpose: the other half of the discriminator above, and the reason it is a pair rather than a
+ * single rule. Re-reading after EVERY refusal would be the simpler screen and a worse one: the re-read
+ * carries its own announcement, so a service answering 400 for one field and then failing the re-read
+ * would replace its own field refusal with the read's failure sentence -- and the reviewer would lose
+ * the only sentence that said what was wrong.
+ *
+ * Assumptions: the sentence asserted is the SERVICE's, not the shared replacement, which is what
+ * establishes that a described refusal is passed through rather than redacted. The read count staying
+ * at one is what establishes that nothing was re-read to produce it.
+ * @returns {Promise<void>} Resolves once the sentence and the absent re-read have been observed.
+ */
+async function leavesTheRowUnreadWhenTheServiceDescribesTheRefusal(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+  vi.mocked(setAuthorizationFraudState).mockRejectedValue(
+    new ApiRequestError(
+      'PROBLEM',
+      DESCRIBED_REFUSAL_STATUS,
+      apiError({ status: DESCRIBED_REFUSAL_STATUS, message: DESCRIBED_REFUSAL_SENTENCE }),
+      'the service refused the write',
+    ),
+  );
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await confirmFraudPrompt(rendered);
+
+  expect(await screen.findByText(DESCRIBED_REFUSAL_SENTENCE)).toBeInTheDocument();
+  expect(messageBand()).toHaveTextContent(DESCRIBED_REFUSAL_SENTENCE);
+  expect(vi.mocked(getPendingAuthorizationScreen)).toHaveBeenCalledTimes(1);
+  expect(recordValueCellFor(AUTH_DETAIL_FIELD_LABELS.fraudStatus)).toHaveTextContent(
+    DETAIL.fraudMark,
+  );
+}
+
+/**
+ * Asserts a fraud outcome that settles after the reviewer has left is HANDED ON, not discarded.
+ *
+ * ⚠️ Purpose: PF3 is not refused while the write is outstanding, so leaving mid-write is a reachable
+ * operator action and not a contrived one. Every setter in the continuation then runs against a
+ * component React has discarded, silently -- which is exactly the defect
+ * `retainOutcomeAcrossNavigation` in `ui/src/api/client.ts` was added for, measured on four separate
+ * writes. Without this case a screen could drop the hand-over and every visible assertion would still
+ * pass, because there is nothing on the glass to look at.
+ *
+ * Assumptions: the write is HELD and settled after the unmount, which is the only ordering that
+ * reproduces the defect. Settling first and unmounting afterwards would let the mounted screen paint
+ * the sentence and the retention would never be reached.
+ *
+ * Assumptions: the outcome is collected inside `waitFor` rather than after it. Collection REMOVES the
+ * entry, so a failed attempt takes nothing and the successful one takes it exactly once -- which is the
+ * property that makes the mechanism safe to poll.
+ * @returns {Promise<void>} Resolves once the retained outcome has been collected and read.
+ */
+async function handsTheFraudOutcomeOnWhenNobodyIsLeftToReadIt(): Promise<void> {
+  const rendered = await renderDetail(DETAIL);
+  const write = heldWrite();
+  vi.mocked(setAuthorizationFraudState).mockReturnValue(write.promise);
+
+  await pressPfKey(rendered.user, 'PFK05');
+  await confirmFraudPrompt(rendered);
+
+  rendered.unmount();
+  write.settle({ updateStatus: 'ADDED', message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS });
+
+  let handed: RetainedOutcome<FraudTransitionHandover> | undefined;
+  await waitFor(
+    /**
+     * Claims the handed-on outcome once the unmounted screen has published it.
+     *
+     * Assumptions: the claim is kept in the enclosing binding with `??=`, because a claim consumes the
+     * outcome -- a second successful claim would answer `undefined` and the retry would then fail on an
+     * outcome it had already seen.
+     * @returns {void} Nothing; the expectation throws until an outcome has been claimed.
+     */
+    function theOutcomeHasBeenHandedOn(): void {
+      handed ??= claimRetainedOutcome<FraudTransitionHandover>(FRAUD_HANDOVER_CLAIM);
+      expect(handed).toBeDefined();
+    },
+  );
+
+  expect(handed?.settled).toBe('COMPLETED');
+  expect(handed?.settled === 'COMPLETED' ? handed.value.text : null).toBe(
+    DETAIL_MESSAGES.AUTH_MARKED_FRAUD,
+  );
+  expect(handed?.settled === 'COMPLETED' ? handed.value.severity : null).toBe('success');
 }
 
 /**
@@ -1841,6 +2738,7 @@ async function admitsANonAdministrativeOperator(): Promise<void> {
     updateStatus: 'ADDED',
     message: PROGRAM_MESSAGES.COPAUS2C.ADD_SUCCESS,
   });
+  answersTheNextReadWith(REPORTED_DETAIL);
 
   await pressPfKey(rendered.user, 'PFK05');
   await confirmFraudPrompt(rendered);
@@ -2063,6 +2961,37 @@ function authorizationDetailCases(): void {
   it(
     'reports each fraud direction with its own sentence',
     reportsEachFraudDirectionWithItsOwnSentence,
+  );
+  it('names the authorization in the confirmation', namesTheAuthorizationInTheConfirmation);
+  it(
+    'names the withdrawal on a reported authorization',
+    namesTheWithdrawalOnAReportedAuthorization,
+  );
+  it('publishes the confirmation as a modal dialog', publishesTheConfirmationAsAModalDialog);
+  it('contains keyboard focus inside the confirmation', containsKeyboardFocusInsideTheConfirmation);
+  it(
+    'writes nothing when the confirmation is withdrawn by Escape',
+    writesNothingWhenTheConfirmationIsWithdrawnByEscape,
+  );
+  it(
+    'announces an outstanding write without withdrawing its keys',
+    announcesAnOutstandingWriteWithoutWithdrawingItsKeys,
+  );
+  it('focuses the safe choice and refuses a bare Enter', focusesTheSafeChoiceAndRefusesABareEnter);
+  it('refuses to confirm a write the row contradicts', refusesToConfirmAWriteTheRowContradicts);
+  it('confirms a write the row agrees with', confirmsAWriteTheRowAgreesWith);
+  it('re-reads the row when the refusal may have landed', reReadsTheRowWhenTheRefusalMayHaveLanded);
+  it(
+    'leaves the row unread when the service describes the refusal',
+    leavesTheRowUnreadWhenTheServiceDescribesTheRefusal,
+  );
+  it(
+    'hands the fraud outcome on when nobody is left to read it',
+    handsTheFraudOutcomeOnWhenNobodyIsLeftToReadIt,
+  );
+  it(
+    'refuses a second transition while one is outstanding',
+    refusesASecondTransitionWhileOneIsOutstanding,
   );
   it(
     'leaves the record unchanged when the write is refused',

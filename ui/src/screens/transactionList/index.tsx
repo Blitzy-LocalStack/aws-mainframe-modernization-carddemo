@@ -40,20 +40,33 @@
 import { Flex, Form, Input, Radio, Space, Table, Typography, theme } from 'antd';
 import type { RadioChangeEvent, TableColumnsType } from 'antd';
 import { useEffect, useReducer, useState } from 'react';
-import type { CSSProperties, ChangeEvent, ReactElement } from 'react';
+import type {
+  CSSProperties,
+  ChangeEvent,
+  HTMLAttributes,
+  KeyboardEvent,
+  ReactElement,
+} from 'react';
 import { useNavigate } from 'react-router';
 
 import { listTransactions } from '../../api/transactions';
 import type { ApiError, PageResponse, TransactionSummary } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
+// Assumptions: the busy member is taken from the shared helper rather than written as a literal
+//   attribute, because it is the one place in the tree that decides how busyness is stated -- and the
+//   review that found `aria-busy` on no control anywhere is the reason that place exists.
+// Assumptions: `busyAnnouncement` is imported alongside it, because the two are a pair: `busyProps`
+//   states busyness TO the element it is spread on, which suppresses assistive chatter rather than
+//   producing any, and `busyAnnouncement` is what produces the single sentence an operator hears.
+import { busyAnnouncement, busyProps } from '../../layout/fieldHelp';
 import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
-import type { PagedQueryRequest } from '../../hooks/usePagedQuery';
+import type { PageBoundary, PagedQueryRequest } from '../../hooks/usePagedQuery';
 /*
  * Refactoring Rationale: the painted text of map `COTRN0A` is IMPORTED from the catalog, where this
  * module used to transcribe it beside the controls that name it. The two spellings were byte-equal on
@@ -71,6 +84,7 @@ import type { PagedQueryRequest } from '../../hooks/usePagedQuery';
  */
 import {
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   TRANSACTION_LIST_COLUMN_HEADERS,
   TRANSACTION_LIST_KEY_LABELS as CATALOG_KEY_LABELS,
@@ -622,6 +636,51 @@ export const TRANSACTION_LIST_TABLE_LABEL = TRANSACTION_LIST_LABELS.title;
 export const TRANSACTION_LIST_TABLE_SCROLL = { x: 'max-content' } as const;
 
 /**
+ * The positions from which a backward step has nothing to answer with.
+ *
+ * ⚠️ Refactoring Rationale: the two paging guards below branch on the browse's PUBLISHED position
+ * rather than on `browse.hasPrev` and `browse.hasNext`, which is what they read before. The members are
+ * exactly equivalent -- `ui/src/hooks/usePagedQuery.ts` derives all five positions from those two
+ * flags -- so which sentence appears when has not changed. What changes is that the dead end is
+ * ENUMERATED instead of falling out of two false flags at once: a browse with no rows and no page on
+ * either side satisfies `!hasPrev` and `!hasNext` together, and neither guard said so. The hook exists
+ * because five browses derived this five different ways, and it records that a screen's business with a
+ * boundary is to CHOOSE A SENTENCE and never to disable a key.
+ *
+ * Assumptions: the two sets are written out rather than derived from one another, because they are not
+ * complements -- `INTERIOR` is in neither and `EMPTY` and `ONLY` are in both -- so an expression
+ * relating them would be longer than the enumeration and harder to check against the hook's own table.
+ * `ui/src/screens/userList/index.tsx` and `ui/src/screens/refTypeList/index.tsx` state the same two
+ * sets, and they are restated here rather than imported: every screen is mounted through `lazy()` in
+ * `ui/src/router.tsx`, so a value import from another screen would fold its chunk into this one.
+ */
+const BACKWARD_EXHAUSTED: readonly PageBoundary[] = Object.freeze(['EMPTY', 'ONLY', 'FIRST']);
+
+/**
+ * The positions from which a forward step has nothing to answer with.
+ *
+ * Assumptions: the mirror of {@link BACKWARD_EXHAUSTED}, with `LAST` in place of `FIRST`.
+ */
+const FORWARD_EXHAUSTED: readonly PageBoundary[] = Object.freeze(['EMPTY', 'ONLY', 'LAST']);
+
+/**
+ * Style that states a delivered row can be chosen by pointing at it.
+ *
+ * Purpose: the visible half of the row affordance. A browser review found the data cells painted in
+ * link blue and a fixed pitch while reporting `cursor: auto` at rest and on hover, so the row looked
+ * like something to click and gave the pointer no indication that it was.
+ *
+ * Assumptions: `pointer` resolves through no design token, and does not need to. The design system
+ * publishes colour, spacing, radius, typography and motion; a cursor keyword is an interaction
+ * affordance rather than a design value, and there is no token that could carry it.
+ *
+ * Assumptions: declared once at module scope rather than built per row. `onRow` runs for every
+ * delivered row on every render, and a fresh object literal there would hand antd a new `style`
+ * reference ten times a render for a value that never varies.
+ */
+export const choosableRowStyle: CSSProperties = { cursor: 'pointer' };
+
+/**
  * Builds the five columns the mapset paints, in the order it paints them.
  *
  * Purpose: the target form of rows 8 to 19 of `app/bms/COTRN00.bms` -- one heading row and ten
@@ -710,7 +769,33 @@ export function buildTransactionListColumns(
     {
       title: TRANSACTION_LIST_COLUMN_HEADERS.transactionId,
       key: 'transactionId',
-      fixed: 'left',
+      /*
+       * WHY : ⚠️ Refactoring Rationale: this column is NOT pinned, and it was. Pinning it alongside the
+       *       selector on the leading edge and the amount on the trailing edge asks for three pinned
+       *       columns in a track that cannot hold them, and a browser measured the result: at a
+       *       375-pixel viewport the grid's scroller is 327 pixels wide, the leading pair reaches x
+       *       246.42 and the pinned amount occupies x 218.17 to 351, so the two blocks OVERLAP by 28.25
+       *       pixels and the higher-z leading block paints over the amount. On a hovered row the figure
+       *       reads as doubled and overstruck -- the one value an operator came to this screen for,
+       *       rendered illegible by the very mechanism that was added to keep it on screen.
+       * WHY : ⚠️ Assumptions: the arithmetic decides which pin goes, rather than a preference. The
+       *       amount needs 132.83 pixels, leaving 194.17 of the 327, and the leading pair needs 218.31
+       *       at their declared widths (selector 51.89 plus identifier 166.42) -- so no arrangement
+       *       that keeps this column pinned fits, at any of the three candidate width sets. Unpinning
+       *       it leaves the selector and the amount, 184.72 pixels of the 327 with 142 clear, which is
+       *       robust rather than marginal. Unpinning the SELECTOR instead would also fit, at 299.25 of
+       *       327 with 27.75 clear, and is rejected twice over: it is one padding token away from
+       *       colliding again, and it would take away the control the operator types into while
+       *       leaving them the value they were already able to read.
+       * WHY : ⚠️ Assumptions: the identifier stays reachable, which is the property the pin was
+       *       protecting. It is the leading data column, so it is on screen at rest and leaves only
+       *       while the operator scrolls to read the description -- and the amount they would have
+       *       scrolled for is pinned, so that scroll is no longer needed to read a figure at all.
+       * WHY : Assumptions: the reference pins nothing, because a 24-by-80 display had nothing to pin
+       *       and nothing to scroll. Every pin on this grid is an additive affordance, so removing one
+       *       cannot cost fidelity -- and keeping one that overstrikes a monetary value costs it
+       *       plainly. Transformation rule T8 is untouched: no painted text changes.
+       */
       /**
        * Renders the transaction's identifier, `TRAN-ID PIC X(16)`.
        * @param {TransactionSummary} row - The transaction being listed.
@@ -743,6 +828,41 @@ export function buildTransactionListColumns(
     {
       title: TRANSACTION_LIST_COLUMN_HEADERS.description,
       key: 'description',
+      /*
+       * WHY : ⚠️ Refactoring Rationale: this column WITHDRAWS below the design system's tablet
+       *       breakpoint, and the reason is measured. A responsive review found the five columns
+       *       holding their desktop widths at every viewport -- 51.89, 166.42, 99.22, 250.42 and 132.83
+       *       pixels, summing to 700.78 -- inside a scroller whose window is the viewport, so at 375 the
+       *       amount cells sat at x568 to x700.8 and were entirely off-screen, and at 576 they were an
+       *       8-pixel sliver. The money column is the reason this screen exists. This column is the one
+       *       withdrawn because it is the widest by a wide margin: without it the remaining four sum to
+       *       450, which fits every viewport at and above 576 with no scroller at all, and leaves 375
+       *       needing 75 pixels of travel rather than 326.
+       * WHY : ⚠️ Trade-offs: a value is HIDDEN at a narrow width, which is a stronger departure than
+       *       the positioning AAP section 0.3.4 gap G1 gives up, so it is recorded as one. Three things
+       *       make it the better of the two available answers. The terminal itself never showed the
+       *       whole value: `TRAN-DESC` is `PIC X(100)` at `app/cpy/CVTRA05Y.cpy` L9 while `TDESC01` at
+       *       `app/bms/COTRN00.bms` L172-L176 is `LENGTH=26`, so this column has always been a 26-of-100
+       *       abbreviation and never the record's description. The whole of it is one turn away on the
+       *       detail screen a chosen row opens, and a row is now openable by pointer as well as by key.
+       *       And the alternative is not "everything visible": it is the amount being unreachable
+       *       without discovering an unmarked scroller, which is the defect being answered.
+       * WHY : Alternatives Considered: keeping all five and pinning the amount alone, which is the
+       *       narrower change and was tried first. Rejected on the measured arithmetic: the two
+       *       left-pinned columns (51.89 + 166.42) plus a right-pinned amount (132.83) occupy 351.14 of
+       *       a 375-pixel viewport, leaving a 23.86-pixel window through which 349.64 pixels of date and
+       *       description would have to be scrolled -- so pinning alone does not fix the screen, it
+       *       moves the unreachable column from the amount to the date. Withdrawing the widest column
+       *       is what leaves a usable window (450.36 total, 99.22 of travel) rather than a slit.
+       * WHY : Alternatives Considered: a worded hint that the table scrolls, and antd's `showHeader`
+       *       shadow alone. Both were rejected as insufficient rather than wrong: a hint would be screen
+       *       text no program painted, which transformation rule T8 forbids, and a shadow tells an
+       *       operator that something is hidden without making the money column readable, which is what
+       *       the finding asks for.
+       * WHY : Assumptions: the breakpoint is named rather than written as a width, so it is the design
+       *       system's own `md` and cannot drift from the `Col` spans the sibling screens collapse at.
+       */
+      responsive: ['md'],
       /**
        * Renders the description cut to the twenty-six characters the mapset paints.
        * @param {TransactionSummary} row - The transaction being listed.
@@ -759,6 +879,23 @@ export function buildTransactionListColumns(
     {
       title: TRANSACTION_LIST_COLUMN_HEADERS.amount,
       key: 'amount',
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the amount is PINNED to the trailing edge, where it was the
+       *       last column of a scroller and therefore the first thing to leave the viewport. A
+       *       responsive review measured it entirely off-screen at 375 and an 8-pixel sliver at 576,
+       *       reachable only by discovering an internal scroller that showed "no scrollbar, fade,
+       *       chevron or hint". Pinning it means the figure an operator came to this screen to read is
+       *       on screen at every width without discovering anything.
+       * WHY : Assumptions: pinning is ALSO the affordance, which is why no hint sentence accompanies it.
+       *       The design system draws its own shadow at a pinned boundary -- the same mechanism the
+       *       review recorded as a positive on the two leading pinned columns -- so a pinned trailing
+       *       column states "there is content under here" in the system's own vocabulary. A worded hint
+       *       would have to be invented, and transformation rule T8 forbids screen text no program
+       *       painted.
+       * WHY : Assumptions: `scroll` already carries a horizontal policy, which is what a pinned column
+       *       requires to take effect; `TRANSACTION_LIST_TABLE_SCROLL` supplies it and is unchanged.
+       */
+      fixed: 'right',
       /**
        * Renders the amount at the source's twelve-character signed edit mask.
        *
@@ -874,6 +1011,34 @@ export function isStartingIdentifierAcceptable(entry: string): boolean {
 }
 
 /**
+ * Settles a browse turn this screen started and has nothing further to do about.
+ *
+ * ⚠️ Purpose: `usePagedQuery`'s `reset`, `prevPage` and `nextPage` return `Promise<void>`, and the three
+ * places this screen starts one are void-returning event handlers -- so each became a floating promise
+ * the moment those members stopped returning `void`, which is three lint failures on a file that has to
+ * stay clean. `ui/eslint.config.js` configures `no-floating-promises` with `ignoreVoid: false`, so the
+ * `void` discard is not available; and making the callers `async` is worse than unavailable, because
+ * `no-misused-promises` with `checksVoidReturn` rejects a promise-returning function where a `void` one
+ * is expected -- which is exactly what `PfKeyHandlerEntry.onInvoke` declares.
+ *
+ * Refactoring Rationale: settling with a named no-op on BOTH arms is the shape `usePagedQuery.ts` uses
+ * for its own opening read and the shape the user and reference-type browses adopted for the same three
+ * members, so this screen states what those state rather than inventing a third discipline.
+ *
+ * Assumptions: discarding is CORRECT here and not merely permitted. Every outcome of a browse turn is
+ * applied through the hook's own reducer -- the rows, the cursors, the boundary and any failure -- and
+ * this screen reads all four back off the hook's result on a later render, so there is nothing left at
+ * these call sites to act on. The rejection arm is supplied for the same reason the hook supplies its
+ * own: a handler that exists cannot become the unhandled rejection a later change to the hook would
+ * otherwise introduce here silently.
+ * @returns {void} Nothing; the turn's outcome has already been recorded by the browse hook.
+ */
+function ignoreSettledBrowseTurn(): void {
+  // Assumptions: an empty body is the whole implementation and is deliberate rather than unfinished.
+  //   Logging here would emit a line for every ordinary page turn an operator makes.
+}
+
+/**
  * The `/transactions` browse screen.
  *
  * Purpose: carries `app/cbl/COTRN00C.cbl` across in full -- the optional starting-identifier entry,
@@ -980,6 +1145,36 @@ export default function TransactionListScreen(): ReactElement {
   );
 
   /**
+   * Records one delivered row as the chosen one, as filling its selector on the terminal does.
+   *
+   * ⚠️ Purpose: the shared behaviour behind both halves of the row affordance -- a pointer click on
+   * the row and the selection character typed while the row has focus. Both are the same act as
+   * clicking that row's radio, and all three therefore go through the one reducer with the one code,
+   * so no path can leave the screen holding a row identifier with no character beside it.
+   *
+   * ⚠️ Assumptions: this SELECTS and does not open. `app/cbl/COTRN00C.cbl` reads the ten selector
+   * fields only inside `PROCESS-ENTER-KEY` (L149 to L181) and transfers to `COTRN01C` only from
+   * there (L190 to L192), so the terminal turn is two acts: the character goes into a row, then ENTER
+   * is pressed. Opening on click would collapse those two into one and take away the operator's
+   * chance to correct a mis-aimed click before committing to a navigation.
+   *
+   * Assumptions: the code recorded is {@link TRANSACTION_LIST_SELECTION_CODE}, the same literal the
+   * radio's own change handler records, rather than the character the operator happened to type. The
+   * source accepts upper and lower case alike (L163 `WHEN 'S'` and `WHEN 's'`), so both spellings
+   * mean the one thing and storing one canonical spelling keeps {@link submitEntry}'s arms reading
+   * the same value whichever surface made the choice.
+   * @param {string} transactionId - Identifier of the row the operator chose.
+   * @returns {void} Nothing; the choice is recorded as a side effect.
+   */
+  function chooseRow(transactionId: string): void {
+    dispatchSelection({
+      kind: 'choose',
+      transactionId,
+      code: TRANSACTION_LIST_SELECTION_CODE,
+    });
+  }
+
+  /**
    * Opens the chosen transaction, or refuses the choice, and then repositions at the first page.
    *
    * Assumptions: the order and the fall-through are the source's own. `PROCESS-ENTER-KEY` scans the
@@ -1054,10 +1249,62 @@ export default function TransactionListScreen(): ReactElement {
     //       exception. Refreshing explicitly when the position has not moved, and letting the restart
     //       value carry it when it has, issues exactly one read either way.
     if (entry === appliedFilter) {
-      browse.reset();
+      /*
+       * WHY : ⚠️ Assumptions: an identical resubmission is COLLAPSED while its own read is still
+       *       outstanding, and the guard is scoped to the UNCHANGED entry deliberately. A second
+       *       submission naming a DIFFERENT starting identifier must still be issued while the first is
+       *       in flight, because that is how an operator corrects a mistyped identifier without waiting
+       *       for a read they no longer want -- and the superseded response is already discarded by the
+       *       hook's own sequence guard. Gating the whole arm would break that correction path, which
+       *       `ui/src/test/screenSelectionCarriers.test.tsx` measures across the browses. The reasoning
+       *       for collapsing at all is at {@link readIsOutstanding}; the sibling authorization summary
+       *       resolves the identical shape the identical way.
+       */
+      if (readIsOutstanding()) {
+        return;
+      }
+      browse.reset().then(ignoreSettledBrowseTurn, ignoreSettledBrowseTurn);
       return;
     }
     setAppliedFilter(entry);
+  }
+
+  /**
+   * Reports whether a read this screen already issued is still outstanding.
+   *
+   * ⚠️ Purpose: this is the double-submit collapse, and it exists because a read action on this tree
+   * left the control it was pressed from indistinguishable from idle. A browser review measured the
+   * consequence on the sibling user browse: two presses of the forward key 400 milliseconds apart
+   * produced two identical `GET ...?cursor=<trailing>&direction=next` requests, and because each
+   * delivered page advances the ordinal, the screen came to read `Page: 3` while displaying page 2's
+   * rows -- a wrong answer shown to the operator, not merely a wasted request. This browse pages
+   * through the same hook with the same shape, so the defect is the same defect.
+   *
+   * ⚠️ Assumptions: the terminal cannot reach this state at all, which is why collapsing is the faithful
+   * answer rather than a modern nicety. CICS locks the keyboard for the duration of a task, so a second
+   * attention identifier pressed while a turn is in flight is never delivered and the program never
+   * sees it. Absorbing the press is the closest a browser gets to that lock without taking a control
+   * away from the operator.
+   *
+   * ⚠️ Assumptions: absorbing it produces NO sentence, and the silence is deliberate. The terminal
+   * answered an inhibited keystroke with nothing at all, and `ui/src/messages/messages.ts` carries no
+   * sentence for a press that arrived during a turn -- transformation rule T8 carries user-visible text
+   * across verbatim, so a wording invented here would be screen text no program ever painted.
+   *
+   * Alternatives Considered: disabling the two paging keys while a read runs, which would be the
+   * stronger signal. Rejected on the same ground the boundary refusals record: `usePfKeys` answers a
+   * binding that is present but disabled with `CCDA-MSG-INVALID-KEY`, so an operator pressing the
+   * forward key during a read would be told the key is invalid -- which is both untrue and a verbatim
+   * string this program uses to mean something else.
+   *
+   * Alternatives Considered: relying on the hook's own sequence guard, which already stops an earlier
+   * read's response from overwriting a later one. It is not sufficient here: the guard decides which
+   * SETTLEMENT wins, and both settlements advance the ordinal, so it prevents stale rows without
+   * preventing the miscount that was measured.
+   * @returns {boolean} `true` when a read is in flight, so the press should be absorbed.
+   */
+  function readIsOutstanding(): boolean {
+    return browse.isLoading;
   }
 
   /**
@@ -1072,35 +1319,43 @@ export default function TransactionListScreen(): ReactElement {
    * @returns {void} Nothing; a page arrives through the browse, or a sentence is shown.
    */
   function pageBackward(): void {
-    if (!browse.hasPrev) {
+    if (BACKWARD_EXHAUSTED.includes(browse.boundary)) {
       setLocalMessage(SHARED_MESSAGES.YOU_ARE_ALREADY_AT_THE_TOP_OF_THE_PAGE);
+      return;
+    }
+    if (readIsOutstanding()) {
       return;
     }
     setLocalMessage(null);
     setReadIntent('backward');
     dispatchSelection({ kind: 'clear' });
-    browse.prevPage();
+    browse.prevPage().then(ignoreSettledBrowseTurn, ignoreSettledBrowseTurn);
   }
 
   /**
    * Reads the page after the one on display, or explains why it will not.
    *
-   * Assumptions: gated on the envelope's own further-page flag, which the service sets by reading one
-   * row beyond the page rather than by counting the rows in it -- exactly as the source sets
-   * `NEXT-PAGE-YES` from an extra `READNEXT` at L305 to L312. At the boundary the source sends
+   * Assumptions: gated on the browse's published POSITION, which the hook derives from the envelope's
+   * own further-page flag -- a flag the service sets by reading one row beyond the page rather than by
+   * counting the rows in it, exactly as the source sets `NEXT-PAGE-YES` from an extra `READNEXT` at
+   * L305 to L312. A count of the rows received could not answer it, because a full page and a full
+   * last page hold the same number. At the boundary the source sends
    * `'You are already at the bottom of the page...'` at L270 with `SEND-ERASE-NO`, so this is a
    * sentence over the unchanged page and no request is issued.
    * @returns {void} Nothing; a page arrives through the browse, or a sentence is shown.
    */
   function pageForward(): void {
-    if (!browse.hasNext) {
+    if (FORWARD_EXHAUSTED.includes(browse.boundary)) {
       setLocalMessage(SHARED_MESSAGES.YOU_ARE_ALREADY_AT_THE_BOTTOM_OF_THE_PAGE);
+      return;
+    }
+    if (readIsOutstanding()) {
       return;
     }
     setLocalMessage(null);
     setReadIntent('forward');
     dispatchSelection({ kind: 'clear' });
-    browse.nextPage();
+    browse.nextPage().then(ignoreSettledBrowseTurn, ignoreSettledBrowseTurn);
   }
 
   /**
@@ -1116,11 +1371,31 @@ export default function TransactionListScreen(): ReactElement {
     navigateSafely(navigate, MAIN_MENU_ROUTE);
   }
 
+  /*
+   * WHY : ⚠️ Refactoring Rationale: each of the four entries declares `risk: 'read-only'`, which
+   *       changes what the legend paints and is meant to. `PfKeyBar`'s `PRIMARY_ACTION_AIDS` fallback
+   *       emphasises `ENTER` on every screen that binds it, a reading taken from the mapsets where
+   *       Enter submits a change -- and on a browse it submits nothing. `app/cbl/COTRN00C.cbl`
+   *       L149-L192 reads the ten selector fields and transfers to `COTRN01C`; L119-L133 answers PF7
+   *       and PF8 by re-reading a page. Not one arm of this program writes anything, so a solid
+   *       control here told the operator a commit was available on a screen that has none.
+   * WHY : ⚠️ Assumptions: the classification comes from what each LABEL says the action does and never
+   *       from which attention identifier carries it. `ENTER=Continue` re-reads from the entry field,
+   *       `F3=Back` navigates, and `F7=Backward`/`F8=Forward` are page turns -- four reads and a
+   *       navigation. That the same `PFK05` is delete on one mapset, save on another and browse on a
+   *       third is exactly why the taxonomy refuses to infer risk from the key.
+   * WHY : Assumptions: `busy` is deliberately NOT declared on the two paging entries even though a
+   *       page turn has an in-flight window. `usePagedQuery` now coalesces identical in-flight turns
+   *       internally -- keyed on browse, epoch, direction and cursor -- so a repeated press JOINS the
+   *       outstanding turn rather than issuing a second one, while an opposite direction is never
+   *       suppressed. Declaring `busy` here would additionally silence the opposite direction for the
+   *       duration of a read, which is a key the reference answers.
+   */
   const pfKeyHandlers: PfKeyHandlerMap = {
-    ENTER: { onInvoke: submitEntry, label: TRANSACTION_LIST_KEY_LABELS.ENTER },
-    PFK03: { onInvoke: returnToMenu, label: TRANSACTION_LIST_KEY_LABELS.PFK03 },
-    PFK07: { onInvoke: pageBackward, label: TRANSACTION_LIST_KEY_LABELS.PFK07 },
-    PFK08: { onInvoke: pageForward, label: TRANSACTION_LIST_KEY_LABELS.PFK08 },
+    ENTER: { onInvoke: submitEntry, label: TRANSACTION_LIST_KEY_LABELS.ENTER, risk: 'read-only' },
+    PFK03: { onInvoke: returnToMenu, label: TRANSACTION_LIST_KEY_LABELS.PFK03, risk: 'read-only' },
+    PFK07: { onInvoke: pageBackward, label: TRANSACTION_LIST_KEY_LABELS.PFK07, risk: 'read-only' },
+    PFK08: { onInvoke: pageForward, label: TRANSACTION_LIST_KEY_LABELS.PFK08, risk: 'read-only' },
   };
 
   // WHY : Assumptions: only these four attention identifiers are bound, because the source's
@@ -1241,18 +1516,156 @@ export default function TransactionListScreen(): ReactElement {
        *       `TYPOGRAPHY_TOKENS.screenTitleSize` and `screenTitleLineHeight` -- `fontSizeHeading4`
        *       and `lineHeightHeading4`, the two tokens `level={4}` resolved on its own -- so the
        *       caption keeps its measured size and gains only the guarantee that it keeps it.
-       * WHY : Assumptions: the colour and the zeroed margin stay with this screen and are passed
-       *       through the component's `style` prop, which it spreads BEFORE its own size members so
-       *       neither is displaced. `COLOR=NEUTRAL` on the row-4 literal is a per-mapset attribute
-       *       and resolves to the de-emphasis TEXT token rather than to the base text colour, and
-       *       `ATTRB=BRT` is carried as WEIGHT, which the heading already applies. The margin is
-       *       zeroed because this caption is a flex item baseline-aligned against the page ordinal
-       *       beside it, and a heading's default block margin would drop it off that baseline.
+       * WHY : ⚠️ Refactoring Rationale: the caption now stands ALONE on its own line, and it carries
+       *       neither a colour nor a zeroed margin. Both members were removed for measured reasons. A
+       *       responsive review found this screen placing its caption 26 pixels higher than every other
+       *       screen in the tree -- y145 against y172 -- because the caption shared a baseline-aligned
+       *       flex line with the page ordinal and had its block margin zeroed to sit on that baseline,
+       *       so the one heading an operator uses to confirm which screen they are on sat out of line
+       *       with the other twenty. The colour was already inert: `ScreenTitle` resolves `COLOR=NEUTRAL`
+       *       itself and spreads it AFTER the caller's style, precisely so that eighteen mapsets
+       *       declaring one colour cannot come to render three, so passing it here changed nothing and
+       *       only looked as though it did.
+       * WHY : Assumptions: the mapset does paint the caption and the page indicator on ONE terminal row
+       *       -- `List Transactions` at `app/bms/COTRN00.bms` L75-L79 is `POS=(4,30)` and `Page:` at
+       *       L80-L84 is `POS=(4,65)` -- so this is a deliberate departure and not an oversight. What is
+       *       given up is the shared ROW, which is character positioning on a fixed 24x80 grid and is
+       *       exactly what AAP section 0.3.4 gap G1 abandons; what is kept is the grouping and the
+       *       reading order, because the indicator moves to the search line immediately below and still
+       *       reads before the grid. `ui/src/screens/userList/index.tsx` resolves the identical mapset
+       *       geometry the same way and records the same trade, so this removes a one-screen exception.
        */}
-      <Flex align="baseline" gap="middle" justify="space-between" wrap>
-        <ScreenTitle style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL], margin: 0 }}>
-          {TRANSACTION_LIST_LABELS.title}
-        </ScreenTitle>
+      <ScreenTitle>{TRANSACTION_LIST_LABELS.title}</ScreenTitle>
+
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the search field and the page indicator share ONE line, where
+       *       the indicator used to share the caption's line. The mapset paints them on two different
+       *       terminal rows -- `Search Tran ID:` at `app/bms/COTRN00.bms` L95-L99 is `POS=(6,5)` and
+       *       `Page:` at L80-L84 is `POS=(4,65)` -- and grouping them is the same G1 trade
+       *       `ui/src/screens/userList/index.tsx` records for the identical geometry: the character rows
+       *       are given up, the reading order is not, because both still read after the caption and
+       *       before the grid. What this buys is the caption's own line back, which is what restores it
+       *       to the baseline the other twenty screens share.
+       * WHY : Assumptions: `align="center"` rather than `baseline`, because the left item is a
+       *       `Form.Item` whose own label sits above its control -- a baseline would align the indicator
+       *       with the LABEL and leave it floating above the input beside it.
+       * WHY : Alternatives Considered: `component={false}` renders no `form` element, which is what is
+       *       wanted here -- this screen submits through the ENTER attention identifier rather than
+       *       through a form submission, and a real `form` would give the browser a second, native
+       *       submit path that bypasses the key dispatcher. Keeping the wrapper without the element
+       *       preserves `Form.Item`'s label association and refusal rendering.
+       */}
+      <Flex align="center" gap="middle" justify="space-between" wrap>
+        <Form component={false}>
+          {/*
+           * WHY : Refactoring Rationale: the refusal text below is given the identity the control's
+           *       `aria-describedby` points at, so ONE element carries it. An earlier shape rendered
+           *       the sentence twice -- once as the visible help text and once in a hidden element for
+           *       the description -- which put the same sentence into the accessibility tree twice and
+           *       gave a screen-reader user a duplicate announcement. Passing a node rather than a bare
+           *       string is what allows the identity to be attached at all.
+           * WHY : Assumptions: that node carries no colour of its own. antd colours its explain region
+           *       from `validateStatus`, and a colour here would override the token the design system
+           *       already resolves for a field refusal.
+           * WHY : Assumptions: the help and description members are attached by CONDITIONAL SPREAD
+           *       rather than being passed as `undefined` when the entry is acceptable, because
+           *       `exactOptionalPropertyTypes` is in force -- an optional member may be absent but may
+           *       not be present holding `undefined`.
+           */}
+          <Form.Item
+            colon={false}
+            htmlFor={FILTER_INPUT_ID}
+            {...(entryIsAcceptable
+              ? {}
+              : {
+                  help: (
+                    <Typography.Text id={FILTER_ERROR_ID}>
+                      {PROGRAM_MESSAGES.COTRN00C.TRAN_ID_MUST_BE_NUMERIC}
+                    </Typography.Text>
+                  ),
+                })}
+            label={
+              <Typography.Text
+                id={FILTER_LABEL_ID}
+                style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.TURQUOISE] }}
+              >
+                {TRANSACTION_LIST_LABELS.filterLabel}
+              </Typography.Text>
+            }
+            validateStatus={entryIsAcceptable ? '' : 'error'}
+          >
+            {/*
+             * WHY : Assumptions: `maxLength` is sixteen because `TRNIDIN` is declared `LENGTH=16` in
+             *       `app/bms/COTRN00.bms` and `TRNIDINI PIC X(16)` in `app/cpy-bms/COTRN00.CPY`, and
+             *       the key it addresses is `TRAN-ID PIC X(16)`. A terminal cannot accept a
+             *       seventeenth character into that field, so this control must not either.
+             * WHY : Assumptions: no `autoFocus`, here or anywhere else on this screen. The mapset
+             *       carries no `IC` attribute at all -- the only match for it in the whole file is the
+             *       Apache licence URL on line 11 -- so the terminal places the cursor nowhere in
+             *       particular. This is one of four screens in the tree with no initial-cursor field,
+             *       and stating it is what stops the absence reading as an oversight.
+             */}
+            {/*
+             * WHY : ⚠️ Refactoring Rationale: the control now STATES that a read is outstanding, and
+             *       nothing on this screen did. `browse.isLoading` reached the table's own spinner
+             *       alone, so the field an operator had just submitted from -- and the paging keys they
+             *       had just pressed -- carried no indication at all, which a browser review measured
+             *       as `disabled:false, cursor:pointer, class unchanged` on the pressed control and as
+             *       duplicate reads issued from the presses that followed. `busyProps` emits
+             *       `aria-busy` only while a read runs and an empty object otherwise, which is why it
+             *       is spread unconditionally.
+             * WHY : Alternatives Considered: `disabled` on this control for the duration. Rejected
+             *       because it would forbid the correction {@link submitEntry} deliberately allows --
+             *       retyping a different starting identifier while the first read is still outstanding
+             *       -- so an operator who mistyped would have to wait for a read they no longer want.
+             * WHY : ⚠️ Refactoring Rationale: this is now PAIRED with `busyAnnouncement`, and the note
+             *       that rejected the pairing is withdrawn as factually wrong. It reasoned that the
+             *       helper "requires a sentence and this program has none to carry", so any wording
+             *       would be invented screen text and transformation rule T8 would forbid it.
+             *       `REQUEST_IN_PROGRESS` is now an AUTHORED, registered and width-checked entry in
+             *       `ui/src/messages/messages.ts`, so the sentence is no longer invented at the point of
+             *       use -- and rule T8 governs strings that HAVE a mainframe source, which this one does
+             *       not: the terminal locked the keyboard rather than saying anything, and a browser
+             *       cannot lock a keyboard. `aria-busy` states the fact to the element; the announcement
+             *       is the one sentence an operator hears, and without it a screen reader user had
+             *       nothing but suppressed chatter.
+             */}
+            <Input
+              {...busyProps(browse.isLoading)}
+              aria-describedby={entryIsAcceptable ? undefined : FILTER_ERROR_ID}
+              aria-invalid={!entryIsAcceptable}
+              aria-labelledby={FILTER_LABEL_ID}
+              id={FILTER_INPUT_ID}
+              inputMode="numeric"
+              maxLength={TRANSACTION_ID_FILTER_WIDTH}
+              onChange={
+                /**
+                 * Records what the operator has typed, without repositioning the browse.
+                 *
+                 * Assumptions: a keystroke never issues a read, because the source positions only on
+                 * ENTER -- `PROCESS-ENTER-KEY` is the one paragraph that consults the entry field.
+                 * @param {ChangeEvent<HTMLInputElement>} event - The change event antd forwards.
+                 * @returns {void} Nothing; the entry is recorded as a side effect.
+                 */
+                (event: ChangeEvent<HTMLInputElement>): void => {
+                  setDraftFilter(event.target.value);
+                }
+              }
+              value={draftFilter}
+            />
+          </Form.Item>
+          {/*
+           * WHY : ⚠️ Assumptions: the region is rendered on EVERY turn and holds an empty string while
+           *       idle, which is load-bearing rather than defensive -- a live region has to be in the
+           *       accessibility tree before its content changes for the change to be announced at all,
+           *       so returning nothing while idle would silently lose the first transition, which is
+           *       the one that matters. `busyAnnouncement` renders exactly that shape.
+           * WHY : Assumptions: it sits inside the entry form rather than beside the table, because the
+           *       control an operator submits from is here and this is the announcement for that
+           *       submission. The table carries the VISIBLE half through its own spinner.
+           */}
+          {busyAnnouncement(browse.isLoading ? REQUEST_IN_PROGRESS : undefined)}
+        </Form>
         <Space size="small">
           <Typography.Text
             id={PAGE_NUMBER_LABEL_ID}
@@ -1286,87 +1699,6 @@ export default function TransactionListScreen(): ReactElement {
       </Flex>
 
       {/*
-       * WHY : Alternatives Considered: `component={false}` renders no `form` element, which is what is
-       *       wanted here -- this screen submits through the ENTER attention identifier rather than
-       *       through a form submission, and a real `form` would give the browser a second, native
-       *       submit path that bypasses the key dispatcher. Keeping the wrapper without the element
-       *       preserves `Form.Item`'s label association and refusal rendering.
-       */}
-      <Form component={false}>
-        {/*
-         * WHY : Refactoring Rationale: the refusal text below is given the identity the control's
-         *       `aria-describedby` points at, so ONE element carries it. An earlier shape rendered
-         *       the sentence twice -- once as the visible help text and once in a hidden element for
-         *       the description -- which put the same sentence into the accessibility tree twice and
-         *       gave a screen-reader user a duplicate announcement. Passing a node rather than a bare
-         *       string is what allows the identity to be attached at all.
-         * WHY : Assumptions: that node carries no colour of its own. antd colours its explain region
-         *       from `validateStatus`, and a colour here would override the token the design system
-         *       already resolves for a field refusal.
-         * WHY : Assumptions: the help and description members are attached by CONDITIONAL SPREAD
-         *       rather than being passed as `undefined` when the entry is acceptable, because
-         *       `exactOptionalPropertyTypes` is in force -- an optional member may be absent but may
-         *       not be present holding `undefined`.
-         */}
-        <Form.Item
-          colon={false}
-          htmlFor={FILTER_INPUT_ID}
-          {...(entryIsAcceptable
-            ? {}
-            : {
-                help: (
-                  <Typography.Text id={FILTER_ERROR_ID}>
-                    {PROGRAM_MESSAGES.COTRN00C.TRAN_ID_MUST_BE_NUMERIC}
-                  </Typography.Text>
-                ),
-              })}
-          label={
-            <Typography.Text
-              id={FILTER_LABEL_ID}
-              style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.TURQUOISE] }}
-            >
-              {TRANSACTION_LIST_LABELS.filterLabel}
-            </Typography.Text>
-          }
-          validateStatus={entryIsAcceptable ? '' : 'error'}
-        >
-          {/*
-           * WHY : Assumptions: `maxLength` is sixteen because `TRNIDIN` is declared `LENGTH=16` in
-           *       `app/bms/COTRN00.bms` and `TRNIDINI PIC X(16)` in `app/cpy-bms/COTRN00.CPY`, and
-           *       the key it addresses is `TRAN-ID PIC X(16)`. A terminal cannot accept a
-           *       seventeenth character into that field, so this control must not either.
-           * WHY : Assumptions: no `autoFocus`, here or anywhere else on this screen. The mapset
-           *       carries no `IC` attribute at all -- the only match for it in the whole file is the
-           *       Apache licence URL on line 11 -- so the terminal places the cursor nowhere in
-           *       particular. This is one of four screens in the tree with no initial-cursor field,
-           *       and stating it is what stops the absence reading as an oversight.
-           */}
-          <Input
-            aria-describedby={entryIsAcceptable ? undefined : FILTER_ERROR_ID}
-            aria-invalid={!entryIsAcceptable}
-            aria-labelledby={FILTER_LABEL_ID}
-            id={FILTER_INPUT_ID}
-            inputMode="numeric"
-            maxLength={TRANSACTION_ID_FILTER_WIDTH}
-            onChange={
-              /**
-               * Records what the operator has typed, without repositioning the browse.
-               *
-               * Assumptions: a keystroke never issues a read, because the source positions only on
-               * ENTER -- `PROCESS-ENTER-KEY` is the one paragraph that consults the entry field.
-               * @param {ChangeEvent<HTMLInputElement>} event - The change event antd forwards.
-               * @returns {void} Nothing; the entry is recorded as a side effect.
-               */
-              (event: ChangeEvent<HTMLInputElement>): void => {
-                setDraftFilter(event.target.value);
-              }
-            }
-            value={draftFilter}
-          />
-        </Form.Item>
-      </Form>
-
-      {/*
        * WHY : ⚠️ Refactoring Rationale: ONE `Radio.Group` owns the selection value and the change
        *       handler for the whole table, rather than each row holding an independent `Radio` with
        *       its own `checked`. Ten independent radios are ten separate one-of-one groups to an
@@ -1393,11 +1725,7 @@ export default function TransactionListScreen(): ReactElement {
            * @returns {void} Nothing; the choice is recorded as a side effect.
            */
           (event: RadioChangeEvent): void => {
-            dispatchSelection({
-              kind: 'choose',
-              transactionId: String(event.target.value),
-              code: TRANSACTION_LIST_SELECTION_CODE,
-            });
+            chooseRow(String(event.target.value));
           }
         }
         value={selection.transactionId}
@@ -1414,11 +1742,70 @@ export default function TransactionListScreen(): ReactElement {
          *       strictly from those two. Keeping the pager off is what makes the mapping one-to-one
          *       rather than an approximation.
          */}
+        {/*
+         * WHY : ⚠️ Refactoring Rationale: a row is now CHOOSABLE from the row itself, by pointer and by
+         *       the letter the screen's own prompt names. It was not: a browser review found the four
+         *       data cells painted in link blue and a fixed pitch while being inert `span` elements --
+         *       `cursor: auto`, no `href`, no `tabindex`, no handler, `tbody a` zero and `tbody button`
+         *       zero -- so the cells advertised themselves as links and answered nothing, and the row-21
+         *       prompt `Type 'S' to View Transaction details from the list` described a control that did
+         *       not exist anywhere on the screen.
+         * WHY : ⚠️ Assumptions: the letter SELECTS and does not navigate, which is the reference's own
+         *       two-step turn rather than a hesitation. `app/cbl/COTRN00C.cbl` scans `SEL0001I` through
+         *       `SEL0010I` only inside `PROCESS-ENTER-KEY` (L149 to L181) and transfers to `COTRN01C`
+         *       only from there (L190 to L192), so on the terminal the operator types the character into
+         *       a row's selector and then presses ENTER. Typing the letter here fills the selector; the
+         *       ENTER key opens it. A pointer click does exactly what the letter does, for the same
+         *       reason.
+         * WHY : Assumptions: no `tabIndex` is added to the row, and the omission is deliberate. Each row
+         *       already holds a keyboard-reachable control -- its member of the one `Radio.Group` --
+         *       which a keyboard operator reaches with one tab stop and walks with the arrow keys, and
+         *       the letter handler sits on the row so a keystroke made with that control focused bubbles
+         *       to it. Giving all ten rows their own stop would add ten stops in front of the paging
+         *       keys for a path that already exists.
+         * WHY : Assumptions: the pointer cursor is a CSS keyword and resolves through no token, because
+         *       the design system publishes none for a cursor. It is the interaction affordance the
+         *       review found missing rather than a design value.
+         */}
         <Table<TransactionSummary>
           aria-label={TRANSACTION_LIST_TABLE_LABEL}
           columns={buildTransactionListColumns(cssVar)}
           dataSource={browse.items}
           loading={browse.isLoading}
+          onRow={
+            /**
+             * Builds the members that make one delivered row choosable.
+             * @param {TransactionSummary} row - The transaction the row lists.
+             * @returns {HTMLAttributes<HTMLElement>} The row's pointer, keyboard and cursor members.
+             */
+            (row: TransactionSummary): HTMLAttributes<HTMLElement> => ({
+              onClick:
+                /**
+                 * Chooses this row, exactly as typing the selection character into it does.
+                 * @returns {void} Nothing; the choice is recorded as a side effect.
+                 */
+                (): void => {
+                  chooseRow(row.transactionId);
+                },
+              onKeyDown:
+                /**
+                 * Chooses this row when the operator types the character the prompt names.
+                 *
+                 * Assumptions: every other key is left alone, and ENTER especially so. ENTER is the
+                 * attention identifier `usePfKeys` dispatches, and it is what OPENS the chosen row, so
+                 * consuming it here would replace the reference's two-step turn with a one-step one.
+                 * @param {KeyboardEvent<HTMLElement>} event - The key event the row received.
+                 * @returns {void} Nothing; the choice is recorded as a side effect.
+                 */
+                (event: KeyboardEvent<HTMLElement>): void => {
+                  if (!isViewSelectionCode(event.key)) {
+                    return;
+                  }
+                  chooseRow(row.transactionId);
+                },
+              style: choosableRowStyle,
+            })
+          }
           pagination={false}
           scroll={TRANSACTION_LIST_TABLE_SCROLL}
           rowKey={

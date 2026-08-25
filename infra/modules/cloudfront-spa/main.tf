@@ -261,6 +261,77 @@ resource "aws_cloudfront_response_headers_policy" "security_headers" {
       override                   = true
     }
   }
+
+  # WHY : Assumptions: these four are the headers `security_headers_config` above has
+  #       no field for, so they can only be expressed as custom headers. They were
+  #       absent from BOTH delivery paths, which is why they arrive together; each
+  #       one is argued in full at its counterpart declaration in ui/nginx.conf and
+  #       the reasoning is not duplicated here, because a header argued twice is a
+  #       header whose two arguments can disagree.
+  #       Assumptions: every entry sets `override = true`, matching every field in the
+  #       block above. Without it CloudFront would defer to whatever the origin sent,
+  #       and this origin is a private S3 bucket that sends none of these -- so the
+  #       header would be present in the plan and absent from the response.
+  #       Assumptions: the values are byte-identical to ui/nginx.conf's. The two paths
+  #       serve the same bundle and a viewer must not be able to tell which one
+  #       answered, which is the property the response-headers policy exists to hold
+  #       and the property the managed policy was replaced for failing to hold.
+  #       Trade-offs: `Cross-Origin-Embedder-Policy: require-corp` is the one of the
+  #       four that can break a page, and it is taken on proof rather than
+  #       preference -- the content-security policy above already refuses every
+  #       cross-origin subresource, so COEP can refuse nothing that policy admits.
+  #       The counterpart declaration states the full argument and the exact steps to
+  #       admit a cross-origin subresource if one is ever needed.
+  custom_headers_config {
+    items {
+      header   = "Permissions-Policy"
+      value    = "accelerometer=(), autoplay=(), bluetooth=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()"
+      override = true
+    }
+
+    items {
+      header   = "Cross-Origin-Opener-Policy"
+      value    = "same-origin"
+      override = true
+    }
+
+    items {
+      header   = "Cross-Origin-Embedder-Policy"
+      value    = "require-corp"
+      override = true
+    }
+
+    items {
+      header   = "Cross-Origin-Resource-Policy"
+      value    = "same-origin"
+      override = true
+    }
+  }
+
+  # WHY : Refactoring Rationale: this block did not exist, and its absence left the
+  #       origin's `Server` header reaching every visitor -- an anonymous request for a
+  #       missing asset was answered with a response naming the server software, on an
+  #       origin that otherwise sets its headers deliberately. ui/nginx.conf declares
+  #       `server_tokens off`, which suppresses the VERSION but still emits the bare
+  #       product name; removing the header at the origin needs the third-party
+  #       `headers-more` module, which the pinned stock nginx image does not carry.
+  #       Alternatives Considered: adding that module to ui/Dockerfile. Rejected because
+  #       it replaces a pinned upstream image with a locally compiled one -- a
+  #       materially larger supply-chain surface, and a build step to maintain -- to
+  #       remove a single header that the edge can strip for free. The nginx layer keeps
+  #       `server_tokens off` regardless, so the version is suppressed even on the
+  #       internal path where no CloudFront distribution sits in front.
+  #       Trade-offs: this strips the header only for traffic served THROUGH the
+  #       distribution, which is every visitor path for the single-page application but
+  #       not a request made directly against the origin. Direct origin access is
+  #       already refused: the bucket is reachable only through the origin access
+  #       control declared in this module, so there is no unfronted path for a visitor
+  #       to take.
+  remove_headers_config {
+    items {
+      header = "Server"
+    }
+  }
 }
 
 # WHY : Assumptions: this exists because `custom_error_response` is
@@ -270,19 +341,46 @@ resource "aws_cloudfront_response_headers_policy" "security_headers" {
 #       identically, as a key that does not exist. A function is the only place in
 #       the request path where that distinction can be drawn before the origin is
 #       consulted.
-#       Assumptions: the test is whether the LAST path segment contains a dot,
-#       which is the same test the regular-expression location in ui/nginx.conf
-#       applies. All twenty-one client routes are dotless in their last segment --
-#       the identifiers they carry are numeric account and card numbers, an
-#       eight-character user id and a two-character transaction-type code, none of
-#       which admits a dot -- so no real route is misclassified. A path such as
+#       Assumptions: the test is whether a dotted last path segment sits at the
+#       SITE ROOT or under the asset prefix, which is the same test the
+#       regular-expression location in ui/nginx.conf applies. A path such as
 #       /foo.bar/baz is correctly treated as a route, because its last segment
 #       carries no dot, and nginx agrees.
+#       Refactoring Rationale: the test used to be "the last segment contains a dot"
+#       at ANY depth, and the sentence here used to assert that "all twenty-one
+#       client routes are dotless in their last segment", listing numeric account
+#       and card numbers, an eight-character user id and a two-character
+#       transaction-type code. That assertion was FALSE, and being false is what made
+#       the rule wrong: it omitted /authorizations/:key, whose identifier is an
+#       opaque cursor token minted by CursorToken and shaped v2.<16 chars>.<1-200
+#       chars> -- two dots in the last segment, structurally, for every authorization
+#       the summary screen can select. So one route in twenty-one was classified as
+#       a file. On this path the consequence was quieter than on nginx's and no
+#       better: `custom_error_response` below turned the S3 miss into the entry
+#       document, so the screen rendered, but it rendered under an HTTP 404 STATUS --
+#       wrong for caching, wrong for monitoring and wrong for any client that reads
+#       the status before the body. The comment is corrected here as well as the
+#       code, because a reader who trusted it would restore the old test.
+#       Assumptions: the sealed card selector is safe under either rule --
+#       SealedSelector.SEALED_SHAPE is [A-Za-z0-9_-]+ and admits no dot -- so
+#       /cards/:cardKey and /cards/:cardKey/edit never needed this narrowing, and the
+#       remaining parameterised routes carry numeric, eight-character or
+#       two-character identifiers. The blast radius was one route and the narrowing
+#       is correspondingly narrow.
 #       Alternatives Considered: matching an allow-list of asset extensions
 #       instead. Rejected because an allow-list is only as complete as the list:
 #       any extension nobody thought of would fall through to the rewrite and be
 #       answered with HTML, which is the defect this replaces, reintroduced for a
-#       narrower set of inputs and therefore harder to notice.
+#       narrower set of inputs and therefore harder to notice. Anchoring by DEPTH
+#       keeps the classification total for the depth it governs -- every dotted name
+#       at the root is a file whether or not anyone listed its extension -- which is
+#       what an allow-list cannot promise.
+#       Trade-offs: one residual case is accepted, and it is the same one
+#       ui/nginx.conf accepts. A nested un-hashed static file added under
+#       ui/public/<dir>/ would, when MISSING, be rewritten to the entry document
+#       instead of reported missing. It is bounded by what the build can emit:
+#       `vite build` writes the entry document plus the hashed asset prefix, and
+#       ui/public holds exactly one file, favicon.svg, at the root.
 #       Trade-offs: a Lambda@Edge function was the other option and is rejected on
 #       cost and latency. CloudFront Functions run in the edge process with
 #       sub-millisecond overhead and are billed per invocation at a small fraction
@@ -309,18 +407,32 @@ resource "aws_cloudfront_function" "spa_router" {
   #       Assumptions: this runs on the VIEWER request, before the cache lookup,
   #       so the error-page fetch that `custom_error_response` performs does not
   #       re-enter it and no loop is possible.
+  #       Assumptions: `/assets/` is written as a literal rather than taken from a
+  #       variable, because it is not this module's choice to make. Vite's
+  #       `build.assetsDir` defaults to `assets` and ui/vite.config.ts does not
+  #       override it, so the emitted prefix is fixed by the bundler; ui/nginx.conf
+  #       hard-codes the same string in its `^~ /assets/` location for the same
+  #       reason. Exposing it as a module input would invite an operator to set a
+  #       value the bundle does not emit, which breaks every asset request at once
+  #       while the plan still reads as correct.
   code = <<-JS
     function handler(event) {
       var request = event.request;
       var uri = request.uri;
-      var lastSegment = uri.substring(uri.lastIndexOf('/') + 1);
+      var lastSlash = uri.lastIndexOf('/');
+      var dotted = uri.indexOf('.', lastSlash + 1) !== -1;
 
-      // A dot in the final segment means the viewer asked for a file. Leave it
-      // untouched so a missing one can still be reported as missing.
-      if (lastSegment.indexOf('.') === -1) {
-        request.uri = '/${var.default_root_object}';
+      // A dotted final segment means the viewer asked for a file ONLY where this
+      // build can emit one: at the site root, which is where Vite copies ui/public
+      // verbatim, or under the hashed asset prefix. Leave those untouched so a
+      // missing one is still reported as missing. Everything else is a client route,
+      // including a dotted one -- /authorizations/:key carries a cursor token with
+      // two dots in it -- and is rewritten to the entry document.
+      if (dotted && (lastSlash === 0 || uri.indexOf('/assets/') === 0)) {
+        return request;
       }
 
+      request.uri = '/${var.default_root_object}';
       return request;
     }
   JS

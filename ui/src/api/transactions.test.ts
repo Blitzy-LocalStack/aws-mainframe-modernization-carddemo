@@ -35,7 +35,9 @@ import { getApiClient } from './client';
 import {
   addTransaction,
   copyLastTransaction,
+  inquireAccountPayableBalance,
   listTransactions,
+  payAccountBalanceConfirmed,
   payAccountBalanceInFull,
   viewTransaction,
 } from './transactions';
@@ -87,7 +89,20 @@ let nextStatus: number = HTTP_OK;
 let nextBody: unknown = {};
 
 /**
- * Records nothing and answers with the queued status and body.
+ * The bodies this suite's adapter was asked to send, in order.
+ *
+ * Refactoring Rationale: ⚠️ this suite answers from its own adapter rather than through
+ * `../test/apiHarness`, so the harness's own recorder observes nothing here and `dispatchedRequests()`
+ * reads empty. Two cases below assert what reaches the WIRE rather than what a function returns -- an
+ * inquiry must send no confirmation, and a payment must send the answer it was given -- and neither can
+ * be decided from a return value. So the adapter records, which is the smaller change of the two: the
+ * alternative was to move this suite onto the shared harness, and the queued-status fixture is exactly
+ * what these outcome cases are built on.
+ */
+let sentBodies: unknown[] = [];
+
+/**
+ * Records the body it was asked to send and answers with the queued status and body.
  *
  * Assumptions: the status is a settable fixture rather than a constant, because each operation derives
  * its outcome FROM the status -- 201 wrote, 200 did not -- so a harness able to answer only one of the
@@ -96,6 +111,11 @@ let nextBody: unknown = {};
  * @returns {Promise<AxiosResponse>} A response carrying the queued status and body.
  */
 async function queuedAdapter(config: AxiosRequestConfig): Promise<AxiosResponse> {
+  // Assumptions: the body is parsed back from the serialised form the transport was handed, because that
+  //   is what a service would receive -- a member the client dropped is absent here, and a member it
+  //   left present but empty is present here, which is precisely the distinction the inquiry case turns
+  //   on.
+  sentBodies.push(typeof config.data === 'string' ? JSON.parse(config.data) : config.data);
   return Promise.resolve({
     data: nextBody,
     status: nextStatus,
@@ -109,6 +129,7 @@ async function queuedAdapter(config: AxiosRequestConfig): Promise<AxiosResponse>
 function stubBuildConfiguration(): void {
   nextStatus = HTTP_OK;
   nextBody = {};
+  sentBodies = [];
   vi.stubEnv('VITE_API_BASE_URL', API_BASE_URL);
   vi.stubEnv('VITE_CORRELATION_ID_HEADER', CORRELATION_HEADER);
   getApiClient().defaults.adapter = queuedAdapter;
@@ -121,6 +142,14 @@ function restoreBuildConfiguration(): void {
 
 /**
  * Builds a submission whose members satisfy the request shape, since none of them is under test here.
+ *
+ * ⚠️ Refactoring Rationale: `merchantId` carried TWELVE digits here and now carries nine, which is the
+ * width the contract publishes for it -- `TRAN-MERCHANT-ID PIC 9(09)` at `app/cpy/CVTRA05Y.cpy` L114,
+ * and the same nine the response fixture below already states in its own note. The old value was a
+ * submission the service would have refused with 400, so every case built on it was asserting an
+ * outcome for a request that could not have reached one. It went unnoticed because nothing between the
+ * screen and the wire measured a submitted value against the field it is stored in; the width guard in
+ * `./client` now does, and it refuses this fixture rather than the request under test.
  * @returns {TransactionCreateRequest} One complete submission carrying the confirmation answer.
  */
 function submission(): TransactionCreateRequest {
@@ -133,7 +162,7 @@ function submission(): TransactionCreateRequest {
     amount: AMOUNT,
     originDate: '2022-07-18',
     processDate: '2022-07-18',
-    merchantId: '000000000001',
+    merchantId: '000000001',
     merchantName: 'PARITY MERCHANT',
     merchantCity: 'PARITY CITY',
     merchantZip: '00001',
@@ -435,6 +464,105 @@ async function readsAPostedPaymentFromTheCreatedStatus(): Promise<void> {
   expect(outcome.payment.returnMessage).toBeNull();
 }
 
+/**
+ * Asserts the inquiry call site sends NO confirmation and cannot therefore pay.
+ *
+ * Purpose: ⚠️ the inquiry and the money movement are one operation on one target, separated only by
+ * whether a `confirmation` member is present -- so a caller holding a request object with a stale
+ * confirming answer in it moves money while believing it is reading a balance. This asserts the body
+ * this call site composes, because the property that matters is what reaches the wire and not what the
+ * function returns.
+ *
+ * Assumptions: the member's ABSENCE is asserted, not its emptiness. Present-and-empty and absent are two
+ * spellings of the never-answered state, and asserting the weaker of the two would pass against a call
+ * site that sent whatever it was handed.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function inquiresWithoutSendingAnyConfirmation(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = {
+    accountId: ACCOUNT_ID,
+    payableBalance: BALANCE,
+    paid: false,
+    returnMessage: 'Confirm to make a bill payment...',
+  };
+
+  const preview = await inquireAccountPayableBalance(ACCOUNT_ID);
+
+  expect(sentBodies).toEqual([{ accountId: ACCOUNT_ID }]);
+  expect(preview.payableBalance).toBe(BALANCE);
+}
+
+/**
+ * Asserts an inquiry answered with a posted payment is raised rather than reported either way.
+ *
+ * Assumptions: neither of the two quiet outcomes is acceptable. Returning it as a preview would hide a
+ * payment that was posted, and returning it as a payment would present one nobody confirmed; raising is
+ * the only outcome that leaves the discrepancy where an operator can see it.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function refusesAnInquiryAnsweredWithAPayment(): Promise<void> {
+  nextStatus = HTTP_CREATED;
+  nextBody = {
+    transactionId: TRANSACTION_ID,
+    accountId: ACCOUNT_ID,
+    currentBalance: BALANCE,
+    paid: true,
+    returnMessage: null,
+  };
+
+  await expect(inquireAccountPayableBalance(ACCOUNT_ID)).rejects.toThrow(RangeError);
+}
+
+/**
+ * Asserts the payment call site refuses an answer that does not confirm, sending nothing.
+ *
+ * Purpose: the mirror hazard. A caller that means to pay but whose confirmation went missing gets a 200
+ * preview from the operation, carrying `paid: false` -- and a call site that only awaited the promise
+ * would report the payment as made. Refusing locally means the request is never sent at all.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function refusesAPaymentWhoseAnswerDoesNotConfirm(): Promise<void> {
+  await expect(payAccountBalanceConfirmed(ACCOUNT_ID, 'N')).rejects.toThrow(RangeError);
+  await expect(payAccountBalanceConfirmed(ACCOUNT_ID, '')).rejects.toThrow(RangeError);
+  expect(sentBodies, 'a refused payment must send nothing').toHaveLength(0);
+}
+
+/**
+ * Asserts a confirmed payment sends the confirming answer and returns the posted payment.
+ *
+ * Assumptions: the lower-case answer is accepted, because `app/cbl/COBIL00C.cbl` L173 to L191 accepts
+ * both cases and the published pattern admits both. A call site stricter than the service would refuse a
+ * character the service posts on.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function paysWithTheConfirmingAnswerItWasGiven(): Promise<void> {
+  nextStatus = HTTP_CREATED;
+  nextBody = {
+    transactionId: TRANSACTION_ID,
+    accountId: ACCOUNT_ID,
+    currentBalance: BALANCE,
+    paid: true,
+    returnMessage: null,
+  };
+
+  const payment = await payAccountBalanceConfirmed(ACCOUNT_ID, 'y');
+
+  expect(sentBodies).toEqual([{ accountId: ACCOUNT_ID, confirmation: 'y' }]);
+  expect(payment.transactionId).toBe(TRANSACTION_ID);
+}
+
+/**
+ * Asserts a confirmed payment answered with a preview is raised rather than reported as paid.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function refusesAConfirmedPaymentAnsweredWithAPreview(): Promise<void> {
+  nextStatus = HTTP_OK;
+  nextBody = { accountId: ACCOUNT_ID, payableBalance: BALANCE, paid: false, returnMessage: null };
+
+  await expect(payAccountBalanceConfirmed(ACCOUNT_ID)).rejects.toThrow(RangeError);
+}
+
 /** Asserts a posted payment missing the balance it paid is refused. */
 async function refusesAPostedPaymentWithoutItsBalance(): Promise<void> {
   nextStatus = HTTP_CREATED;
@@ -586,6 +714,14 @@ function ledgerWriteOutcomeContract(): void {
     refusesACopyAnswerBreachingItsPublishedShapes,
   );
   it('reads a posted payment from the created status', readsAPostedPaymentFromTheCreatedStatus);
+  it('inquires without sending any confirmation', inquiresWithoutSendingAnyConfirmation);
+  it('refuses an inquiry answered with a payment', refusesAnInquiryAnsweredWithAPayment);
+  it('refuses a payment whose answer does not confirm', refusesAPaymentWhoseAnswerDoesNotConfirm);
+  it('pays with the confirming answer it was given', paysWithTheConfirmingAnswerItWasGiven);
+  it(
+    'refuses a confirmed payment answered with a preview',
+    refusesAConfirmedPaymentAnsweredWithAPreview,
+  );
   it('refuses a posted payment without its balance', refusesAPostedPaymentWithoutItsBalance);
   it(
     'reads a declined preview without a payable balance',

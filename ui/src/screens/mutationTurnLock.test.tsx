@@ -46,13 +46,33 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type * as AuthModule from '../api/auth';
 import type * as TransactionsModule from '../api/transactions';
-import type { BillPaymentOutcome, CreatedUserResponse } from '../api/types';
+import type {
+  BillPaymentOutcome,
+  BillPaymentPreview,
+  BillPaymentResponse,
+  CreatedUserResponse,
+} from '../api/types';
 
 /** Stands in for the one identity write user add issues. */
 const createUserMock = vi.fn();
 
-/** Stands in for the one ledger call bill payment issues, on both of its turns. */
-const payAccountBalanceInFullMock = vi.fn();
+/**
+ * Stands in for the READING turn of bill payment.
+ *
+ * ⚠️ Refactoring Rationale: two spies replace the single `payAccountBalanceInFull` stand-in this file
+ * used to hold, because the screen no longer calls that function on either turn. It composes the read
+ * and the write separately — `inquireAccountPayableBalance` takes an account identifier and nothing
+ * else, so no confirmation can travel on a preview, and `payAccountBalanceConfirmed` refuses a
+ * non-confirming answer before it sends. Substituting only the shared transport left BOTH turns
+ * running the real wrappers, since a wrapper calls its own module's transport by an internal
+ * reference a mocked export cannot intercept: the read then failed against no server, the screen
+ * refused instead of locking, F3 was live, and this file failed on the navigation it asserts against
+ * rather than on anything about a lock.
+ */
+const inquireAccountPayableBalanceMock = vi.fn();
+
+/** Stands in for the WRITING turn of bill payment, which moves the money. */
+const payAccountBalanceConfirmedMock = vi.fn();
 
 vi.mock(
   '../api/auth',
@@ -75,12 +95,16 @@ vi.mock(
 vi.mock(
   '../api/transactions',
   /**
-   * Replaces the bill-payment call while leaving every other export intact.
-   * @returns {Promise<typeof TransactionsModule>} The real module with the payment stubbed.
+   * Replaces both bill-payment turns while leaving every other export intact.
+   * @returns {Promise<typeof TransactionsModule>} The real module with both turns stubbed.
    */
   async () => {
     const actual = await vi.importActual<typeof TransactionsModule>('../api/transactions');
-    return { ...actual, payAccountBalanceInFull: payAccountBalanceInFullMock };
+    return {
+      ...actual,
+      inquireAccountPayableBalance: inquireAccountPayableBalanceMock,
+      payAccountBalanceConfirmed: payAccountBalanceConfirmedMock,
+    };
   },
 );
 
@@ -153,7 +177,7 @@ const CREATED_USER: CreatedUserResponse = {
  * paints when it has not, and neither the balance nor the `paid` flag distinguishes the two. A null
  * message therefore reaches the trailing branch, which reports the sentence and offers no payment.
  */
-const PAYABLE_PREVIEW: BillPaymentOutcome = {
+const PAYABLE_PREVIEW: Extract<BillPaymentOutcome, { readonly outcome: 'PREVIEWED' }> = {
   outcome: 'PREVIEWED',
   preview: {
     accountId: ACCOUNT_ID,
@@ -272,33 +296,20 @@ function legendControl(label: string): HTMLElement {
 }
 
 /**
- * Returns the confirmation panel's own primary control, which shares its caption with the trigger.
+ * Returns the one-position control the operator answers the confirmation into.
  *
- * Assumptions: the panel's control is located by ELIMINATION rather than by name, because both carry
- * the same caption -- each renders the single `'Y'` that `app/cbl/COBIL00C.cbl` L174-L176 accepts in
- * its `CONFIRM LENGTH=1` field. Matching on the accessible name alone is therefore ambiguous by
- * construction, and rejecting the trigger is stable against wherever the design system places the
- * panel in the document.
- * @param {HTMLElement} trigger - The control that opened the panel.
- * @returns {HTMLElement} The panel's own primary answer control.
- * @throws {Error} When the panel published no control other than the trigger, which means it never
- *   opened -- a distinct failure from the answer being refused, and worth saying so.
+ * ⚠️ Refactoring Rationale: this replaces a helper that located a confirmation PANEL's own answer
+ * button by eliminating the trigger that opened it. There is no panel and no answer button any more.
+ * A runtime sweep measured the previous arrangement moving focus onto an enabled commit control after
+ * a preview and then onto the panel's own affirmative, so three bare presses of Enter paid an account
+ * balance in full with the confirming letter never typed. The gate is now the field
+ * `app/bms/COBIL00.bms` L115-L119 declares — `ATTRB=(FSET,NORM,UNPROT) LENGTH=1`, carrying no `IC`,
+ * so the cursor is not sent to it either — and a commit is reachable only from a character the
+ * operator supplied.
+ * @returns {HTMLElement} The confirmation entry control.
  */
-function panelAnswerControl(trigger: HTMLElement): HTMLElement {
-  const answer = screen.getAllByRole('button', { name: CONFIRMING_ANSWER }).find(
-    /**
-     * Rejects the trigger, leaving the panel's own control.
-     * @param {HTMLElement} candidate - One control carrying the confirming caption.
-     * @returns {boolean} `true` for the control that is not the trigger.
-     */
-    (candidate: HTMLElement): boolean => candidate !== trigger,
-  );
-
-  if (answer === undefined) {
-    throw new Error('the confirmation panel published no answer control of its own');
-  }
-
-  return answer;
+function confirmationEntry(): HTMLElement {
+  return screen.getByTestId('billpay-confirm');
 }
 
 /**
@@ -318,18 +329,31 @@ async function enterEveryUserValue(): Promise<void> {
  * Assumptions: BOTH states are asserted -- shut during the window and usable after it -- because a
  * control disabled unconditionally would satisfy the first half while removing the only way off the
  * screen, and a lock that never released would be the more damaging defect of the two.
+ *
+ * ⚠️ Refactoring Rationale: the key that OWNS the outstanding turn is now asserted enabled and
+ * `aria-busy`, where this case previously asserted it disabled. The screen moved its Enter binding
+ * from the `disabled` channel onto the `busy` channel `ui/src/layout/usePfKeys.ts` added, and the two
+ * are mutually exclusive by construction -- the hook tests `disabled` before `busy`, so an entry
+ * carrying both would never report busy at all. Trade-offs: `busy` keeps the control present, named
+ * and focusable and declines the press SILENTLY, which is the 3270 input-inhibit behaviour a valid
+ * key pressed early earns; `disabled` additionally states the action is unavailable, which is the
+ * honest signal for the keys that are NOT the outstanding turn. Both channels are therefore asserted
+ * here, each on the control it belongs to -- collapsing them onto one would stop distinguishing "your
+ * key arrived early" from "this key is unavailable", and the money-safety assertions below hold
+ * either way because a busy AID is declined before any dispatch.
  * @returns {Promise<void>} Resolves once both states have been observed.
  */
 async function theReportingTurnLocksTheScreen(): Promise<void> {
-  const reported = deferred<BillPaymentOutcome>();
-  payAccountBalanceInFullMock.mockReturnValueOnce(reported.promise);
+  const reported = deferred<BillPaymentPreview>();
+  inquireAccountPayableBalanceMock.mockReturnValueOnce(reported.promise);
 
   renderBillPay();
   const entry = screen.getByLabelText(BILL_PAY_FIELD_LABELS.accountId);
   await userEvent.type(entry, ACCOUNT_ID);
   await userEvent.click(legendControl(BILL_PAY_KEY_LABELS.ENTER));
 
-  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toBeDisabled();
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toBeEnabled();
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toHaveAttribute('aria-busy', 'true');
   expect(legendControl(BILL_PAY_KEY_LABELS.PFK03)).toBeDisabled();
   expect(legendControl(UNIFORM_PF_KEY_LABELS.PFK04)).toBeDisabled();
   expect(entry).toBeDisabled();
@@ -344,9 +368,10 @@ async function theReportingTurnLocksTheScreen(): Promise<void> {
   await userEvent.keyboard('{F3}{F4}');
   expect(screen.queryByText(`${ARRIVED} ${MAIN_MENU_ROUTE}`)).toBeNull();
   expect(entry).toHaveValue(ACCOUNT_ID);
-  expect(payAccountBalanceInFullMock).toHaveBeenCalledTimes(1);
+  expect(inquireAccountPayableBalanceMock).toHaveBeenCalledTimes(1);
+  expect(payAccountBalanceConfirmedMock).not.toHaveBeenCalled();
 
-  reported.release(PAYABLE_PREVIEW);
+  reported.release(PAYABLE_PREVIEW.preview);
 
   expect(await screen.findByTestId('billpay-confirm')).toBeEnabled();
   expect(legendControl(BILL_PAY_KEY_LABELS.PFK03)).toBeEnabled();
@@ -364,39 +389,49 @@ async function theReportingTurnLocksTheScreen(): Promise<void> {
  * @returns {Promise<void>} Resolves once the locked window and its release have been observed.
  */
 async function theConfirmingTurnLocksTheAnswer(): Promise<void> {
-  const paid = deferred<BillPaymentOutcome>();
-  payAccountBalanceInFullMock
-    .mockResolvedValueOnce(PAYABLE_PREVIEW)
-    .mockReturnValueOnce(paid.promise);
+  const paid = deferred<BillPaymentResponse>();
+  inquireAccountPayableBalanceMock.mockResolvedValueOnce(PAYABLE_PREVIEW.preview);
+  payAccountBalanceConfirmedMock.mockReturnValueOnce(paid.promise);
 
   renderBillPay();
   await userEvent.type(screen.getByLabelText(BILL_PAY_FIELD_LABELS.accountId), ACCOUNT_ID);
   await userEvent.click(legendControl(BILL_PAY_KEY_LABELS.ENTER));
 
-  const trigger = await screen.findByTestId('billpay-confirm');
-  await userEvent.click(trigger);
+  await screen.findByTestId('billpay-confirm');
 
-  await userEvent.click(panelAnswerControl(trigger));
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the confirming letter is TYPED into the field and the turn is then
+   *       taken, where this case used to click a trigger and then the panel's affirmative. Both of
+   *       those controls are gone, and the sequence they described is the defect: the screen armed a
+   *       commit control and moved focus onto it, so the turn that paid could be reached without the
+   *       operator ever supplying an answer. `app/cbl/COBIL00C.cbl` L173-L191 reads the answer out of
+   *       its own `CONFIRM` field and performs the write on `'Y'`/`'y'` alone, which is what this now
+   *       reproduces.
+   */
+  await userEvent.type(confirmationEntry(), CONFIRMING_ANSWER);
+  await userEvent.click(legendControl(BILL_PAY_KEY_LABELS.ENTER));
 
-  expect(screen.getByTestId('billpay-confirm')).toBeDisabled();
-  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toBeDisabled();
+  expect(confirmationEntry()).toBeDisabled();
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toBeEnabled();
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toHaveAttribute('aria-busy', 'true');
   expect(legendControl(BILL_PAY_KEY_LABELS.PFK03)).toBeDisabled();
   expect(legendControl(UNIFORM_PF_KEY_LABELS.PFK04)).toBeDisabled();
   expect(screen.getByLabelText(BILL_PAY_FIELD_LABELS.accountId)).toBeDisabled();
 
-  await userEvent.click(screen.getByTestId('billpay-confirm'));
-  await userEvent.keyboard('{F3}{F4}');
+  await userEvent.keyboard('{enter}{F3}{F4}');
   expect(screen.queryByText(`${ARRIVED} ${MAIN_MENU_ROUTE}`)).toBeNull();
 
   /*
-   * WHY : Assumptions: TWO calls and not three. One is the reporting read and one is the payment, which
-   *       is the reference's own two-turn shape; a third would be a second payment for one instruction,
-   *       which is the exact harm the lock exists to prevent and the only harm here that is not
-   *       reversible from the screen.
+   * WHY : Assumptions: ONE read and ONE payment, counted on their own spies rather than as two calls to
+   *       a shared one. Separating them is what makes a second payment for one instruction visible as
+   *       such -- that is the harm the lock exists to prevent and the only harm here the operator
+   *       cannot reverse from the screen -- and it additionally pins that the paying turn did not
+   *       re-read the balance.
    */
-  expect(payAccountBalanceInFullMock).toHaveBeenCalledTimes(2);
+  expect(payAccountBalanceConfirmedMock).toHaveBeenCalledTimes(1);
+  expect(inquireAccountPayableBalanceMock).toHaveBeenCalledTimes(1);
 
-  paid.release(WRITTEN_PAYMENT);
+  paid.release(WRITTEN_PAYMENT.payment);
 
   expect(
     await screen.findByText(WRITTEN_PAYMENT.payment.transactionId, { exact: false }),
@@ -411,6 +446,16 @@ async function theConfirmingTurnLocksTheAnswer(): Promise<void> {
  * is Enter and a lock that left Enter live would issue a second create for the row the first was
  * writing -- which the service answers `User ID already exist...` for a user the operator asked for
  * once.
+ *
+ * ⚠️ Refactoring Rationale: all four are now asserted enabled and `aria-busy` rather than disabled.
+ * The screen moved every key onto the `busy` channel `ui/src/layout/usePfKeys.ts` added, keeping its
+ * own pre-existing decision that the whole legend declines for the write window -- the 3270 keyboard
+ * lock -- and changing only HOW that decline is expressed. Assumptions: the protection asserted below
+ * is unchanged, because the hook declines a busy AID before any dispatch, so the keyboard probe still
+ * reaches nothing; what changes is that the controls stay present, named and focusable while they
+ * decline, so a screen reader is told a turn is outstanding instead of being told four controls
+ * vanished. Trade-offs: `disabled` before `busy` is the hook's own precedence, so an entry cannot
+ * carry both and this case cannot assert both on one control.
  * @returns {Promise<void>} Resolves once both states have been observed.
  */
 async function theCreateTurnLocksEveryKey(): Promise<void> {
@@ -427,7 +472,8 @@ async function theCreateTurnLocksEveryKey(): Promise<void> {
     UNIFORM_PF_KEY_LABELS.PFK04,
     USER_ADD_KEY_LABELS.PFK12,
   ]) {
-    expect(legendControl(label)).toBeDisabled();
+    expect(legendControl(label)).toBeEnabled();
+    expect(legendControl(label)).toHaveAttribute('aria-busy', 'true');
   }
 
   await userEvent.keyboard('{F3}{F4}{F12}');
@@ -486,7 +532,8 @@ async function theAdvertisedExitKeyIsRefused(): Promise<void> {
 /** Discards both spies so one case's calls cannot be counted by the next. */
 function resetTransports(): void {
   createUserMock.mockReset();
-  payAccountBalanceInFullMock.mockReset();
+  inquireAccountPayableBalanceMock.mockReset();
+  payAccountBalanceConfirmedMock.mockReset();
 }
 
 /** Registers the mutation-turn cases. */

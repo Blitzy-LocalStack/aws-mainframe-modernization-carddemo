@@ -48,7 +48,7 @@ import type * as AuthModule from './api/auth';
 import { APP_SHELL_TEST_ID } from './layout/AppShell';
 import { PF_KEY_BAR_REGION_LABEL } from './layout/PfKeyBar';
 import { ACCESS_DENIED_ADMIN_ONLY, SCREEN_NOT_AVAILABLE_TITLE } from './messages/messages';
-import { ADMIN_MENU_ROUTE } from './routes/navigation';
+import { ADMIN_MENU_ROUTE, MAIN_MENU_ROUTE } from './routes/navigation';
 import { ADMIN_MENU_SUBTITLE } from './screens/admin';
 import { MAIN_MENU_SUBTITLE } from './screens/menu';
 /*
@@ -60,6 +60,7 @@ import { USER_LIST_PATH, USER_LIST_TITLE } from './screens/userList';
 import { cardDemoTheme } from './theme/antdTheme';
 import {
   answerEveryRequestWith,
+  dispatchedRequests,
   installApiHarness,
   pageOf,
   removeApiHarness,
@@ -115,7 +116,25 @@ vi.mock('./api/auth', mockAuthModule);
  *       Building a router per case from these routes is what lets each case name its own opening
  *       address; the exported browser router owns one history for the whole module and could not.
  */
-const { CARD_DEMO_ROUTES } = await import('./router');
+const { CARD_DEMO_ROUTES, KEYLESS_ENTRY_ROUTES } = await import('./router');
+
+/**
+ * The three addresses that reach a per-record screen with no record named.
+ *
+ * ⚠️ Assumptions: the paths are PROJECTED from the table the router publishes rather than retyped, which
+ * is the opposite of the convention `ui/src/routerRoutes.test.tsx` follows for its rosters. That file
+ * retypes so it can check the table against an independent statement of what the table should hold; this
+ * case asks a different question -- whether each declared address renders -- and retyping here would let
+ * a route be published, never rendered, and never reported, because the sweep would visit the copy.
+ */
+const KEYLESS_ENTRY_PATHS: readonly string[] = KEYLESS_ENTRY_ROUTES.map(
+  /**
+   * Reads one alias row's path.
+   * @param {(typeof KEYLESS_ENTRY_ROUTES)[number]} entry - One published alias row.
+   * @returns {string} The address the row mounts.
+   */
+  (entry) => entry.path,
+);
 
 /*
  * WHY : Assumptions: a session is established ONLY by driving the real exchange, never by writing a
@@ -287,7 +306,36 @@ async function signOnEntersTheAdministrativeMenu(): Promise<void> {
 }
 
 /**
- * The bare root opens the main menu for a signed-on operator.
+ * An administrator can render the ORDINARY menu, so the two role graphs are not partitioned.
+ *
+ * ⚠️ Refactoring Rationale: this case is NEW, and it is the falsifiable half of a finding that is
+ * otherwise about the absence of a control. QA measured the two role graphs as disjoint: an ordinary
+ * operator reaches fourteen routes through the interface, an administrator eight, and `F3=Exit` on the
+ * administrative menu signs them out -- so an administrator appeared to have no route at all to any of
+ * the thirteen ordinary business screens. Two different things were folded together there. The ROUTE is
+ * reachable, which this case fixes: `/menu` is classified `authenticated`, so an administrator's own
+ * claim admits them and typing the address works -- which is the direct analogue of the baseline
+ * operator clearing the screen and keying transaction `CM00`, the only crossing the reference has.
+ * What is genuinely missing is an in-application CONTROL, and the reference has none to transcribe:
+ * `app/cpy/COADM02Y.cpy` L22 declares exactly six options and none of them is the main menu, and
+ * `app/cbl/COADM01C.cbl` L100-L102 gives PF3 to sign-off, which must stay.
+ *
+ * Assumptions: the administrative caption is required ABSENT as well, so the case cannot pass on a
+ * router that ignored the address and left the administrator where they were.
+ * @returns {Promise<void>} Resolves once the ordinary menu has painted for an administrator.
+ */
+async function anAdministratorCanRenderTheOrdinaryMenu(): Promise<void> {
+  await installSession(['carddemo-admin']);
+  renderRouterAt(MAIN_MENU_ROUTE);
+
+  expect(
+    await screen.findByRole('heading', { name: MAIN_MENU_SUBTITLE }, QUERY_TIMEOUT),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: ADMIN_MENU_SUBTITLE })).not.toBeInTheDocument();
+}
+
+/**
+ * The bare root opens the MAIN menu for an operator whose claim carries no administrative group.
  *
  * Assumptions: the redirect is asserted through the guard rather than around it, so this also fixes
  * that the root is not reachable without a session -- the unauthenticated case below covers the other
@@ -301,6 +349,31 @@ async function theRootOpensTheMainMenu(): Promise<void> {
   expect(
     await screen.findByRole('heading', { name: MAIN_MENU_SUBTITLE }, QUERY_TIMEOUT),
   ).toBeInTheDocument();
+}
+
+/**
+ * The bare root opens the ADMINISTRATIVE menu for an operator whose claim carries the admin group.
+ *
+ * ⚠️ Refactoring Rationale: this case is NEW, and the pair of cases is the point. The root redirect was
+ * a fixed `<Navigate to="/menu">` written into the route table, so it was covered by the case above and
+ * by nothing else -- an administrator who opened the bare origin landed on `COMEN01C`, transaction
+ * `CM00`, the ORDINARY menu, which `app/cbl/COSGN00C.cbl` L230-L240 never puts in front of an `'A'`
+ * operator. One case asserting one role could not see that, because a role-independent redirect satisfies
+ * it exactly as well as a role-aware one; only the second role can tell them apart.
+ *
+ * Assumptions: the administrative caption is required PRESENT and the ordinary caption ABSENT, so a
+ * redirect that somehow rendered both -- or that rendered the ordinary menu with the administrative one
+ * mounted elsewhere -- still fails.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theRootOpensTheAdministrativeMenuForAnAdministrator(): Promise<void> {
+  await installSession(['carddemo-admin']);
+  renderRouterAt('/');
+
+  expect(
+    await screen.findByRole('heading', { name: ADMIN_MENU_SUBTITLE }, QUERY_TIMEOUT),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: MAIN_MENU_SUBTITLE })).not.toBeInTheDocument();
 }
 
 /**
@@ -321,12 +394,9 @@ async function anUnauthenticatedVisitorReachesSignOn(): Promise<void> {
  * correctly -- sending them to sign-on would invite them to fix something that is not broken, which is
  * the distinction `ui/src/routes/guards.tsx` draws between its two guards.
  *
- * ⚠️ Refactoring Rationale: the address is the USER BROWSE, where it was the administrative menu. The
- * gated set is exactly the six options of `app/cpy/COADM02Y.cpy`, and the menu that lists them is not
- * one of them -- so `/admin` is authenticated, and a case demanding a refusal there would now demand
- * the opposite of the delivered contract. `/users` is administrative option 1, so this case still
- * asserts the guard at a gated address; `ui/src/routerRoutes.test.tsx` covers the other side, that the
- * menu itself renders for an operator without the claim and that its every destination refuses them.
+ * Assumptions: the address is the USER BROWSE rather than the menu, and the menu has a case of its own
+ * below. `/users` is administrative option 1, so this case asserts the guard at a gated OPTION;
+ * {@link anOrdinaryOperatorIsRefusedTheAdministrativeMenu} asserts it at the menu that lists them.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function anOrdinaryOperatorIsRefusedAnAdministrativeRoute(): Promise<void> {
@@ -351,23 +421,30 @@ async function anOrdinaryOperatorIsRefusedAnAdministrativeRoute(): Promise<void>
 }
 
 /**
- * An ordinary operator reaches the administrative MENU, which grants them nothing.
+ * An ordinary operator who opens the administrative MENU is refused it and shown none of it.
  *
- * Assumptions: this is the other half of the boundary the case above asserts, and it is asserted here
- * rather than left implied. `app/cpy/COADM02Y.cpy` defines six administrative options and the menu
- * itself is not one of them, so gating the menu would guard seven paths where the reference defines
- * six. Nothing is opened up by admitting an operator to it: every option it offers navigates to one of
- * the six gated paths, and the case above proves what happens when they choose one.
- * @returns {Promise<void>} Resolves once the menu has painted for a non-administrator.
+ * ⚠️⚠️ Refactoring Rationale: this case asserted the opposite -- that an ordinary operator "reaches the
+ * administrative MENU, which grants them nothing" -- on the argument that `app/cpy/COADM02Y.cpy` defines
+ * six options, the menu is not one of them, and every option it offers refuses them anyway. Measured, the
+ * menu granted a great deal: the `COADM01C` identity band, all six administrative option labels, and a
+ * focused option field that accepted an entry and moved the operator to `/users`, where the refusal
+ * finally arrived -- with an empty message band the whole time. `app/cbl/COSGN00C.cbl` L230-L240
+ * transfers only an `'A'` operator to `COADM01C`, so an operator without the claim has no path to this
+ * screen in the reference at all.
+ *
+ * Assumptions: the menu CAPTION is required absent as well as the refusal required present, because the
+ * refusal appearing does not by itself prove the menu did not paint -- the withdrawn arrangement could
+ * have rendered both. Requiring the caption's absence is what makes this a fail-closed assertion.
+ * @returns {Promise<void>} Resolves once the refusal has painted and the menu has not.
  */
-async function anOrdinaryOperatorReachesTheAdministrativeMenu(): Promise<void> {
+async function anOrdinaryOperatorIsRefusedTheAdministrativeMenu(): Promise<void> {
   await installSession(['carddemo-user']);
   renderRouterAt(ADMIN_MENU_ROUTE);
 
   expect(
-    await screen.findByRole('heading', { name: ADMIN_MENU_SUBTITLE }, QUERY_TIMEOUT),
+    await screen.findByText(ACCESS_DENIED_ADMIN_ONLY.trim(), undefined, QUERY_TIMEOUT),
   ).toBeInTheDocument();
-  expect(screen.queryByText(ACCESS_DENIED_ADMIN_ONLY.trim())).not.toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: ADMIN_MENU_SUBTITLE })).not.toBeInTheDocument();
 }
 
 /*
@@ -445,6 +522,86 @@ async function everyDeclaredPathResolvesToAScreen(): Promise<void> {
     ).not.toBeInTheDocument();
     cleanup();
   }
+}
+
+/**
+ * Every keyless entry route opens a FRAMED, self-explaining screen and reads nothing.
+ *
+ * ⚠️ Purpose: this case is NEW, and it is the only place the three keyless addresses are exercised
+ * against the shipped table. Three main-menu options name programs whose screens are addressed per
+ * record, and until each had an address of its own those options resolved to the browse that mints the
+ * key. What has to be true of the new addresses is not merely that they resolve -- the sweep above would
+ * report that -- but that they land the arrival the reference paints: `app/cbl/COCRDSLC.cbl` L490-L491
+ * falls back to `WS-PROMPT-FOR-INPUT` on an empty map with fields to type into, and
+ * `app/cbl/COTRN01C.cbl` L109 paints its empty map when the selection carrier arrives blank. A framed
+ * screen with a legend is that arrival; a not-found result or a bare error surface is not.
+ *
+ * ⚠️ Assumptions: ZERO dispatched requests is asserted, and it is the sharpest property available here.
+ * Both card screens reduce an absent or unusable route parameter to a null selector and return from
+ * their read without issuing one, and the transaction screen reads only when its identifier is present
+ * -- so a keyless arrival that dispatched anything would mean the sentinel text had reached the screen
+ * as a PARAMETER, which is exactly the failure mode a static route exists to prevent. Nothing else
+ * observable distinguishes those two arrivals as early or as cheaply.
+ *
+ * Assumptions: the not-found heading is required ABSENT and the antd result surface is required absent
+ * with it. The heading alone would not report a screen that resolved and then painted a bare error
+ * panel instead of its own first turn, which is the other way a keyless arrival can be wrong.
+ * @returns {Promise<void>} Resolves once every keyless address has been visited.
+ */
+async function everyKeylessEntryPathOpensAFramedScreen(): Promise<void> {
+  for (const path of KEYLESS_ENTRY_PATHS) {
+    await installSession(['carddemo-admin', 'carddemo-user']);
+    renderRouterAt(path);
+
+    /*
+     * WHY : Assumptions: the wait reuses {@link QUERY_TIMEOUT} for the reason the sweep above records
+     *       -- each visit transforms and commits a separate `React.lazy` chunk, and a one-second inner
+     *       budget reports the `Suspense` fallback in place of the frame whenever the runner is busy.
+     */
+    await waitFor(
+      /**
+       * Waits until the frame has painted for this keyless address.
+       * @returns {void} Nothing; the assertion carries the outcome.
+       */
+      () => {
+        expect(screen.getAllByTestId(APP_SHELL_TEST_ID).length).toBeGreaterThan(0);
+      },
+      QUERY_TIMEOUT,
+    );
+
+    expect(
+      screen.queryByText(NOT_FOUND_TITLE),
+      `keyless entry ${path} must open a screen, not the not-found result`,
+    ).not.toBeInTheDocument();
+    expect(
+      document.querySelectorAll('.ant-result').length,
+      `keyless entry ${path} must paint its own first turn, not a result surface`,
+    ).toBe(0);
+    expect(
+      screen.getAllByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL }),
+      `keyless entry ${path} must paint exactly one function-key legend`,
+    ).toHaveLength(1);
+    expect(
+      dispatchedRequests().map(urlOf),
+      `keyless entry ${path} carries no key, so it must read nothing`,
+    ).toEqual([]);
+
+    cleanup();
+  }
+}
+
+/**
+ * Reads one recorded request's address, as a named callback the lint rules accept in a `map`.
+ *
+ * Assumptions: the ADDRESSES are compared rather than the request count, so a failure names what was
+ * fetched instead of reporting only that something was. On this case a dispatched address is the direct
+ * evidence of which screen mistook the sentinel for a key.
+ * @param {{ readonly url: string }} request - One recorded dispatch.
+ * @param {string} request.url - The address that dispatch was sent to.
+ * @returns {string} The address the dispatch was sent to.
+ */
+function urlOf(request: { readonly url: string }): string {
+  return request.url;
 }
 
 /**
@@ -559,6 +716,16 @@ function routerReachabilityCases(): void {
     TIMEOUT,
   );
   it('opens the main menu from the bare root', theRootOpensTheMainMenu, TIMEOUT);
+  it(
+    'opens the administrative menu from the bare root for an administrator',
+    theRootOpensTheAdministrativeMenuForAnAdministrator,
+    TIMEOUT,
+  );
+  it(
+    'renders the ordinary menu for an administrator',
+    anAdministratorCanRenderTheOrdinaryMenu,
+    TIMEOUT,
+  );
   it('sends an unauthenticated visitor to sign-on', anUnauthenticatedVisitorReachesSignOn, TIMEOUT);
   it(
     'refuses an ordinary operator an administrative route with the baseline sentence',
@@ -566,13 +733,24 @@ function routerReachabilityCases(): void {
     TIMEOUT,
   );
   it(
-    'admits an ordinary operator to the administrative menu it gates nothing on',
-    anOrdinaryOperatorReachesTheAdministrativeMenu,
+    'refuses an ordinary operator the administrative menu itself',
+    anOrdinaryOperatorIsRefusedTheAdministrativeMenu,
     TIMEOUT,
   );
   it(
     'resolves every declared path to a screen inside the frame',
     everyDeclaredPathResolvesToAScreen,
+    MULTI_PATH_TIMEOUT,
+  );
+  /*
+   * WHY : Assumptions: this case is given {@link MULTI_PATH_TIMEOUT} rather than {@link TIMEOUT}, for
+   *       the reason recorded on that constant -- it visits three addresses in sequence and each one
+   *       transforms and commits a separate `React.lazy` chunk, so a single-screen budget would report a
+   *       case timeout in place of whichever address failed.
+   */
+  it(
+    'opens a framed screen at every keyless entry route',
+    everyKeylessEntryPathOpensAFramedScreen,
     MULTI_PATH_TIMEOUT,
   );
   it(

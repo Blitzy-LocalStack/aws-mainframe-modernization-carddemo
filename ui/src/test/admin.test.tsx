@@ -78,7 +78,7 @@
  * asserted against the DOM and the test asserts nothing of its own about wording.
  */
 
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { UserEvent } from '@testing-library/user-event';
 import type { ReactElement } from 'react';
@@ -92,6 +92,7 @@ import {
 } from 'react-router';
 import { describe, expect, it } from 'vitest';
 
+import { discardRetainedOutcomes, retainOutcomeAcrossNavigation } from '../api/client';
 import { CARDDEMO_ADMIN_GROUP, CARDDEMO_USER_GROUP } from '../hooks/useAuth';
 import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
@@ -104,10 +105,13 @@ import {
   INVALID_KEY_PRESSED,
   MAIN_MENU_OPTIONS,
   MENU_OPTION_DECLARED_WIDTH,
+  MESSAGE_TEMPLATES,
   SHARED_MESSAGES,
+  formatMessageTemplate,
   normaliseMessageBandValue,
 } from '../messages/messages';
 import type { AdminMenuOption } from '../messages/messages';
+import { USER_UPDATE_ROUTE_TEMPLATE } from '../routes/navigation';
 import {
   CARD_DEMO_ROUTES,
   REF_TYPE_LIST_PATH,
@@ -125,6 +129,7 @@ import AdminMenuScreen, {
   ADMIN_MENU_SUBTITLE,
   composeAdminOptionLine,
 } from '../screens/admin';
+import type { UserUpdateSaveHandover } from '../screens/userUpdate';
 import { FIELD_ERROR_TOKENS } from '../theme/tokens';
 import {
   expectMaxLength,
@@ -798,7 +803,7 @@ function pinsEveryDestinationToTheRoutersOwnConstants(): void {
  * @returns {void} Nothing; the assertions either pass or fail the case.
  */
 function dispatchesOnlyToAdministrativelyGatedPaths(): void {
-  expect(ADMINISTRATIVE_PATHS).toHaveLength(ADMIN_MENU_OPTION_COUNT);
+  expect(ADMINISTRATIVE_PATHS).toHaveLength(ADMIN_MENU_OPTION_COUNT + 1);
 
   for (const [optionNumber, destination] of declaredDestinations()) {
     expect(destination).not.toBeNull();
@@ -813,11 +818,16 @@ function dispatchesOnlyToAdministrativelyGatedPaths(): void {
     expect({ optionNumber, gated: gatedBy.length }).toEqual({ optionNumber, gated: 1 });
   }
 
-  // WHY : Assumptions: the menu itself is `authenticated` and NOT `administrative`, which is the
-  //       router's documented decision -- the administrative class is reserved for exactly the six
-  //       options of `app/cpy/COADM02Y.cpy`, and the menu that lists them is not one of them. Asserting
-  //       it here keeps that deliberate asymmetry from being "corrected" into a defect report.
-  expect(ADMINISTRATIVE_PATHS).not.toContain(ADMIN_MENU_PATH);
+  // WHY : Refactoring Rationale: this assertion was inverted. It previously required the menu itself to
+  //       be `authenticated` rather than `administrative`, and defended that asymmetry as deliberate.
+  //       The reference refutes it: `app/cbl/COSGN00C.cbl` L230-L240 transfers control to `COADM01C`
+  //       only for an operator whose `SEC-USR-TYPE` is `'A'`, so the menu is as administrative as the
+  //       six options it lists, and the arity above is those six plus the menu that lists them. Leaving
+  //       the menu on the ordinary class rendered its complete option list -- and a live option
+  //       dispatcher -- to an ordinary operator, deferring the refusal to whichever screen they picked.
+  //       Assumptions: `ADMINISTRATIVE_PATHS` is derived from the router's own table, so this pins the
+  //       shipped access class rather than a restatement of it.
+  expect(ADMINISTRATIVE_PATHS).toContain(ADMIN_MENU_PATH);
 }
 
 /**
@@ -864,16 +874,23 @@ async function letsAnAdministratorEnterAGatedOption(): Promise<void> {
  * @returns {Promise<void>} Resolves once the case has asserted.
  */
 async function refusesAnOrdinaryOperatorTheSameOption(): Promise<void> {
-  const { user, addressNow } = await openShippedRoutesAs([CARDDEMO_USER_GROUP]);
-  expect(await screen.findByText(ADMIN_MENU_SUBTITLE)).toBeInTheDocument();
-
-  await submitOption(user, '1');
+  const { addressNow } = await openShippedRoutesAs([CARDDEMO_USER_GROUP]);
 
   const refusal = await screen.findByText(ACCESS_DENIED_ADMIN_ONLY.trim());
-  // WHY : Assumptions: the address DID change, so this refusal is the guard rendering IN PLACE rather
-  //       than a navigation that never happened -- which is what distinguishes a gated route from a
-  //       dead one, and the two would otherwise look identical from the menu.
-  expect(addressNow()).toBe(USER_LIST_PATH);
+
+  // WHY : Refactoring Rationale: this case used to render the menu to an ordinary operator, submit an
+  //       option, and assert the refusal at the option's DESTINATION. That sequence only existed
+  //       because the menu route was gated as `authenticated`, so the operator saw the whole option
+  //       list first and met the refusal one screen later. The menu is now `administrative`, which is
+  //       what `app/cbl/COSGN00C.cbl` L230-L240 describes, so the refusal lands on ARRIVAL and there is
+  //       no option field to submit into. Asserting arrival is the stronger property: it proves no
+  //       administrative content reached the operator at all.
+  expect(screen.queryByText(ADMIN_MENU_SUBTITLE)).toBeNull();
+
+  // WHY : Assumptions: the address is the ADMIN MENU, not an option's destination, so this refusal is
+  //       the guard rendering in place on the route that was actually requested. That is what
+  //       distinguishes a gated route from a dead one; the two would otherwise look identical.
+  expect(addressNow()).toBe(ADMIN_MENU_PATH);
   expect(ACCESS_DENIED_ADMIN_ONLY.endsWith(' ')).toBe(true);
   expect(refusal.textContent).toBe(ACCESS_DENIED_ADMIN_ONLY);
 }
@@ -1206,4 +1223,429 @@ function adminMenuScreenCases(): void {
   );
 }
 
+/**
+ * Asserts the option row can wrap while the prompt and the field keep their declared measures.
+ *
+ * Purpose: the regression guard for the row that could not wrap. Browser measurement of the rendered
+ * screen recorded it surviving a 375 px viewport by 6.52 px, reaching exactly 0.00 px of clearance at
+ * 360 and, below that, pushing the submit control out of the viewport while squeezing the two-character
+ * field to 24.00 px.
+ *
+ * ⚠️ Assumptions: this asserts the three STYLE properties that decide the outcome rather than measuring
+ * a rendered width, and that is a property of the runner rather than a weaker test. `jsdom` performs no
+ * layout, so every rectangle is zero and no flex line is ever computed; a width assertion here would
+ * pass whatever the styles said. The three are jointly sufficient and individually necessary: the row
+ * must permit wrapping, or the trailing control leaves the viewport; the prompt must refuse to break, or
+ * the unbroken 25-column field of `app/bms/COADM01.bms` L140-L144 renders on two lines; and the field
+ * must refuse to shrink, or the row's overflow is taken out of the two columns
+ * `app/bms/COADM01.bms` L145-L149 declares before it is taken out of anything else.
+ *
+ * Assumptions: the row is reached from the field rather than by a test identifier, because it is a
+ * layout element with no name of its own and adding one would put a hook in the screen that only this
+ * case uses.
+ * @returns {Promise<void>} Resolves once the three properties have been asserted.
+ */
+async function letsTheOptionRowWrapWithoutBreakingThePromptOrTheField(): Promise<void> {
+  const { unmount } = await renderInShellAs([CARDDEMO_ADMIN_GROUP]);
+
+  const field = optionControl();
+  const prompt = screen.getByText(ADMIN_MENU_PROMPT);
+  const row = field.parentElement;
+  expect(row, 'the option field must sit inside a row element').not.toBeNull();
+
+  /*
+   * WHY : ⚠️ Assumptions: the row's wrapping is asserted through the design system's own CLASS and NOT
+   *       through an inline style, because that is where the library puts it. `genClsWrap` in
+   *       `node_modules/antd/es/flex/utils.js` emits `${prefixCls}-wrap-${wrap}` and maps `true` onto
+   *       the keyword `wrap`, while `Flex` copies only `flex` and `gap` into the style object
+   *       (`node_modules/antd/es/flex/index.js` L42-L56) -- so an unwrapping row carries NO class and NO
+   *       inline value and falls back to the CSS initial `nowrap` with nothing on the element to read.
+   *       An inline-style assertion therefore passes against the defect, which was measured on the twin
+   *       before this form was adopted.
+   */
+  expect(
+    (row as HTMLElement).className,
+    'the option row must permit wrapping so the submit control drops instead of leaving the viewport',
+  ).toContain('ant-flex-wrap-wrap');
+  expect(
+    prompt.style.whiteSpace,
+    'the 25-column prompt must stay on the one line the mapset paints it on',
+  ).toBe('nowrap');
+  expect(
+    field.style.flexShrink,
+    'the option field must keep its declared two columns rather than absorbing the row overflow',
+  ).toBe('0');
+
+  unmount();
+}
+
+/**
+ * Asserts the screen's own submit control announces exactly the catalogued label.
+ *
+ * Purpose: the regression guard for the decorative glyph that distinguishes this control from the
+ * identically labelled legend entry. `ui/src/layout/PfKeyBar.tsx` renders each action key as a real
+ * primary `Button`, so without the glyph the screen showed two pixel-identical primary controls about
+ * 330 px apart -- and with an UNHIDDEN glyph the control announced two things.
+ *
+ * ⚠️ Assumptions: every `@ant-design/icons` export renders `role="img"` with `aria-label` set to the
+ * icon's own name -- `node_modules/@ant-design/icons/es/components/AntdIcon.js` L48-L50 -- so an
+ * unhidden glyph CONTRIBUTES that name to the button's. Omitting `aria-hidden` was measured failing
+ * eighteen cases across this screen's suites in one run, every one of them a query that names the
+ * control by its label, so this case fails on the name rather than on a click that no longer resolves.
+ *
+ * Assumptions: the control is separated from the legend entry by landmark membership rather than by
+ * document order, because the shared label is deliberate and a DOM-order query would survive a layout
+ * change that inverted the two.
+ * @returns {Promise<void>} Resolves once the name has been asserted.
+ */
+async function announcesOnlyTheCataloguedLabelOnItsOwnControl(): Promise<void> {
+  const { unmount } = await renderInShellAs([CARDDEMO_ADMIN_GROUP]);
+
+  const legend = screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL });
+  const named = screen.getAllByRole('button', { name: ADMIN_MENU_KEY_LABELS.ENTER });
+  const own = named.find(
+    /**
+     * Keeps the candidate that is not part of the legend region.
+     * @param {HTMLElement} candidate - One button carrying the shared label.
+     * @returns {boolean} True when the button sits outside the legend.
+     */
+    (candidate) => !legend.contains(candidate),
+  );
+  expect(own, 'the screen must offer its own submit control outside the legend').toBeDefined();
+  expect(
+    (own as HTMLElement).textContent,
+    'the glyph must not join the label the control announces',
+  ).toBe(ADMIN_MENU_KEY_LABELS.ENTER);
+
+  unmount();
+}
+
+/**
+ * Asserts the two ENTER controls share one name and are still told apart by a screen reader.
+ *
+ * ⚠️ Purpose: this case is NEW and it is the guard on the keep-both decision recorded at the call site.
+ * Keeping two controls for one action is defensible -- `app/bms/COADM01.bms` L158-L162 declares the
+ * row-24 legend `ATTRB=(ASKIP,NORM)`, a protected literal, so the terminal had NO operable `ENTER`
+ * control and both browser controls are additions -- but only while the two do not present as one
+ * control announced twice. The case above proves the glyph stays out of the NAME; this one proves that a
+ * screen reader moving through the two tab stops hears a difference, which nothing measured before.
+ *
+ * ⚠️ Assumptions: the shared NAME is asserted rather than a difference in it. WCAG 2.2 SC 3.2.4 asks one
+ * name for one function and these two invoke the identical function, so a case demanding different names
+ * would demand a violation. The difference lives in the DESCRIPTION instead.
+ *
+ * Assumptions: the description asserted is the catalogued option prompt, already on the glass labelling
+ * the field, so Rule T8 is satisfied without inventing a second string for this screen.
+ * @returns {Promise<void>} Resolves once both controls have been inspected.
+ */
+async function tellsTheTwoEnterControlsApartWithoutRenamingEither(): Promise<void> {
+  const { unmount } = await renderInShellAs([CARDDEMO_ADMIN_GROUP]);
+
+  const label = ADMIN_MENU_KEY_LABELS.ENTER;
+  const legend = screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL });
+  const named = screen.getAllByRole('button', { name: label });
+
+  expect(named, 'the screen paints exactly two controls carrying the shared label').toHaveLength(2);
+
+  const own = named.find(
+    /**
+     * Keeps the candidate outside the legend region.
+     * @param {HTMLElement} candidate - One button carrying the shared label.
+     * @returns {boolean} True when the button sits outside the legend.
+     */
+    (candidate) => !legend.contains(candidate),
+  );
+  const inLegend = named.find(
+    /**
+     * Keeps the candidate inside the legend region.
+     * @param {HTMLElement} candidate - One button carrying the shared label.
+     * @returns {boolean} True when the button sits inside the legend.
+     */
+    (candidate) => legend.contains(candidate),
+  );
+  expect(own, 'the screen must offer its own submit control outside the legend').toBeDefined();
+  expect(inLegend, 'the legend must offer the same key').toBeDefined();
+
+  /*
+   * WHY : Assumptions: the description is resolved through the referenced element's own text rather than
+   *       compared as an attribute value, because that is what an assistive technology does -- an
+   *       `aria-describedby` naming an element that does not exist reads as no description at all and
+   *       would otherwise pass an attribute comparison.
+   */
+  const describedBy = (own as HTMLElement).getAttribute('aria-describedby') ?? '';
+  const description = describedBy === '' ? null : document.getElementById(describedBy);
+  expect(
+    description,
+    'the screen control must be described by an element that exists',
+  ).not.toBeNull();
+  expect(
+    (description as HTMLElement).textContent,
+    'the screen control must be described by the catalogued option prompt',
+  ).toBe(ADMIN_MENU_PROMPT);
+
+  expect(
+    (inLegend as HTMLElement).getAttribute('aria-describedby'),
+    'the legend copy must carry no description, so the two do not read alike',
+  ).toBeNull();
+  expect(
+    (inLegend as HTMLElement).getAttribute('aria-keyshortcuts'),
+    'the legend copy must announce the key it stands for',
+  ).not.toBeNull();
+
+  /*
+   * WHY : Assumptions: the glyph is asserted ABSENT from the accessibility tree rather than asserted to
+   *       carry `aria-hidden`, because absence is the property that matters and it holds however the
+   *       hiding is expressed. `@ant-design/icons` renders `role="img"` with the icon's own name as its
+   *       label, so a queryable image inside this control is exactly the second announcement the
+   *       decorative glyph must not make.
+   */
+  expect(
+    within(own as HTMLElement).queryByRole('img'),
+    'the decorative glyph must not appear in the accessibility tree',
+  ).toBeNull();
+
+  unmount();
+}
+
+/**
+ * Name the user-update screen retains its save outcome under, composed the way all three sites compose it.
+ *
+ * Assumptions: the claim is COMPOSED here from the same shared route template the screens compose it
+ * from, rather than copied as a literal, because that is the only half of the name the three call sites
+ * can be held to. A literal here would go on agreeing with itself after the route moved, which is the
+ * one drift this case exists to catch.
+ */
+const USER_UPDATE_SAVE_CLAIM = `${USER_UPDATE_ROUTE_TEMPLATE}#saved`;
+
+/**
+ * The sentence a committed user update publishes, composed from the catalog rather than written out.
+ *
+ * Assumptions: `app/cbl/COUSR02C.cbl` L372-L374 composes it with a `STRING ... DELIMITED BY SPACE` over
+ * the identifier, which is what the catalog template models. Writing the composed form as a literal here
+ * would let this case pass while the catalog's own spelling changed.
+ * @returns {string} The committed-write sentence for the operator these cases hand over.
+ */
+function committedUpdateSentence(): string {
+  return formatMessageTemplate(MESSAGE_TEMPLATES.USER_HAS_BEEN_UPDATED, {
+    'SEC-USR-ID': 'USER0100',
+  });
+}
+
+/**
+ * Retains a completed save outcome under the claim the update screen uses.
+ *
+ * Assumptions: the retention goes through the real registry rather than a stub, because the property
+ * under test is that THIS screen collects what THAT registry holds -- a stubbed store would prove only
+ * that the screen calls a function this case wrote.
+ *
+ * Assumptions: it is wrapped in `act`, because `retainOutcomeAcrossNavigation` tells its listeners
+ * synchronously and a mounted collector sets state from inside that call. Outside `act` the update is
+ * reported as an unwrapped one, which `ui/src/test/setup.ts` turns into a failure naming React rather
+ * than naming this hand-over.
+ * @param {string} message - The sentence to hand over.
+ * @returns {void} Nothing; the outcome is held by the registry until it is collected.
+ */
+function handOverCompletedSave(message: string): void {
+  act(
+    /**
+     * Retains the outcome inside an act scope, so the collector's own state update is flushed.
+     * @returns {void} Nothing; the registry holds the outcome until it is collected.
+     */
+    () => {
+      retainOutcomeAcrossNavigation<UserUpdateSaveHandover>(USER_UPDATE_SAVE_CLAIM, {
+        settled: 'COMPLETED',
+        value: { message, severity: 'success' },
+      });
+    },
+  );
+}
+
+/**
+ * Signs on, hands over a completed save, and only then renders the menu.
+ *
+ * ⚠️ Assumptions: the three steps are in this order because a hand-over cannot cross a session
+ * boundary. `ui/src/hooks/useAuth.ts` L782 discards every retained outcome from inside
+ * `discardSession`, on the recorded ground that such an outcome describes work done under the session
+ * that is ending -- so a retention established before the session was seeded is thrown away by the
+ * seeding itself and the case would measure the collector against an empty store. The retention has to
+ * sit inside the session that produced it, which is also the only order an operator can produce.
+ * @param {string} message - The sentence to hand over before the menu mounts.
+ * @returns {Promise<{ unmount: () => void }>} The teardown for the rendered menu.
+ * @throws {Error} If the sign-on exchange did not establish a session, which `seedSession` reports.
+ */
+async function renderAfterHandOver(message: string): Promise<{ unmount: () => void }> {
+  await seedSession({ groups: [CARDDEMO_ADMIN_GROUP] });
+  handOverCompletedSave(message);
+
+  const { unmount } = await renderInAppShell(<AdminMenuScreen />, {
+    initialEntries: [ADMIN_MENU_PATH],
+    routePath: ADMIN_MENU_PATH,
+  });
+  return { unmount };
+}
+
+/**
+ * Asserts a save outcome retained BEFORE this menu mounts is painted in its row-23 band.
+ *
+ * Purpose: the regression guard for the silent save. `app/cbl/COUSR02C.cbl` L113-L118 falls back to
+ * `'COADM01C'` when no calling program is named, so an administrator who opens user maintenance by its
+ * address exits to this menu -- and until this screen collected the hand-over, the write committed and
+ * the band it landed on painted nothing, which is indistinguishable from a save that never happened.
+ *
+ * Assumptions: this arm covers the retention that settles while the route is still changing, so the
+ * collector's opening `collect(CLAIM)` call is what has to answer it. The case below covers the other
+ * order, which only the subscription can answer.
+ * @returns {Promise<void>} Resolves once the sentence has been asserted in the band.
+ */
+async function paintsASaveOutcomeRetainedBeforeArrival(): Promise<void> {
+  const committed = committedUpdateSentence();
+  const { unmount } = await renderAfterHandOver(committed);
+
+  const band = messageBand();
+  expect(band, 'the menu must paint the sentence the update screen handed over').toHaveTextContent(
+    committed,
+  );
+  /*
+   * WHY : Assumptions: the SEVERITY is asserted through the band's role and not through a colour,
+   *       because `ui/src/layout/MessageBand.tsx` resolves the role from the severity it was given and
+   *       a `success` sentence is a status rather than an alert. A collector that dropped the handed-over
+   *       tone and left this screen's own `'error'` default would paint the committed sentence as an
+   *       alert, which is the reference painting `DFHGREEN` text in red.
+   */
+  expect(within(band).getByRole('status')).toBeInTheDocument();
+  expect(within(band).queryByRole('alert')).toBeNull();
+
+  unmount();
+  discardRetainedOutcomes();
+}
+
+/**
+ * Asserts a save outcome that lands AFTER this menu is mounted is still painted.
+ *
+ * Purpose: `ui/src/api/client.ts` records the measured writes settling 7 to 12 ms after the navigation,
+ * so this is the ordinary order rather than the exotic one -- the menu is already mounted when the
+ * outcome comes to exist. A collector that only looked on mount would look too early and this case is
+ * what reports that.
+ * @returns {Promise<void>} Resolves once the sentence has been asserted in the band.
+ */
+async function paintsASaveOutcomeThatLandsAfterArrival(): Promise<void> {
+  const { unmount } = await renderInShellAs([CARDDEMO_ADMIN_GROUP]);
+
+  expect(
+    normaliseMessageBandValue(messageBand().textContent),
+    'the band must be empty before anything is handed over',
+  ).toBe('');
+
+  const committed = committedUpdateSentence();
+  handOverCompletedSave(committed);
+
+  expect(messageBand()).toHaveTextContent(committed);
+
+  unmount();
+  discardRetainedOutcomes();
+}
+
+/**
+ * Asserts the outcome is collected once, so a later arrival is not told about an earlier save.
+ *
+ * Purpose: collection REMOVES the claim, and that is what stops a durable hand-over being painted twice.
+ * A sentence describing an earlier turn is indistinguishable from one describing this turn, so a stale
+ * acknowledgement on an administrative record is worse than silence.
+ * @returns {Promise<void>} Resolves once the second arrival has been asserted silent.
+ */
+async function collectsASaveOutcomeOnceOnly(): Promise<void> {
+  const committed = committedUpdateSentence();
+  const first = await renderAfterHandOver(committed);
+  expect(messageBand()).toHaveTextContent(committed);
+  first.unmount();
+
+  /*
+   * WHY : Assumptions: the second arrival is rendered WITHOUT seeding a second session, because seeding
+   *       one would discard the store and the case would then pass whether or not collection removed the
+   *       claim. Re-rendering inside the same session is what makes the emptiness below evidence about
+   *       the collector rather than about the session boundary.
+   */
+  const second = await renderInAppShell(<AdminMenuScreen />, {
+    initialEntries: [ADMIN_MENU_PATH],
+    routePath: ADMIN_MENU_PATH,
+  });
+  expect(
+    normaliseMessageBandValue(messageBand().textContent),
+    'a second arrival must not be told about a save it was already told about',
+  ).toBe('');
+
+  second.unmount();
+  discardRetainedOutcomes();
+}
+
+/**
+ * Asserts this menu leaves another pair's hand-over alone.
+ *
+ * Purpose: `subscribeToRetainedOutcomes` tells every listener about every retention, so a collector that
+ * took whatever had just been retained would paint a sentence about a record this screen never showed --
+ * the authorization summary and the user browse both retain and collect through the same registry.
+ * @returns {Promise<void>} Resolves once the band has been asserted silent.
+ */
+async function leavesAForeignHandOverUncollected(): Promise<void> {
+  const { unmount } = await renderInShellAs([CARDDEMO_ADMIN_GROUP]);
+
+  act(
+    /**
+     * Retains an outcome under a DIFFERENT claim, inside an act scope.
+     *
+     * Assumptions: the claim differs only in its fragment, so the case cannot pass by the collector
+     * failing to recognise an obviously unrelated string -- it has to compare the whole claim.
+     * @returns {void} Nothing; the registry holds an outcome this screen must not take.
+     */
+    () => {
+      retainOutcomeAcrossNavigation<UserUpdateSaveHandover>(`${USER_UPDATE_ROUTE_TEMPLATE}#other`, {
+        settled: 'COMPLETED',
+        value: { message: committedUpdateSentence(), severity: 'success' },
+      });
+    },
+  );
+
+  expect(
+    normaliseMessageBandValue(messageBand().textContent),
+    'the menu must not paint an outcome retained under another claim',
+  ).toBe('');
+
+  unmount();
+  discardRetainedOutcomes();
+}
+
+/** Registers the cases about the save outcome this menu collects for a screen that has left. */
+function saveHandOverCases(): void {
+  it(
+    'paints a save outcome retained before the menu mounted',
+    paintsASaveOutcomeRetainedBeforeArrival,
+  );
+  it(
+    'paints a save outcome that lands after the menu mounted',
+    paintsASaveOutcomeThatLandsAfterArrival,
+  );
+  it('collects a save outcome once only', collectsASaveOutcomeOnceOnly);
+  it('leaves a hand-over retained under another claim alone', leavesAForeignHandOverUncollected);
+}
+
+/** Registers the cases about the option row's measure and the name its own control announces. */
+function optionRowCases(): void {
+  it(
+    'lets the option row wrap without breaking the prompt or the field',
+    letsTheOptionRowWrapWithoutBreakingThePromptOrTheField,
+  );
+  it(
+    'announces only the catalogued label on its own control',
+    announcesOnlyTheCataloguedLabelOnItsOwnControl,
+  );
+  it(
+    'tells the two ENTER controls apart without renaming either',
+    tellsTheTwoEnterControlsApartWithoutRenamingEither,
+  );
+}
+
 describe('admin menu screen', adminMenuScreenCases);
+
+describe('the option row holds its measure and its one name', optionRowCases);
+
+describe('the administrative menu collects a save it did not perform', saveHandOverCases);

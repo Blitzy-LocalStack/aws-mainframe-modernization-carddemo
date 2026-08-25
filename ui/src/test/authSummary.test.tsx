@@ -74,14 +74,19 @@
  * layout engine, so such an assertion could only ever encode the absence of a layout engine.
  */
 
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockedFunction } from 'vitest';
 
 import { listPendingAuthorizations } from '../api/authorization';
-import { ApiRequestError } from '../api/client';
+import {
+  ApiRequestError,
+  claimRetainedOutcome,
+  retainOutcomeAcrossNavigation,
+} from '../api/client';
+import type { FraudTransitionHandover } from '../screens/authDetail';
 import type {
   ApiError,
   ApprovalStatus,
@@ -92,31 +97,52 @@ import type {
   PendingAuthListResponse,
   PendingAuthSummary,
 } from '../api/types';
-import { fieldErrorId } from '../layout/fieldHelp';
-import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
+import {
+  MONEY_PICTURES,
+  applyMoneyEditMask,
+  classifyMoneySign,
+  moneySignTextToken,
+} from '../format/money';
+import type { MoneyPicture } from '../format/money';
+import {
+  BUSY_ANNOUNCEMENT_TEST_ID,
+  VISUALLY_HIDDEN_STYLE,
+  fieldErrorId,
+} from '../layout/fieldHelp';
+import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
 import {
   COMMON_MESSAGES,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   PROGRAM_MESSAGE_SOURCES,
   PROGRAM_SOURCE_FILES,
   REDACTED_DIAGNOSTICS,
   SHARED_MESSAGES,
   SHARED_MESSAGE_SOURCES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
 } from '../messages/messages';
 import {
   AUTH_SUMMARY_BACK_ROUTE,
   AUTH_SUMMARY_COLUMN_HEADERS,
   AUTH_SUMMARY_FIELD_WIDTHS,
+  AUTH_SUMMARY_HIDDEN_LABELS,
   AUTH_SUMMARY_KEY_LABELS,
   AUTH_SUMMARY_LABELS,
   AUTH_SUMMARY_PAGE_SIZE,
   AUTH_SUMMARY_SELECTION_CODE,
   AUTH_SUMMARY_SELECTION_PROMPT,
   AuthSummaryScreen,
+  SELECTION_CELL_RESERVED_COLUMNS,
   authorizationDetailPath,
+  selectionCellLabel,
 } from '../screens/authSummary';
-import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
+import {
+  BMS_TEXT_COLOR_TOKENS,
+  FIELD_ERROR_TOKENS,
+  TARGET_SIZE_AA_MINIMUM,
+  TYPOGRAPHY_TOKENS,
+} from '../theme/tokens';
 import {
   LEADING_CURSOR,
   TRAILING_CURSOR,
@@ -175,6 +201,16 @@ const ACCOUNT_ID_CONTROL_ID = 'auth-summary-account-id';
  */
 const ELEVEN_DIGIT_ACCOUNT_ID = '00000000011';
 
+/**
+ * A selection character the source refuses.
+ *
+ * ⚠️ Assumptions: derived as "anything but the accepted one" only in spirit -- the literal is spelled so
+ * the case reads as the operator's mistyped key -- and it is asserted here to differ from both accepted
+ * forms, so the constant cannot silently become the accepted character in either case.
+ * `PROCESS-ENTER-KEY` accepts `'S'` and `'s'` and nothing else (`COPAUS0C.cbl` L316).
+ */
+const UNACCEPTED_SELECTION_CHARACTER = 'X';
+
 /** A second eleven-digit identifier, so a case can move the scope from one account to another. */
 const OTHER_ELEVEN_DIGIT_ACCOUNT_ID = '00000000022';
 
@@ -187,7 +223,16 @@ const OTHER_ELEVEN_DIGIT_ACCOUNT_ID = '00000000022';
 const AUTH_SUMMARY_ROUTE = '/authorizations';
 
 /**
- * The six money members this screen renders, paired with the label the mapset paints beside each.
+ * The six money members this screen renders, paired with the label the mapset paints beside each and
+ * the edit mask the reference applies to it.
+ *
+ * ⚠️ Assumptions: the PICTURE is part of this table because the reference edits one precision through
+ * TWO masks, and which datum takes which is a fact of the program rather than of the field's type.
+ * `COPAUS0C.cbl` L780 to L799 moves the credit limit and the credit balance through
+ * `WS-DISPLAY-AMT12 PIC -zzzzzzz9.99` (L56) and moves the cash limit, the cash balance, the approved
+ * total and the declined total through `WS-DISPLAY-AMT9 PIC -zzzz9.99` (L57). Four of the six therefore
+ * render nine characters wide with a blank in the sign position, and pairing the picture here is what
+ * makes every money case below assert the RIGHT mask per field instead of one mask for all six.
  *
  * ⚠️ Assumptions: exactly six, and every one of them is a `string` in the contract rather than a
  * number. `app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy` declares all six as
@@ -199,15 +244,40 @@ const AUTH_SUMMARY_ROUTE = '/authorizations';
  * govern.
  */
 const MONEY_MEMBERS = [
-  { member: 'creditLimit', label: AUTH_SUMMARY_LABELS.creditLimit },
-  { member: 'cashLimit', label: AUTH_SUMMARY_LABELS.cashLimit },
-  { member: 'approvedAuthAmt', label: AUTH_SUMMARY_LABELS.approvedAmount },
-  { member: 'creditBalance', label: AUTH_SUMMARY_LABELS.creditBalance },
-  { member: 'cashBalance', label: AUTH_SUMMARY_LABELS.cashBalance },
-  { member: 'declinedAuthAmt', label: AUTH_SUMMARY_LABELS.declinedAmount },
+  {
+    member: 'creditLimit',
+    label: AUTH_SUMMARY_LABELS.creditLimit,
+    picture: MONEY_PICTURES.transactionAmount,
+  },
+  {
+    member: 'cashLimit',
+    label: AUTH_SUMMARY_LABELS.cashLimit,
+    picture: MONEY_PICTURES.authorizationSummaryAmount,
+  },
+  {
+    member: 'approvedAuthAmt',
+    label: AUTH_SUMMARY_LABELS.approvedAmount,
+    picture: MONEY_PICTURES.authorizationSummaryAmount,
+  },
+  {
+    member: 'creditBalance',
+    label: AUTH_SUMMARY_LABELS.creditBalance,
+    picture: MONEY_PICTURES.transactionAmount,
+  },
+  {
+    member: 'cashBalance',
+    label: AUTH_SUMMARY_LABELS.cashBalance,
+    picture: MONEY_PICTURES.authorizationSummaryAmount,
+  },
+  {
+    member: 'declinedAuthAmt',
+    label: AUTH_SUMMARY_LABELS.declinedAmount,
+    picture: MONEY_PICTURES.authorizationSummaryAmount,
+  },
 ] as const satisfies readonly {
   readonly member: keyof PendingAuthSummary;
   readonly label: string;
+  readonly picture: MoneyPicture;
 }[];
 
 /**
@@ -632,17 +702,31 @@ function expectFirstRowPresent(): void {
 }
 
 /**
- * Returns the rendered selection controls, one per row the table painted.
+ * Returns the rendered selection cells, one per row the table painted.
  *
- * ⚠️ Assumptions: the controls are found by ROLE `radio` rather than by a test identifier, and the
- * count of them is what the page-size cases measure. `ui/src/screens/authSummary/index.tsx` wraps the
- * table in one `Radio.Group`, which reproduces the source's ordered `EVALUATE TRUE` over the five
- * selectors at L285 to L309 -- first non-blank arm wins, so exactly one selection is actionable per
- * turn. Counting radios therefore counts rows AND asserts they form a single selection set.
- * @returns {readonly HTMLElement[]} The selection controls in rendered order.
+ * ⚠️ Refactoring Rationale: these were found by role `radio` and are now found by role `textbox` within
+ * the row table, because the mapset declares an unprotected ENTRY field and not a marker -- `SEL0001`
+ * through `SEL0005` are `ATTRB=(FSET,NORM,UNPROT) ... LENGTH=1` at `COPAU00.bms` L277 to L282 and the
+ * four repeats -- and the screen's own row-22 sentence instructs the operator to TYPE `'S'`. The old
+ * note here argued that counting radios also asserted the five formed one selection set; that property
+ * has not been dropped, it has moved to where the source puts it, which is the ordered `EVALUATE TRUE`
+ * at `COPAUS0C.cbl` L288 to L308 transcribed in `reduceAuthRowSelection` and asserted directly.
+ *
+ * ⚠️ Assumptions: the query is scoped to the ROW TABLE and not to the document, because the screen's
+ * account filter is also a textbox and an unscoped query would count it as a sixth row. {@link rowTable}
+ * is what distinguishes the listing from the record panel's own `<table>`.
+ *
+ * Assumptions: a non-throwing query, so a case can assert that NO cells were painted -- which is what
+ * the empty-page and short-page cases measure.
+ * @returns {readonly HTMLElement[]} The selection cells in rendered order.
  */
 function selectionControls(): readonly HTMLElement[] {
-  return screen.queryAllByRole('radio');
+  const tables = screen.queryAllByRole('table').filter(hasSelectionHeading);
+  const listing = tables[0];
+  if (listing === undefined) {
+    return [];
+  }
+  return within(listing).queryAllByRole('textbox');
 }
 
 /**
@@ -862,6 +946,195 @@ async function rendersThroughTheDesignSystemTable(): Promise<void> {
  */
 function readTextContent(element: HTMLElement): string {
   return element.textContent ?? '';
+}
+
+/**
+ * The name and both address lines render as ONE captioned block, in the mapset's own order.
+ *
+ * ⚠️ Purpose: this is the regression this case exists for. The two address lines were bordered entries
+ * of their own carrying a caption that the mapset does not paint and that this screen deliberately hides
+ * -- so browser validation measured two empty grey header cells at every one of the six widths, and,
+ * below the medium breakpoint where the panel reflows to one column, the two halves of one postal
+ * address separated by the unrelated `Acct Status` row that reflowed between them.
+ *
+ * ⚠️ Assumptions: the whole cell's text is asserted as one exact string rather than three containment
+ * checks, for the reason the status cell's case records -- containment cannot prove adjacency or order,
+ * and an address whose two lines render in the wrong order is wrong in exactly the way containment
+ * cannot see. `COPAU00.bms` paints `CNAME` at row 6, `ADDR001` at row 7 and `ADDR002` at row 8, all at
+ * column 10 under the one `Name: ` caption at L92 to L95, so this string is the source's own order.
+ * @returns {Promise<void>} Resolves once the block has been asserted.
+ */
+async function rendersTheHolderBlockUnderTheOneCaption(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(1)));
+
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const summary = summaryFixture();
+
+  expect(readTextContent(panelValueCell(AUTH_SUMMARY_LABELS.name))).toBe(
+    `${summary.customerName}` +
+      `${AUTH_SUMMARY_HIDDEN_LABELS.addressLine1}${summary.addressLine1}` +
+      `${AUTH_SUMMARY_HIDDEN_LABELS.addressLine2}${summary.addressLine2}`,
+  );
+}
+
+/**
+ * No caption cell in the panel is empty.
+ *
+ * ⚠️ Purpose: an empty header cell in a bordered panel is the defect itself, not a symptom of it -- it
+ * renders as a grey box with nothing in it and announces the value beside it as belonging to nothing.
+ * This asserts the property directly, over EVERY header cell the panel renders, so the defect cannot
+ * return through a different entry than the two it was found on.
+ *
+ * ⚠️ Assumptions: `textContent` is what is measured rather than a visibility check, because a caption
+ * hidden by `VISUALLY_HIDDEN_STYLE` has text and is legitimate INSIDE a value cell, while a header cell
+ * with no text at all is not legitimate anywhere. The distinction the case draws is therefore between an
+ * empty header and a populated one, which is exactly the distinction the finding drew.
+ *
+ * Assumptions: the table is excluded by scoping to the panel's own element rather than by filtering, so
+ * the authorization list's own headings cannot dilute the assertion.
+ * @returns {Promise<void>} Resolves once every caption cell has been asserted populated.
+ */
+async function leavesNoCaptionCellEmpty(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(1)));
+
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const panel = panelValueCell(AUTH_SUMMARY_LABELS.name).closest('table');
+  expect(panel).not.toBeNull();
+
+  const captions = Array.from(panel?.querySelectorAll<HTMLElement>('th') ?? []);
+  expect(captions.length).toBeGreaterThan(0);
+  for (const caption of captions) {
+    expect(readTextContent(caption)).not.toBe('');
+  }
+}
+
+/**
+ * The status cell renders all six status members the segment declares, each individually named.
+ *
+ * ⚠️ Purpose: this is the regression this case exists for. Browser validation reported five populated
+ * `PA-ACCOUNT-STATUS` slots returned on every listing and rendered by no field at all, under a caption
+ * that showed `PA-AUTH-STATUS` instead -- returned data displayed nowhere, beside a different member
+ * displayed in the position an operator would read it from.
+ *
+ * ⚠️ Assumptions: the whole cell's text is asserted as ONE exact string rather than six separate
+ * containment checks, because containment cannot prove adjacency. What matters is that each code is
+ * announced with the name of the member it came from, and six names and six codes present in a cell in
+ * the wrong pairing would satisfy every containment assertion while telling a reader that slot 1 holds
+ * slot 4's code. The exact string pins name, code, pairing and order together.
+ *
+ * Assumptions: the fixture's six values are mutually distinct -- `Y`, then `AA` through `EE` -- so a
+ * transposition between any two of them is detectable at all.
+ * @returns {Promise<void>} Resolves once the cell has been asserted.
+ */
+async function rendersEveryStatusMemberUnderTheOneCaption(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(1)));
+
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const names = AUTH_SUMMARY_HIDDEN_LABELS;
+
+  // WHY : ⚠️ Assumptions: the five ACCOUNT-status slots are expected FIRST and the authorization-status
+  //       flag last, which is the order the cell now renders and is asserted rather than tolerated. The
+  //       caption reads `Acct Status: `, so a screen leading with the flag reproduces the substitution
+  //       this case was written against -- the wrong member in the position an operator reads first --
+  //       even though all six values are present. Order is therefore part of the contract here.
+  expect(readTextContent(panelValueCell(AUTH_SUMMARY_LABELS.accountStatus))).toBe(
+    `${names.accountStatus1}AA` +
+      `${names.accountStatus2}BB` +
+      `${names.accountStatus3}CC` +
+      `${names.accountStatus4}DD` +
+      `${names.accountStatus5}EE` +
+      `${names.authStatus}Y`,
+  );
+}
+
+/**
+ * None of the six status names reaches the screen.
+ *
+ * ⚠️ Purpose: the six names exist so an assistive technology can tell one code from another, and the
+ * mapset paints exactly one caption over them -- `Acct Status: ` at `COPAU00.bms` L111 to L113. Five
+ * further captions on the glass would be screen text no baseline source declares, which transformation
+ * rule T8 forecloses, so the names are asserted to be visually hidden rather than merely present.
+ *
+ * Assumptions: the hidden mechanism is asserted through `VISUALLY_HIDDEN_STYLE`'s own `position` rather
+ * than a literal, so the case measures the project's one hiding mechanism instead of restating it -- a
+ * name switched to `display: none` would fail here, and correctly, because `display: none` removes it
+ * from the accessibility tree as well as from the screen.
+ * @returns {Promise<void>} Resolves once every name has been asserted hidden.
+ */
+async function keepsEveryStatusNameOffTheScreen(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(1)));
+
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  for (const name of Object.values(AUTH_SUMMARY_HIDDEN_LABELS)) {
+    expect(screen.getByText(name).style.position).toBe(VISUALLY_HIDDEN_STYLE.position);
+  }
+}
+
+/**
+ * The identifier the summary describes is adopted into the field it was submitted from.
+ *
+ * ⚠️ Purpose: `summary.accountId` was returned on every listing and displayed nowhere, which browser
+ * validation recorded as returned-and-never-rendered. The reference does display it, and in this very
+ * field: `ACCTIDO` and `ACCTIDI` are the same map field, and `COPAUS0C.cbl` L228 to L232 moves
+ * `WS-ACCT-ID` into `ACCTIDO` on the Enter arm before the map is sent.
+ *
+ * ⚠️ Assumptions: the fixture's returned identifier deliberately DIFFERS from the identifier typed, and
+ * that is a requirement of the case rather than an accident. The two are equal in every real read, so a
+ * fixture that echoed the typed value back would pass whether the screen adopted the returned member or
+ * simply left the operator's own text alone -- the assertion would measure nothing.
+ * @returns {Promise<void>} Resolves once the field has been asserted.
+ */
+async function adoptsTheIdentifierTheSummaryDescribes(): Promise<void> {
+  listStub().mockResolvedValue(
+    listingFixture(rowsOf(1), {
+      summary: summaryFixture({ accountId: OTHER_ELEVEN_DIGIT_ACCOUNT_ID }),
+    }),
+  );
+
+  const { user } = await renderAsUser();
+  await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
+  await waitFor(expectFirstRowPresent);
+
+  expect(accountIdField()).toHaveValue(OTHER_ELEVEN_DIGIT_ACCOUNT_ID);
+}
+
+/**
+ * An identifier being typed is not overwritten by a read settling under the previous one.
+ *
+ * ⚠️ Purpose: this is the trade-off the adoption carries, asserted so it cannot be lost. The terminal
+ * cannot reach this state -- CICS locks the keyboard for the duration of a turn -- so there is no
+ * reference behaviour to transcribe, and the screen deliberately allows a second identifier to be typed
+ * while a read is outstanding, because that is how an operator abandons a mistyped search. Adopting the
+ * abandoned read's identifier would destroy the correction in progress.
+ *
+ * Assumptions: the read is held unsettled until AFTER the field has been retyped, which is the only
+ * ordering in which the defect this guards against can occur at all.
+ * @returns {Promise<void>} Resolves once the retyped entry has been asserted intact.
+ */
+async function refusesToOverwriteAnEntryBeingRetyped(): Promise<void> {
+  const held = heldRead<PendingAuthListResponse>();
+  listStub().mockReturnValueOnce(held.promise);
+
+  const { user } = await renderAsUser();
+  await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
+  await waitFor(expectOneListingIssued);
+
+  await user.clear(accountIdField());
+  await user.click(accountIdField());
+  await user.keyboard(OTHER_ELEVEN_DIGIT_ACCOUNT_ID);
+
+  held.settle(listingFixture(rowsOf(1)));
+  await waitFor(expectFirstRowPresent);
+
+  expect(accountIdField()).toHaveValue(OTHER_ELEVEN_DIGIT_ACCOUNT_ID);
 }
 
 /**
@@ -1165,6 +1438,510 @@ function carriesEveryAmountAsAnExactString(): void {
 }
 
 /**
+ * The mapset's row-22 field reaches the row-22 band, verbatim, from the opening turn.
+ *
+ * ⚠️ Purpose: `COPAU00.bms` L497 to L502 declares a `LENGTH=52` `COLOR=NEUTRAL` field at
+ * POS=(22,12) carrying the instruction for opening a row, and this screen carried that string only as
+ * the selection group's accessible name -- so it reached the accessibility tree and no visible surface.
+ * A screen whose one purpose is opening a row was not telling a sighted operator how.
+ *
+ * ⚠️ Assumptions: the band asserted is the row-22 one and not row 23, because
+ * `MESSAGE_BAND_CHANNELS` routes by TENSE: this sentence is as true before the turn as after it, so it
+ * is `INFOMSG` and never `ERRMSG`. Asserting it on row 23 would pass while the guidance competed with
+ * every turn's outcome for a field that holds one sentence at a time.
+ *
+ * ⚠️ Assumptions: it is asserted on the OPENING turn with no account scoped and no read issued,
+ * because the reference paints it unconditionally -- the field carries an `INITIAL=` literal and
+ * `COPAUS0C` never writes it, so it is on the glass from the first send. A case that scoped first would
+ * pass while the instruction was withheld exactly when it is needed.
+ *
+ * Assumptions: the text is taken from the screen's own exported constant rather than retyped, so the
+ * embedded apostrophes around the selection character cannot be silently normalised by this file.
+ * @returns {Promise<void>} Resolves once the row-22 band has been asserted.
+ */
+async function paintsTheRowTwentyTwoInstruction(): Promise<void> {
+  await renderAsUser();
+
+  const band = await screen.findByTestId(INFORMATION_BAND_TEST_ID);
+  expect(band).toHaveTextContent(AUTH_SUMMARY_SELECTION_PROMPT);
+  expect(listStub()).not.toHaveBeenCalled();
+}
+
+/**
+ * At a dead end both paging keys answer with their own sentence, and neither key is withdrawn.
+ *
+ * ⚠️ Purpose: this is the state the previous availability idiom could not name. A browse with no
+ * rows, no page ahead and no page behind satisfied both "nothing behind" and "nothing ahead" at once,
+ * and neither guard said so -- so the screen now branches on the browse's published POSITION, whose
+ * `EMPTY` member is exactly this case. `ui/src/hooks/usePagedQuery.ts` records that five screens had
+ * five idioms for this and that a screen showing a boundary sentence branches on the position.
+ *
+ * ⚠️ Assumptions: BOTH sentences are demanded from the same page, because that is what distinguishes
+ * the dead end from either single boundary. On the first page of several only the backward sentence is
+ * reachable and on the last only the forward one; here both are, and a screen that had folded the dead
+ * end into one of the two would answer one key correctly and the other with the wrong text.
+ *
+ * ⚠️ Assumptions: both rendered keys are additionally asserted ENABLED. The oracle refuses neither
+ * key -- `COPAUS0C.cbl` L380 to L384 and L408 to L411 both re-send the screen with a sentence -- and
+ * greying one would route the press through the function-key hook's invalid-key path, which shows
+ * 'Invalid key pressed...' in place of the verbatim boundary string. Asserting the sentence alone would
+ * not catch a key that was disabled AND still somehow announced; asserting the enablement states the
+ * property the oracle actually has.
+ *
+ * Assumptions: no row is awaited, because none arrives. The read is awaited instead, which is what
+ * establishes that the page was delivered and was empty rather than still outstanding.
+ * @returns {Promise<void>} Resolves once both sentences and both enabled keys have been asserted.
+ */
+async function announcesBothBoundariesAtADeadEnd(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture([], { hasNext: false }));
+  const { user } = await renderAsUser();
+  await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
+  await waitFor(expectOneListingIssued);
+
+  await pressPfKey(user, 'PFK07');
+  await waitFor(expectTopBoundaryShown);
+
+  await pressPfKey(user, 'PFK08');
+  await waitFor(expectBottomBoundaryShown);
+
+  expectPagingKeyEnabled(AUTH_SUMMARY_KEY_LABELS.PFK07);
+  expectPagingKeyEnabled(AUTH_SUMMARY_KEY_LABELS.PFK08);
+
+  // WHY : Assumptions: still exactly one read. Both boundaries were decided from the position the hook
+  //       published, not discovered by asking the service for a page that does not exist.
+  expect(listStub()).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * Asserts one rendered paging key is present and not disabled.
+ * @param {string} label - The key's painted legend text.
+ * @returns {void} Nothing; the enablement is asserted.
+ */
+function expectPagingKeyEnabled(label: string): void {
+  const control = within(keyLegend()).getByText(label).closest('button');
+  expect(control).not.toBeNull();
+  expect(control).toBeEnabled();
+}
+
+/**
+ * Every row is reachable and typeable from the keyboard, with no pointer and no extra tab stop.
+ *
+ * ⚠️ Purpose: this case is the other half of the row-affordance finding and it exists because the
+ * pointer half was fixed by an `onRow` handler that deliberately did NOT make the row a tab stop. The
+ * claim that has to hold instead is that the keyboard already reaches every row -- so it is asserted
+ * here rather than argued in a comment.
+ *
+ * ⚠️ Refactoring Rationale: the traversal asserted is now TAB between the five cells, where it was an
+ * arrow key within one `Radio.Group`. The group gave one tab stop with arrow traversal, which is a
+ * radio-group contract rather than the terminal's: a 3270 tab key moved the cursor between UNPROTECTED
+ * FIELDS, and `SEL0001` through `SEL0005` are five unprotected fields (`COPAU00.bms` L277 to L282 and
+ * the four repeats). Five tab stops is therefore the faithful traversal and not a cost, and each one is
+ * NAMED for its row, which is what makes them distinguishable to a screen reader -- so the old note's
+ * objection to five stops, that they would put focus on elements with no accessible name, does not
+ * apply to these.
+ *
+ * ⚠️ Assumptions: focus is placed on the first cell directly and the tab key is the measured
+ * interaction from there. Tabbing in from the top of the document would make the case depend on how many
+ * focusable elements the shell paints before the table, which is another screen's concern and would
+ * break this case for a reason unrelated to what it measures.
+ *
+ * ⚠️ Assumptions: typing into the SECOND cell is asserted as well as reaching it, because reaching a
+ * field that cannot accept a character is not reachability in any sense the operator cares about -- and
+ * `PROCESS-ENTER-KEY` reads whatever each of the five holds (`COPAUS0C.cbl` L288 to L308), so every one
+ * of them must be typeable and not merely focusable.
+ * @returns {Promise<void>} Resolves once keyboard traversal between rows has been asserted.
+ */
+async function reachesEveryRowFromTheKeyboard(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE)));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const controls = selectionControls();
+  expect(controls).toHaveLength(AUTH_SUMMARY_PAGE_SIZE);
+  const first = controls[0];
+  const second = controls[1];
+  expect(first).toBeDefined();
+  expect(second).toBeDefined();
+  if (first === undefined || second === undefined) {
+    return;
+  }
+
+  first.focus();
+  expect(first).toHaveFocus();
+
+  await user.tab();
+
+  expect(second).toHaveFocus();
+  expect(second).toHaveAccessibleName(selectionCellLabel(listItemFixture(2).transactionId));
+
+  await user.keyboard(AUTH_SUMMARY_SELECTION_CODE);
+
+  expect(second).toHaveValue(AUTH_SUMMARY_SELECTION_CODE);
+  expect(first).toHaveValue('');
+}
+
+/**
+ * Every one of the eight columns reserves the measure its own contract declares.
+ *
+ * ⚠️ Purpose: this is the regression the sticky-column finding leaves behind. Browser validation
+ * measured this table at maximum internal scroll and found the pinned leading block overlaying the
+ * column beside it -- the `Date` heading rendered as the single letter `e`, and an originating time of
+ * `09:16:44` rendered as `16:44`. A clipped time still reads as a whole time, which is the worst
+ * failure available in a table of authorization times, and the finding's own remedy was declared
+ * column widths. This asserts they are declared, on all eight, so an added column cannot reintroduce
+ * the measure-from-whatever-text-is-present layout that produced the overlay.
+ *
+ * ⚠️ Assumptions: the expectation is DERIVED from the two exported contract catalogs rather than
+ * written out as eight literals. A literal list would pass while the screen sized a column from
+ * something other than its contract -- which is precisely the defect -- and would have to be re-typed
+ * whenever a heading or a declared width is corrected against `COPAU00.bms`. Deriving it measures the
+ * rule: each column holds the LARGER of its heading and its datum, plus the padding the design
+ * system's own table spends on a cell.
+ *
+ * ⚠️ Assumptions: the widths are read from the table's `colgroup` and not from the cells, because
+ * that is where the layout reservation lives -- a `col` element carries the reserved measure whether or
+ * not any row is present, so the case measures the reservation rather than the width some particular
+ * value happened to need.
+ * @returns {Promise<void>} Resolves once all eight reserved measures have been asserted.
+ */
+async function reservesEveryColumnAtItsDeclaredMeasure(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE)));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const reserved = Array.from(rowTable().querySelectorAll('col')).map(
+    /**
+     * Reads one reserved column measure off the table's own column group.
+     * @param {HTMLTableColElement} column - One `col` element antd emitted for a declared column.
+     * @returns {string} The inline width that column reserves, as the style carries it.
+     */
+    (column: HTMLTableColElement): string => column.style.width,
+  );
+
+  expect(reserved).toStrictEqual([
+    reservedMeasure(AUTH_SUMMARY_COLUMN_HEADERS.selection, AUTH_SUMMARY_FIELD_WIDTHS.selection),
+    reservedMeasure(
+      AUTH_SUMMARY_COLUMN_HEADERS.transactionId,
+      AUTH_SUMMARY_FIELD_WIDTHS.rowTransactionId,
+    ),
+    reservedMeasure(AUTH_SUMMARY_COLUMN_HEADERS.date, AUTH_SUMMARY_FIELD_WIDTHS.rowDate),
+    reservedMeasure(AUTH_SUMMARY_COLUMN_HEADERS.time, AUTH_SUMMARY_FIELD_WIDTHS.rowTime),
+    reservedMeasure(AUTH_SUMMARY_COLUMN_HEADERS.type, AUTH_SUMMARY_FIELD_WIDTHS.rowType),
+    reservedMeasure(AUTH_SUMMARY_COLUMN_HEADERS.approval, AUTH_SUMMARY_FIELD_WIDTHS.rowApproval),
+    reservedMeasure(AUTH_SUMMARY_COLUMN_HEADERS.status, AUTH_SUMMARY_FIELD_WIDTHS.rowStatus),
+    reservedMeasure(AUTH_SUMMARY_COLUMN_HEADERS.amount, MONEY_PICTURES.transactionAmount.width),
+  ]);
+}
+
+/**
+ * Builds the measure one column reserves, from the heading and the datum it must both hold.
+ *
+ * ⚠️ Assumptions: the padding term is `2 * var(--ant-padding)` because antd 6 derives the table's
+ * own `cellPaddingInline` from the global `padding` token -- verified in
+ * `node_modules/antd/lib/table/style/index.js` -- so naming the global token reserves exactly what the
+ * component consumes. Reserving the characters alone would leave every column short by its own padding
+ * and clip the very headings the reservation exists to protect.
+ * @param {string} heading - The mapset's painted column heading, spacing included.
+ * @param {number} datumWidth - The declared character width of the column's datum.
+ * @returns {string} The CSS length the column reserves.
+ */
+function reservedMeasure(heading: string, datumWidth: number): string {
+  return `calc(${String(Math.max(heading.length, datumWidth))}ch + 2 * var(--ant-padding))`;
+}
+
+/**
+ * Each row's selection cell reserves room for the character AND its caret, and names the AA floor.
+ *
+ * ⚠️ Purpose: two measured defects, one on each side of the change of control. An accessibility audit
+ * measured the marker this replaced at fourteen pixels square at every width and named it the smallest
+ * control in the application; a later pass measured the IDENTICAL typed cell on the user browse at
+ * twenty-four pixels with eleven pixels of padding each side, leaving a content box of zero pixels
+ * against a 9.078-pixel glyph advance -- the character was stored and invisible. So the reservation has
+ * to clear the conformance floor and admit the glyph, and both are asserted.
+ *
+ * ⚠️ Assumptions: the measure is asserted as a DECLARATION and not as a rendered pixel width, because
+ * jsdom performs no layout -- every box in it is zero by zero, so a width assertion would pass on any
+ * value including the broken one. What is assertable here is that the control carries a minimum, that
+ * the minimum reserves more columns than the field admits characters, and that the AA figure appears as
+ * an operative alternative. The pixel outcomes above were measured in a browser; this case exists to
+ * stop the declaration being removed.
+ *
+ * ⚠️ Assumptions: the floor named is AA's twenty-four and not the audit's forty-four.
+ * `CONTROL_SCALE_DECISION` in `ui/src/theme/tokens.ts` records forty-four as WCAG 2.5.5 Target Size
+ * (Enhanced) at AAA, considered and declined, against 2.5.8 Target Size (Minimum) at AA which is
+ * twenty-four. Asserting forty-four here would reopen a settled decision from one screen.
+ *
+ * ⚠️ Assumptions: the element measured is the INPUT itself and not a wrapper, and the change of element
+ * follows the change of control. antd's `Radio` rendered a `label` around a visually hidden input, so
+ * the label was the pointer target; an `Input` IS the target, and the padding custom property the
+ * expression reads resolves on `.ant-input` rather than on an arbitrary element.
+ * @returns {Promise<void>} Resolves once every selection cell's reservation has been asserted.
+ */
+async function presentsEverySelectionTargetAtTheAaFloor(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE)));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const controls = selectionControls();
+  expect(controls).toHaveLength(AUTH_SUMMARY_PAGE_SIZE);
+
+  expect(
+    SELECTION_CELL_RESERVED_COLUMNS,
+    'a caret needs a column beyond the one the field admits',
+  ).toBeGreaterThan(AUTH_SUMMARY_FIELD_WIDTHS.selection);
+
+  for (const control of controls) {
+    const measure = control.style.minInlineSize;
+
+    expect(measure, 'the selection cell must declare a minimum measure of its own').not.toBe('');
+    expect(
+      measure,
+      'the reserved columns must appear in the expression, in character units',
+    ).toContain(`${String(SELECTION_CELL_RESERVED_COLUMNS)}ch`);
+    expect(measure, 'the AA target-size floor must survive an unresolved padding token').toContain(
+      `${String(TARGET_SIZE_AA_MINIMUM)}px`,
+    );
+  }
+}
+
+/**
+ * A character the source refuses is refused HERE, in the source's own words, and opens nothing.
+ *
+ * ⚠️ Purpose: this case could not exist until the control changed, and its existence is the point.
+ * `PROCESS-ENTER-KEY` accepts `'S'` and `'s'` and answers anything else with `'Invalid selection. Valid
+ * value is S'` (`COPAUS0C.cbl` L316 to L330), and while the selection column was a radio that arm was
+ * unreachable -- a marker can only ever supply the accepted character, so the screen carried a
+ * transcribed refusal no operator could ever provoke. A one-character entry field can carry `'X'`, so
+ * the refusal is now a path and this asserts it is the source's path.
+ *
+ * ⚠️ Assumptions: the sentence is compared against the catalog entry rather than typed out, because
+ * rule T8 carries it verbatim and four sibling browses carry four DIFFERENT selection vocabularies --
+ * this program's singular ellipsis-free form, `COUSR00C`'s plural, and `COCRDLIC`'s uppercase. A
+ * literal here would be a fifth copy able to drift from all of them.
+ *
+ * ⚠️ Assumptions: the address is asserted UNCHANGED as well, because a refusal that also navigated
+ * would be a refusal in name only.
+ * @returns {Promise<void>} Resolves once the refusal and the absence of a navigation are asserted.
+ */
+async function refusesAnUnacceptedSelectionCharacter(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE)));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const control = selectionControls()[0];
+  expect(control).toBeDefined();
+  if (control === undefined) {
+    return;
+  }
+
+  await user.type(control, UNACCEPTED_SELECTION_CHARACTER);
+  await pressPfKey(user, 'ENTER');
+
+  expect(messageBand()).toHaveTextContent(
+    SHARED_MESSAGES.INVALID_SELECTION_VALID_VALUE_IS_S.trim(),
+  );
+  expect(currentPath()).toBe(AUTH_SUMMARY_ROUTE);
+}
+
+/**
+ * The LOWERCASE selection character opens the record, exactly as the source's second arm does.
+ *
+ * ⚠️ Purpose: `PROCESS-ENTER-KEY` tests the flag against `'S'` AND `'s'` (`COPAUS0C.cbl` L316), so an
+ * operator with caps lock off is not refused. This arm was also unreachable through a marker control,
+ * and it is the arm most easily lost in a later edit because the uppercase one looks complete on its
+ * own.
+ * @returns {Promise<void>} Resolves once the navigation has been asserted.
+ */
+async function acceptsTheLowercaseSelectionCharacter(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE)));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const control = selectionControls()[0];
+  expect(control).toBeDefined();
+  if (control === undefined) {
+    return;
+  }
+
+  await user.type(control, AUTH_SUMMARY_SELECTION_CODE.toLowerCase());
+  await pressPfKey(user, 'ENTER');
+
+  await waitFor(expectPathReached(authorizationDetailPath(listItemFixture(1).key)));
+}
+
+/**
+ * Two marked rows act on the FIRST in display order, and the later mark is ignored in silence.
+ *
+ * ⚠️ Purpose: this is the semantic the radio control expressed structurally and the typed field has to
+ * express in the reducer, so it is asserted rather than assumed. `PROCESS-ENTER-KEY` is one
+ * `EVALUATE TRUE` whose five arms test `SEL0001I` through `SEL0005I` in that order (`COPAUS0C.cbl` L288
+ * to L308), and COBOL ends an `EVALUATE` at its first matching arm -- so a page marked beside rows two
+ * and four acts on row two and never inspects row four.
+ *
+ * ⚠️ Assumptions: the LATER row is typed FIRST, so the case cannot pass by acting on whichever cell was
+ * touched most recently. Display order is the rule, and typing in reverse order is what distinguishes
+ * it from recency.
+ *
+ * ⚠️ Assumptions: no refusal is expected for the second mark. `COTRTLIC` counts its marked rows and
+ * answers `'Please select only 1 action'` for more than one; `COPAUS0C` keeps no such count and declares
+ * no such sentence, so refusing here would invent a message the reference cannot emit.
+ * @returns {Promise<void>} Resolves once the first-marked row has been shown to win.
+ */
+async function actsOnTheFirstMarkedRowOnly(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE)));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const controls = selectionControls();
+  const later = controls[3];
+  const earlier = controls[1];
+  expect(later).toBeDefined();
+  expect(earlier).toBeDefined();
+  if (later === undefined || earlier === undefined) {
+    return;
+  }
+
+  await user.type(later, AUTH_SUMMARY_SELECTION_CODE);
+  await user.type(earlier, AUTH_SUMMARY_SELECTION_CODE);
+  await pressPfKey(user, 'ENTER');
+
+  await waitFor(expectPathReached(authorizationDetailPath(listItemFixture(2).key)));
+  expect(messageBand()?.textContent ?? '').not.toContain(
+    SHARED_MESSAGES.INVALID_SELECTION_VALID_VALUE_IS_S.trim(),
+  );
+}
+
+/**
+ * A row says it can be acted on, and clicking anywhere in it places the cursor without writing.
+ *
+ * ⚠️ Purpose: browser validation measured `cursor: auto` on these rows both at rest and hovered,
+ * on a table whose whole purpose is choosing a row -- so nothing about a row said it could be acted on
+ * and the only clue was the small control in its leading column.
+ *
+ * ⚠️ Assumptions: the click is placed on a cell OTHER than the selection cell's own, because a click on
+ * that cell would focus it whether or not the ROW carried a handler and so would measure nothing. The
+ * transaction identifier's cell is the furthest populated cell from the control in reading order.
+ *
+ * ⚠️ Refactoring Rationale: the outcome asserted is that the cursor MOVED and that the cell is still
+ * empty, where it used to be that the row became checked. The change follows the control: a one-character
+ * field holds a character, and the only character a click could supply is the one that opens the record
+ * -- so a click that wrote would leave the operator one Enter from opening a record they never chose.
+ * `PROCESS-ENTER-KEY` reads the selection characters and only then transfers control (`COPAUS0C.cbl`
+ * L288 to L330), so writing on click would collapse two separated acts into one.
+ *
+ * ⚠️ Assumptions: the absence of a navigation is asserted as well, because the pointer affordance and
+ * the commit are different acts and a row click that navigated would turn a mis-aimed click into a
+ * committed step.
+ * @returns {Promise<void>} Resolves once the affordance and the cursor move have been asserted.
+ */
+async function selectsTheRowClickedAnywhereInIt(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE)));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  const chosen = listItemFixture(2);
+  const cell = screen.getByText(chosen.transactionId);
+  const row = cell.closest('tr');
+  expect(row).not.toBeNull();
+  expect(row?.style.cursor).toBe('pointer');
+
+  await user.click(cell);
+
+  const controls = selectionControls();
+  expect(controls[1]).toHaveFocus();
+  expect(controls[1]).toHaveValue('');
+  expect(currentPath()).toBe(AUTH_SUMMARY_ROUTE);
+}
+
+/**
+ * Masks one amount exactly as the screen does, through the mask the reference applies to it.
+ *
+ * ⚠️ Refactoring Rationale: the picture is a PARAMETER and used to be fixed at
+ * `MONEY_PICTURES.transactionAmount` for all six panel amounts. The reference applies two masks, not
+ * one -- `WS-DISPLAY-AMT12 PIC -zzzzzzz9.99` at `COPAUS0C.cbl` L56 for the credit figures and
+ * `WS-DISPLAY-AMT9 PIC -zzzz9.99` at L57 for the four cash and total figures -- so a single picture
+ * here could only assert one of the two and would have PASSED against a screen that rendered all six
+ * at the wrong measure, which is precisely the state this helper was written in.
+ *
+ * ⚠️ Assumptions: still read from `MONEY_PICTURES` and never spelled as a literal expectation, so a
+ * case cannot assert against a picture the money module does not declare, and so the assertion measures
+ * that the screen used THIS picture on THIS value rather than some other picture of the same width.
+ * @param {string} wireAmount - The amount as the contract sends it.
+ * @param {MoneyPicture} picture - The edit mask that amount's own field is rendered through.
+ * @returns {string} The amount as the screen renders it.
+ */
+function maskedAmount(wireAmount: string, picture: MoneyPicture): string {
+  return applyMoneyEditMask(wireAmount, picture);
+}
+
+/**
+ * Every amount carries the colour its sign earns, and an ordinary positive keeps the mapset's own.
+ *
+ * ⚠️ Purpose: the sign colour is the half of the money contract a mask cannot carry. A negative
+ * balance and a positive one of the same magnitude render as the same twelve characters apart from one
+ * leading glyph, and that glyph is the whole difference between money owed and money held.
+ *
+ * ⚠️ Assumptions: all three cases are asserted against `MONEY_SIGN_TEXT_TOKENS` through
+ * {@link moneySignTextToken}, INCLUDING the positive, and the mapset's own `COLOR=BLUE` operand on the
+ * seven amount fields is deliberately not what is asserted. That divergence is recorded on the screen's
+ * `moneyCellStyle`: the sign map is the application's one authority for money hue and
+ * `ui/src/screens/accountView/index.tsx` L1050 resolves it the same unconditional way, so honouring the
+ * operand would put a fourth money hue on the glass and make an ordinary positive balance here differ
+ * from the identical balance on the account view -- which is the finding. This case is what holds the
+ * screen to the authority rather than to the operand.
+ *
+ * Assumptions: the fixture's `cashBalance` is `'0.00'`, so the zero case is exercised by the standing
+ * fixture rather than by a case-specific one, and the negative case is supplied as an override because
+ * no fixture member carries one.
+ * @returns {Promise<void>} Resolves once each of the three sign cases has been asserted.
+ */
+async function paintsEachSignCaseInItsOwnToken(): Promise<void> {
+  const summary = summaryFixture({ creditBalance: '-250.00' });
+  listStub().mockResolvedValue(listingFixture(rowsOf(1), { summary }));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  expect(classifyMoneySign(summary.creditBalance)).toBe('negative');
+  expect(panelValueText(AUTH_SUMMARY_LABELS.creditBalance).style.color).toContain(
+    customPropertyFragment(moneySignTextToken('negative')),
+  );
+
+  expect(classifyMoneySign(summary.cashBalance)).toBe('zero');
+  expect(panelValueText(AUTH_SUMMARY_LABELS.cashBalance).style.color).toContain(
+    customPropertyFragment(moneySignTextToken('zero')),
+  );
+
+  expect(classifyMoneySign(summary.creditLimit)).toBe('positive');
+  expect(panelValueText(AUTH_SUMMARY_LABELS.creditLimit).style.color).toContain(
+    customPropertyFragment(moneySignTextToken('positive')),
+  );
+
+  // WHY : ⚠️ Assumptions: the positive case is additionally asserted NOT to carry the mapset's own blue,
+  //       because the two tokens are different values and a containment check on the correct one would
+  //       still pass if the screen had somehow emitted both. Stating the exclusion is what makes the
+  //       recorded divergence testable rather than merely documented.
+  expect(panelValueText(AUTH_SUMMARY_LABELS.creditLimit).style.color).not.toContain(
+    customPropertyFragment(BMS_TEXT_COLOR_TOKENS.BLUE),
+  );
+}
+
+/**
+ * Converts a design-token name to the fragment its CSS custom property carries, digit runs included.
+ *
+ * ⚠️ Assumptions: a trailing digit run is hyphenated as well as each capital, which
+ * {@link kebabCase} alone does not do. The palette tokens this case needs are named with a ramp step --
+ * `red7` becomes `--ant-red-7`, not `--ant-red7` -- so hyphenating capitals alone would produce a
+ * fragment that never matches and a case that fails for a reason unrelated to what it measures.
+ * Verified against the rendered value rather than assumed: the negative cell resolved to
+ * `var(--ant-red-7)`.
+ * @param {string} tokenName - A design-token name in camel case, such as `red7` or `colorPrimary`.
+ * @returns {string} The custom-property fragment, such as `red-7` or `color-primary`.
+ */
+function customPropertyFragment(tokenName: string): string {
+  return kebabCase(tokenName).replace(/(?<=[a-z])(?=\d)/gu, '-');
+}
+
+/**
  * Renders every monetary value into the DOM as text, byte for byte as the contract sent it.
  *
  * @returns {Promise<void>} Resolves once every amount has been asserted present unaltered.
@@ -1175,7 +1952,7 @@ async function rendersEveryAmountUnaltered(): Promise<void> {
   const { user } = await renderAsUser();
   await scopeAndAwaitRows(user);
 
-  for (const { member, label } of MONEY_MEMBERS) {
+  for (const { member, label, picture } of MONEY_MEMBERS) {
     const expected = summary[member];
     if (typeof expected !== 'string') {
       throw new Error(`${member} is not a string in the fixture, so this case cannot assert on it`);
@@ -1187,10 +1964,56 @@ async function rendersEveryAmountUnaltered(): Promise<void> {
     //       could be transposed without a global search noticing.
     // WHY : ⚠️ Assumptions: the cell's text is compared with strict equality and NOT through a text
     //       matcher, because a matcher normalises whitespace and the amounts are fixed-width edited
-    //       values whose leading blanks are column geometry produced by the source's own edit mask. A
-    //       normalising comparison would accept a screen that had stripped them, which is exactly the
-    //       alteration this case is named for detecting.
-    expect(panelValueCell(label).textContent).toBe(expected);
+    //       values whose pad characters are column geometry produced by the edit mask. A normalising
+    //       comparison would accept a screen that had stripped them, which is exactly the alteration
+    //       this case is named for detecting.
+    // WHY : ⚠️ Refactoring Rationale: the expectation is the MASKED form and used to be the wire
+    //       string. The screen now renders every amount through `MONEY_PICTURES.transactionAmount`,
+    //       which is the finding's own resolution -- browser validation counted four mutually
+    //       incompatible money renderings across the application and named this screen's bare
+    //       `5000.00` as one of them. Unaltered therefore means the DIGITS are unaltered, which is
+    //       what the mask preserves and what this comparison now measures.
+    // WHY : Assumptions: the expectation is COMPUTED by the same helper the screen calls rather than
+    //       written out as `+00005000.00`. A literal would pass while the screen used some other
+    //       picture of the same width, and would have to be re-typed for each of the six values; the
+    //       computed form measures that the screen used THIS picture on THIS value.
+    expect(panelValueCell(label).textContent).toBe(maskedAmount(expected, picture));
+  }
+}
+
+/**
+ * Each amount reserves the column its OWN edit mask declares, nine characters or twelve.
+ *
+ * ⚠️ Purpose: this is the regression the money-picture finding leaves behind, and it could not be
+ * asserted while the screen used one picture for all six. `COPAUS0C.cbl` edits one precision through
+ * two masks -- `WS-DISPLAY-AMT12 PIC -zzzzzzz9.99` at L56 for the credit limit and the credit balance,
+ * `WS-DISPLAY-AMT9 PIC -zzzz9.99` at L57 for the cash limit, the cash balance, the approved total and
+ * the declined total (applied at L780 to L799) -- so four of the six columns are three characters
+ * narrower than the other two, and a screen that reserved twelve for all six painted a column the
+ * terminal does not have.
+ *
+ * ⚠️ Assumptions: the reservation is asserted as a DECLARATION in character units, not as a rendered
+ * pixel width, because jsdom performs no layout and every box in it is zero. What is assertable is that
+ * each amount declares a measure and that the measure it declares is its own picture's width; the
+ * pixel outcome follows from `ch` in a browser.
+ *
+ * ⚠️ Assumptions: the case also asserts the two widths genuinely DIFFER, so it cannot pass by both
+ * pictures having drifted to the same measure -- which is the state it exists to prevent recurring.
+ * @returns {Promise<void>} Resolves once every amount's reserved measure has been asserted.
+ */
+async function sizesEachAmountAtItsOwnDeclaredMeasure(): Promise<void> {
+  const summary = summaryFixture();
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { summary }));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  expect(
+    MONEY_PICTURES.authorizationSummaryAmount.width,
+    'the narrow mask must stay narrower than the wide one, or this case measures nothing',
+  ).toBeLessThan(MONEY_PICTURES.transactionAmount.width);
+
+  for (const { label, picture } of MONEY_MEMBERS) {
+    expect(panelValueText(label).style.minInlineSize).toBe(`${String(picture.width)}ch`);
   }
 }
 
@@ -1250,13 +2073,20 @@ async function rendersAmountsInTheFixedPitchToken(): Promise<void> {
   //       custom property whose name is the token's own name in kebab case.
   const expectedVariableFragment = kebabCase(TYPOGRAPHY_TOKENS.fixedPitchData);
 
-  for (const { member, label } of MONEY_MEMBERS) {
+  for (const { member, label, picture } of MONEY_MEMBERS) {
     const expected = summary[member];
     if (typeof expected !== 'string') {
       throw new Error(`${member} is not a string in the fixture, so this case cannot assert on it`);
     }
     const valueElement = panelValueText(label);
-    expect(valueElement.textContent).toBe(expected);
+    expect(valueElement.textContent).toBe(maskedAmount(expected, picture));
+
+    // WHY : ⚠️ Assumptions: `white-space: pre` is asserted alongside the font, because the two
+    //       together are what make a column. The mask pads with spaces, and a browser collapses a run
+    //       of spaces in normal white-space handling -- so without `pre` every amount would start at
+    //       its first significant digit and the fixed-pitch font would align nothing. `renderMoney`
+    //       returns the property for that reason, and this asserts the screen applied what it returned.
+    expect(valueElement.style.whiteSpace).toBe('pre');
 
     // WHY : ⚠️ Assumptions: the inline style holds a `var(--...)` REFERENCE and not a resolved font
     //       stack, and the difference is the whole assertion. `ui/src/theme/antdTheme.ts` switches the
@@ -1626,11 +2456,16 @@ function keepsTheProgramSpecificationBlockSiteRegistered(): void {
  * @returns {Promise<void>} Resolves once the absence of the withheld tokens has been asserted.
  */
 async function withholdsEveryInternalCode(): Promise<void> {
-  // WHY : Assumptions: a 5xx is used to reach the redaction path, because
-  //       `describeListingFailure` selects the abend replacement on the status FAMILY -- the only
-  //       member of the problem document carrying the distinction the source's `EVALUATE WS-RESP-CD`
-  //       carried -- and eight of the ten register entries take that replacement.
-  listStub().mockRejectedValue(refusal(500));
+  // WHY : ⚠️ Assumptions: the 5xx now CARRIES the register's replacement sentence, because that is what
+  //       the service sends and `describeListingFailure` no longer substitutes on the status family. The
+  //       register maps eight of its ten entries -- `COPAUS0C.cbl` L476 and L509 among them -- to
+  //       `UNEXPECTED_ABEND_OCCURRED`, the service puts that sentence in `message`, and the screen
+  //       renders a service sentence verbatim. Rejecting with a BODILESS 500 would now paint
+  //       `PERSISTENT_FAILURE_REPORT_IT` instead, which is the correct sentence for a failure nothing
+  //       described but not the register path this case is about.
+  listStub().mockRejectedValue(
+    refusal(500, { message: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED }),
+  );
   const { user } = await renderAsUser();
   await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
 
@@ -1656,6 +2491,43 @@ async function withholdsEveryInternalCode(): Promise<void> {
  */
 function expectAbendSentenceShown(): void {
   expectVerbatimMessage(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED);
+}
+
+/**
+ * A momentary outage reaches the band as a momentary outage, through the CLASSIFIED failure.
+ *
+ * ⚠️ Purpose: this case exists to discriminate the WIRING and not the mapping. The mapping is asserted
+ * directly in `ui/src/screens/authSummary/authSummary.test.tsx`; what only a rendered turn can show is
+ * which member of the browse the screen reads. `usePagedQuery` publishes both `error`, the problem
+ * document, and `failure`, the classified failure -- and only the second carries the transport
+ * judgement. A screen still reading `error` would hand `describeListingFailure` a value that is not an
+ * `ApiRequestError`, take its unclassified arm, and paint the abend sentence for EVERY failure, which
+ * is what this case fails on.
+ *
+ * Assumptions: a 503 with NO sentence is used. `TRANSIENT_STATUSES` in `ui/src/api/client.ts` lists it,
+ * so the classification is transient, and a bodiless answer is exactly what carries no sentence to
+ * prefer -- so the sentence on the band can only have come from the classification.
+ * @returns {Promise<void>} Resolves once the momentary-outage sentence has been asserted.
+ */
+async function reportsAMomentaryOutageFromTheClassifiedFailure(): Promise<void> {
+  listStub().mockRejectedValue(refusal(503));
+  const { user } = await renderAsUser();
+  await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
+
+  await waitFor(expectMomentaryOutageSentenceShown);
+
+  expect(
+    screen.queryByText(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED),
+    'a classified outage is not reported as an unexpected condition',
+  ).toBeNull();
+}
+
+/**
+ * Asserts the momentary-outage sentence is on the message band.
+ * @returns {void} Nothing; the assertion either passes or the `waitFor` retries.
+ */
+function expectMomentaryOutageSentenceShown(): void {
+  expectVerbatimMessage(TRANSIENT_FAILURE_TRY_AGAIN);
 }
 
 /**
@@ -1964,7 +2836,14 @@ async function opensTheChosenAuthorization(): Promise<void> {
     return;
   }
 
-  await user.click(control);
+  /*
+   * WHY : ⚠️ Assumptions: the selection character is TYPED into the row's own cell, because that is what
+   *       the reference reads -- `PROCESS-ENTER-KEY` moves `SEL0002I` into the selection flag and the
+   *       row's key into the selected key (`COPAUS0C.cbl` L292 to L295) -- so the typed character is the
+   *       input and Enter is the commit. This case used to CLICK the row's marker, which the mapset's
+   *       `LENGTH=1` unprotected field is not.
+   */
+  await user.type(control, AUTH_SUMMARY_SELECTION_CODE);
   await pressPfKey(user, 'ENTER');
 
   // WHY : ⚠️ Assumptions: the route parameter is named `:key` and not `:id`, and the naming is
@@ -2280,6 +3159,130 @@ function expectBlankMarkerShown(): void {
 }
 
 /**
+ * The claim the detail screen hands a fraud outcome over under, composed as both screens compose it.
+ *
+ * Assumptions: built from the route constant and the same `#fraud` suffix rather than written out, so
+ * a case cannot pass against a screen that collects under a name the detail screen does not retain.
+ */
+const FRAUD_HANDOVER_CLAIM = `${AUTH_SUMMARY_ROUTE}#fraud`;
+
+/**
+ * Asserts an outcome retained BEFORE this screen mounted is collected and painted.
+ *
+ * ⚠️ Purpose: the detail screen's PF3 is not refused while a fraud write is outstanding, so a reviewer
+ * can confirm a transition and arrive here before it settles -- and the screen that was going to report
+ * it no longer exists. This is the arriving half of that hand-over: a completed fraud report that would
+ * otherwise be reported to nobody.
+ *
+ * Assumptions: the sentence is taken from `PROGRAM_MESSAGES.COPAUS1C`, the DETAIL program's catalog, and
+ * not from this screen's own. That is what makes the case a hand-over rather than a local message: this
+ * screen paints a sentence it has no way of composing.
+ *
+ * Assumptions: the claim is asserted EMPTY afterwards, because collection removes the entry. A screen
+ * that read without collecting would paint the same completed write again on its next mount, and a
+ * reviewer shown one fraud report twice cannot tell that from two.
+ *
+ * ⚠️ Assumptions: the session is seeded BEFORE the outcome is retained, and the render is issued
+ * separately rather than through {@link renderAsUser}, because seeding installs the request harness and
+ * `installApiHarness` calls `resetApiClient`, which discards every uncollected outcome by design --
+ * `ui/src/api/client.ts` L2107 records that an outcome produced against a previous configuration is not
+ * one to hand on. Retaining first therefore measured nothing at all: the entry was gone before the
+ * screen mounted. The ordering is the case's own subject in miniature, so it is stated rather than
+ * hidden behind the helper.
+ * @returns {Promise<void>} Resolves once the handed-over sentence is on the band.
+ */
+async function paintsAFraudOutcomeHandedOverBeforeItMounted(): Promise<void> {
+  const handed = PROGRAM_MESSAGES.COPAUS1C.AUTH_MARKED_FRAUD;
+  await seedSession({ groups: ['carddemo-user'] });
+  retainOutcomeAcrossNavigation<FraudTransitionHandover>(FRAUD_HANDOVER_CLAIM, {
+    settled: 'COMPLETED',
+    value: { text: handed, severity: 'success' },
+  });
+
+  await renderInAppShell(
+    <>
+      <AuthSummaryScreen />
+      <LocationProbe />
+    </>,
+    { initialEntries: [AUTH_SUMMARY_ROUTE] },
+  );
+
+  expect(await screen.findByText(handed)).toBeInTheDocument();
+  expect(messageBand()).toHaveTextContent(handed);
+  expect(claimRetainedOutcome(FRAUD_HANDOVER_CLAIM)).toBeUndefined();
+}
+
+/**
+ * Asserts an outcome retained AFTER this screen mounted still reaches the band.
+ *
+ * ⚠️ Purpose: this is the ordinary case rather than the exotic one, which is why both halves are
+ * measured. `ui/src/api/client.ts` records that the four abandoned writes it was built for landed 7 to
+ * 12 ms after the navigation -- so the destination screen was already mounted when the outcome came to
+ * exist, and a screen that only looked on mount looked too early and found nothing every time.
+ *
+ * Assumptions: the retention is wrapped in `act`, because retaining notifies every listener
+ * synchronously and this screen's listener sets state. Outside `act` React reports the update as
+ * unwrapped and the assertion races the render it triggers.
+ * @returns {Promise<void>} Resolves once the later hand-over is on the band.
+ */
+async function paintsAFraudOutcomeHandedOverAfterItMounted(): Promise<void> {
+  const handed = PROGRAM_MESSAGES.COPAUS1C.AUTH_FRAUD_REMOVED;
+  await renderAsUser();
+  expect(screen.queryByText(handed)).not.toBeInTheDocument();
+
+  act(
+    /**
+     * Retains the detail screen's outcome while the summary is already mounted and listening.
+     * @returns {void} Nothing; the retention notifies this screen's listener as its effect.
+     */
+    () => {
+      retainOutcomeAcrossNavigation<FraudTransitionHandover>(FRAUD_HANDOVER_CLAIM, {
+        settled: 'COMPLETED',
+        value: { text: handed, severity: 'success' },
+      });
+    },
+  );
+
+  expect(await screen.findByText(handed)).toBeInTheDocument();
+  expect(messageBand()).toHaveTextContent(handed);
+  expect(claimRetainedOutcome(FRAUD_HANDOVER_CLAIM)).toBeUndefined();
+}
+
+/**
+ * Asserts an outcome retained under somebody else's claim is neither painted nor consumed.
+ *
+ * ⚠️ Purpose: every listener is told about every retention, so a screen that collected whatever had
+ * just been retained would take another pair of screens' hand-over -- painting a sentence about a record
+ * it never showed, and stealing it from the screen that was waiting for it. Both halves of that are
+ * asserted: nothing appears here, and the outcome is still there for its owner.
+ *
+ * Assumptions: the foreign sentence is a catalogued string from an unrelated program rather than an
+ * invented one, so nothing in this case could be mistaken for operator text this migration authored.
+ * @returns {Promise<void>} Resolves once the foreign hand-over has been shown to be untouched.
+ */
+async function leavesAnotherScreensHandoverAlone(): Promise<void> {
+  const foreignClaim = `${AUTH_SUMMARY_ROUTE}#some-other-outcome`;
+  const foreign = PROGRAM_MESSAGES.COSGN00C.UNABLE_TO_VERIFY_THE_USER;
+  await renderAsUser();
+
+  act(
+    /**
+     * Retains an outcome under a claim belonging to another pair of screens.
+     * @returns {void} Nothing; the retention notifies every listener, which is the point of the case.
+     */
+    () => {
+      retainOutcomeAcrossNavigation<FraudTransitionHandover>(foreignClaim, {
+        settled: 'COMPLETED',
+        value: { text: foreign, severity: 'error' },
+      });
+    },
+  );
+
+  expect(screen.queryByText(foreign)).not.toBeInTheDocument();
+  expect(claimRetainedOutcome<FraudTransitionHandover>(foreignClaim)).toBeDefined();
+}
+
+/**
  * Asserts the message band is carrying something, whatever the failure reported.
  *
  * Assumptions: the band's PRESENCE is the probe rather than a particular sentence, because this
@@ -2336,8 +3339,10 @@ function keysetBrowse(): void {
 function fixedPointMoney(): void {
   it('carries every amount as an exact string', carriesEveryAmountAsAnExactString);
   it('renders every amount unaltered', rendersEveryAmountUnaltered);
+  it('sizes each amount at its own declared measure', sizesEachAmountAtItsOwnDeclaredMeasure);
   it('never exposes packed decimal', neverExposesPackedDecimal);
   it('renders amounts in the fixed-pitch token', rendersAmountsInTheFixedPitchToken);
+  it('paints each sign case in its own token', paintsEachSignCaseInItsOwnToken);
   it('keeps the status domains closed', keepsTheStatusDomainsClosed);
   it('renders both counts from the response', rendersBothCountsFromTheResponse);
 }
@@ -2359,6 +3364,10 @@ function verbatimMessages(): void {
     keepsTheProgramSpecificationBlockSiteRegistered,
   );
   it('withholds every internal code', withholdsEveryInternalCode);
+  it(
+    'reports a momentary outage from the classified failure',
+    reportsAMomentaryOutageFromTheClassifiedFailure,
+  );
   it(
     'keeps the unmapped-key message at its declared width',
     keepsTheUnmappedKeyMessageAtItsDeclaredWidth,
@@ -2404,6 +3413,316 @@ function sessionAndRouting(): void {
   it('exposes no sensitive value', exposesNoSensitiveValue);
 }
 /**
+ * A promise a case settles itself, so a read can be held unsettled while assertions run.
+ * @template T What the held read answers with.
+ */
+interface HeldRead<T> {
+  /** The promise handed to the screen in place of a settled answer. */
+  readonly promise: Promise<T>;
+  /** Settles that promise with the answer given. */
+  readonly settle: (value: T) => void;
+}
+
+/**
+ * Builds a read whose settlement the case controls.
+ *
+ * Assumptions: the resolver is captured out of the executor rather than taken from a deferred
+ * construct, because the executor runs synchronously inside the `Promise` constructor -- so the
+ * resolver is in place before this function returns and a case can never settle nothing.
+ * @template T What the held read answers with.
+ * @returns {HeldRead<T>} The unsettled promise and its settler.
+ */
+function heldRead<T>(): HeldRead<T> {
+  /** Resolver of the promise below, replaced the moment the executor runs. */
+  let capture: (value: T) => void = holdUntilCaptured;
+
+  /**
+   * Records the promise's resolver so the case can reach it.
+   * @param {(value: T) => void} resolve - The resolver the promise supplies.
+   * @returns {void} Nothing; the resolver is recorded above.
+   */
+  function captureResolver(resolve: (value: T) => void): void {
+    capture = resolve;
+  }
+
+  /**
+   * Settles the promise with the value given.
+   * @param {T} value - What the held read answers with.
+   * @returns {void} Nothing; the promise settles.
+   */
+  function settle(value: T): void {
+    capture(value);
+  }
+
+  return { promise: new Promise<T>(captureResolver), settle };
+}
+
+/**
+ * Stands in for the resolver until the executor supplies the real one.
+ *
+ * Assumptions: it THROWS rather than returning quietly, because reaching it means the held read was
+ * settled before its resolver existed -- a case that would otherwise settle nothing and leave the case
+ * waiting on a promise nobody can resolve, which reads as a timeout rather than as the programming
+ * error it is.
+ * @returns {never} Nothing is ever returned; the call always raises.
+ * @throws {Error} Always, naming the ordering violation that reached it.
+ */
+function holdUntilCaptured(): void {
+  throw new Error('the held read was settled before its resolver was captured');
+}
+
+/**
+ * Six activations of Enter over one unchanged identifier issue ONE search.
+ *
+ * ⚠️ Purpose: this is the regression this case exists for, and it is stated as MEASURED rather than as
+ * feared. A browser pass counted three activations of the Enter control on an unchanged account taking
+ * `POST /api/v1/authorizations/search` from one request to four, and three further activations
+ * dispatched inside a single millisecond taking it to seven -- one identical request per press. CICS
+ * cannot reach that state at all: it locks the keyboard for the duration of a task, so a second Enter
+ * during a turn is never delivered.
+ *
+ * ⚠️ Assumptions: the six presses straddle the settlement deliberately, three while the read is held
+ * and three after it has answered, because the two halves are stopped by DIFFERENT guards and a case
+ * that pressed only during the in-flight window would pass against the defect. The first three are
+ * declined by the busy channel on the Enter binding; the last three are declined by the
+ * settled-criteria guard, which is the half the previous revision had none of -- its own final press
+ * after settlement asserted a SECOND request, which is the behaviour now measured as the defect.
+ *
+ * ⚠️ Assumptions: the assertion is STRUCTURAL -- a call count -- and not a timing one. jsdom flushes a
+ * discrete click before a second activation in the same task, so a case cannot reproduce the
+ * single-millisecond burst the browser measured; what it can do is prove that no press after the first
+ * reaches the transport however they are spaced, which is the property the burst violated.
+ * @returns {Promise<void>} Resolves once the single-request count has been asserted on both sides of
+ *   the settlement.
+ */
+async function collapsesAnIdenticalResubmission(): Promise<void> {
+  const held = heldRead<PendingAuthListResponse>();
+  listStub().mockReturnValueOnce(held.promise);
+
+  const { user } = await renderAsUser();
+  await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
+  await waitFor(expectOneListingIssued);
+
+  await pressPfKey(user, 'ENTER');
+  await pressPfKey(user, 'ENTER');
+  await pressPfKey(user, 'ENTER');
+
+  expect(listStub()).toHaveBeenCalledTimes(1);
+
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { hasNext: true }));
+  held.settle(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { hasNext: true }));
+  await waitFor(expectFirstRowPresent);
+
+  await pressPfKey(user, 'ENTER');
+  await pressPfKey(user, 'ENTER');
+  await pressPfKey(user, 'ENTER');
+
+  expect(listStub()).toHaveBeenCalledTimes(1);
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID).textContent).not.toContain(
+    COMMON_MESSAGES.INVALID_KEY.text.trim(),
+  );
+}
+
+/**
+ * Asserts exactly one listing has been issued.
+ * @returns {void} Nothing; the assertion either passes or the `waitFor` retries.
+ */
+function expectOneListingIssued(): void {
+  expect(listStub()).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * Asserts a second listing has been issued.
+ * @returns {void} Nothing; the assertion either passes or the `waitFor` retries.
+ */
+function expectSecondListingIssued(): void {
+  expect(listStub()).toHaveBeenCalledTimes(2);
+}
+
+/**
+ * Enter on a LATER page of the same account still rewinds to page one, and reads to do it.
+ *
+ * ⚠️ Purpose: this is the boundary of the settled-criteria guard, and the case exists so the guard
+ * cannot be widened into the rewind by a later edit. The source is explicit that Enter rewinds:
+ * `GATHER-DETAILS` opens with `MOVE 0 TO CDEMO-CPVS-PAGE-NUM` at `COPAUS0C.cbl` L347 before it
+ * re-reads, and `INITIALIZE-AUTH-DATA` at L353 clears all five selectors and row families. So an Enter
+ * turn on page two of a result set must produce a read, even though the account has not changed.
+ *
+ * Assumptions: the forward step is taken first so the browse's ordinal is genuinely past one; the
+ * assertion is the THIRD call, which is the rewind, and the query it carried -- no cursor -- which is
+ * what distinguishes a rewind from another forward step.
+ * @returns {Promise<void>} Resolves once the rewind read has been asserted.
+ */
+async function rewindsFromALaterPageOnResubmission(): Promise<void> {
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { hasNext: true }));
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  await pressPfKey(user, 'PFK08');
+  await waitFor(expectSecondListingIssued);
+
+  await pressPfKey(user, 'ENTER');
+  await waitFor(expectThirdListingIssued);
+
+  expect(recordedQuery(2).cursor).toBeUndefined();
+  expect(recordedQuery(2).accountId).toBe(ELEVEN_DIGIT_ACCOUNT_ID);
+}
+
+/**
+ * Asserts a third listing has been issued.
+ * @returns {void} Nothing; the assertion either passes or the `waitFor` retries.
+ */
+function expectThirdListingIssued(): void {
+  expect(listStub()).toHaveBeenCalledTimes(3);
+}
+
+/**
+ * Enter after a REFUSED search issues the search again.
+ *
+ * ⚠️ Purpose: the other boundary of the settled-criteria guard. A read that failed leaves whatever
+ * summary had arrived before it standing, so a guard resting on the summary alone would decline the
+ * operator's retry and the failure would be unrecoverable without leaving the screen. The guard tests
+ * the browse's own failure flag for exactly this case, and this is what holds it there.
+ *
+ * Assumptions: the first read SUCCEEDS and the second is refused, because the interesting state is a
+ * screen that has an answer on display and a failure over the top of it -- a screen whose very first
+ * read failed has no summary and would be readmitted by any guard.
+ * @returns {Promise<void>} Resolves once the retry has been asserted.
+ */
+async function retriesAfterARefusedSearch(): Promise<void> {
+  listStub()
+    .mockResolvedValueOnce(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { hasNext: true }))
+    .mockRejectedValueOnce(refusal(500))
+    .mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { hasNext: true }));
+
+  const { user } = await renderAsUser();
+  await scopeAndAwaitRows(user);
+
+  /*
+   * WHY : Assumptions: the failing read is provoked by a FORWARD step rather than by another Enter,
+   *       because an Enter on the answered first page is exactly what the guard declines -- so driving
+   *       the failure through Enter would prove nothing about the retry and would leave the browse
+   *       unfailed. The step fails, the browse reports the failure, and the Enter that follows is the
+   *       retry under test.
+   */
+  await pressPfKey(user, 'PFK08');
+  await waitFor(expectSecondListingIssued);
+
+  await pressPfKey(user, 'ENTER');
+  await waitFor(expectThirdListingIssued);
+}
+
+/**
+ * A DIFFERENT account submitted while a read is outstanding is still issued.
+ *
+ * ⚠️ Purpose: this is the path the busy channel could silently take away, and the reason the Enter
+ * key's busy predicate is scoped to the account in the field rather than to "a read is running".
+ * `usePfKeys` declines a busy key outright, so an unscoped flag would leave an operator who mistyped an
+ * identifier unable to correct it until a read they no longer want had come back. The superseded
+ * answer is already made harmless by the generation guard in `readPage`, so there is nothing to
+ * protect by refusing the correction.
+ *
+ * Assumptions: the second query is read off the transport rather than inferred from the rows, so the
+ * case states that the CORRECTED identifier is what was asked for -- a screen that issued a second read
+ * of the first account would satisfy a bare call count.
+ * @returns {Promise<void>} Resolves once the corrected read has been asserted.
+ */
+async function issuesACorrectionOverAnOutstandingRead(): Promise<void> {
+  const held = heldRead<PendingAuthListResponse>();
+  listStub().mockReturnValueOnce(held.promise);
+  const corrected = '00000000022';
+
+  const { user } = await renderAsUser();
+  await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
+  await waitFor(expectOneListingIssued);
+
+  listStub().mockResolvedValue(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { hasNext: true }));
+  await user.clear(accountIdField());
+  await scopeToAccount(user, corrected);
+  await waitFor(expectSecondListingIssued);
+
+  expect(recordedQuery(1).accountId).toBe(corrected);
+}
+
+/**
+ * The screen ANNOUNCES an outstanding search, and says nothing while idle.
+ *
+ * ⚠️ Purpose: the measured defect was not slowness -- it was that an operator with no acknowledgement
+ * pressed Enter again and again. The guard collapses those presses; this is the other half, a statement
+ * that the turn was received. `aria-busy` on the field states it to an operator who has already found
+ * that control; the live region states it to one who is waiting and looking nowhere in particular.
+ *
+ * ⚠️ Assumptions: the region's PRESENCE while idle is asserted as well as its contents while busy,
+ * because a live region has to exist before its contents change for the change to be announced.
+ * Mounting the element together with the sentence would insert both at once and the announcement would
+ * be missed on exactly the occasion it is for -- so an empty-but-present region is the contract, not an
+ * artifact.
+ * @returns {Promise<void>} Resolves once both states have been asserted.
+ */
+async function announcesTheOutstandingSearch(): Promise<void> {
+  const held = heldRead<PendingAuthListResponse>();
+  listStub().mockReturnValueOnce(held.promise);
+
+  const { user } = await renderAsUser();
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID).textContent).toBe('');
+
+  await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
+  await waitFor(expectSearchAnnounced);
+
+  held.settle(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { hasNext: true }));
+  await waitFor(expectFirstRowPresent);
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID).textContent).toBe('');
+}
+
+/**
+ * Asserts the live region carries the authored in-progress sentence.
+ * @returns {void} Nothing; the assertion either passes or the `waitFor` retries.
+ */
+function expectSearchAnnounced(): void {
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID).textContent).toBe(REQUEST_IN_PROGRESS);
+}
+
+/**
+ * The filter field states that a search is outstanding, and stops stating it once one settles.
+ *
+ * ⚠️ Purpose: the measured defect was that the busy state was bound to the antd table's spinner and to
+ * nothing else, so the control an operator had just submitted from carried no indication at all --
+ * `aria-busy` was absent from every button and every field on the screen. `busyProps` emits the member
+ * only while a read is running, so both halves are asserted: present while held, gone once settled.
+ *
+ * Assumptions: the ABSENCE of the attribute is asserted rather than the string `'false'`, because
+ * `aria-busy` defaults to false when absent and `busyProps` deliberately returns an empty object when
+ * idle rather than an attribute mutation on every settle.
+ * @returns {Promise<void>} Resolves once both states have been asserted.
+ */
+async function statesTheOutstandingSearchOnTheFilterField(): Promise<void> {
+  const held = heldRead<PendingAuthListResponse>();
+  listStub().mockReturnValueOnce(held.promise);
+
+  const { user } = await renderAsUser();
+
+  expect(accountIdField().hasAttribute('aria-busy')).toBe(false);
+
+  await scopeToAccount(user, ELEVEN_DIGIT_ACCOUNT_ID);
+  await waitFor(expectFilterFieldBusy);
+
+  held.settle(listingFixture(rowsOf(AUTH_SUMMARY_PAGE_SIZE), { hasNext: true }));
+  await waitFor(expectFirstRowPresent);
+
+  expect(accountIdField().hasAttribute('aria-busy')).toBe(false);
+}
+
+/**
+ * Asserts the filter field reports a request outstanding.
+ * @returns {void} Nothing; the assertion either passes or the `waitFor` retries.
+ */
+function expectFilterFieldBusy(): void {
+  expect(accountIdField().getAttribute('aria-busy')).toBe('true');
+}
+
+/**
  * Holds the screen to the field-highlight contract, including the blank-condition marker.
  *
  * Assumptions: the cases are grouped by the contract each holds the screen to, so a failure report
@@ -2417,6 +3736,82 @@ function fieldRefusals(): void {
 }
 
 /**
+ * Holds the search path to one request per distinct submission, and to a stated busy state.
+ *
+ * Assumptions: the cases are grouped by the contract each holds the screen to, so a failure report
+ * names the contract that broke rather than only the assertion that noticed.
+ * @returns {void} Nothing; the registrations are the effect.
+ */
+function repeatedSubmission(): void {
+  it('collapses an identical resubmission', collapsesAnIdenticalResubmission);
+  it('rewinds from a later page on resubmission', rewindsFromALaterPageOnResubmission);
+  it('retries after a refused search', retriesAfterARefusedSearch);
+  it('issues a correction over an outstanding read', issuesACorrectionOverAnOutstandingRead);
+  it(
+    'states the outstanding search on the filter field',
+    statesTheOutstandingSearchOnTheFilterField,
+  );
+  it('announces the outstanding search', announcesTheOutstandingSearch);
+}
+
+/**
+ * Holds every status member and the resolved account identifier onto the glass.
+ *
+ * Assumptions: the cases are grouped by the contract each holds the screen to, so a failure report
+ * names the contract that broke rather than only the assertion that noticed.
+ * @returns {void} Nothing; the registrations are the effect.
+ */
+/**
+ * Registers the cases that measure the row table's own presentation rather than its data.
+ *
+ * Assumptions: grouped apart from the keyset cases because these three measure the table as a LAYOUT
+ * -- what each column reserves, how large the selectable target is, and whether a row says it is
+ * actionable -- where the keyset cases measure which rows it holds. Both were findings; they fail for
+ * unrelated reasons.
+ * @returns {void} Nothing; the cases are registered as a side effect.
+ */
+function rowTablePresentation(): void {
+  it('reserves every column at its declared measure', reservesEveryColumnAtItsDeclaredMeasure);
+  it('presents every selection target at the AA floor', presentsEverySelectionTargetAtTheAaFloor);
+  it('selects the row clicked anywhere in it', selectsTheRowClickedAnywhereInIt);
+  it('reaches every row from the keyboard', reachesEveryRowFromTheKeyboard);
+  it('refuses an unaccepted selection character', refusesAnUnacceptedSelectionCharacter);
+  it('accepts the lowercase selection character', acceptsTheLowercaseSelectionCharacter);
+  it('acts on the first marked row only', actsOnTheFirstMarkedRowOnly);
+  it('announces both boundaries at a dead end', announcesBothBoundariesAtADeadEnd);
+  it(
+    'paints a fraud outcome handed over before it mounted',
+    paintsAFraudOutcomeHandedOverBeforeItMounted,
+  );
+  it(
+    'paints a fraud outcome handed over after it mounted',
+    paintsAFraudOutcomeHandedOverAfterItMounted,
+  );
+  it("leaves another screen's handover alone", leavesAnotherScreensHandoverAlone);
+  it('paints the row-22 instruction', paintsTheRowTwentyTwoInstruction);
+}
+
+/**
+ * Registers the cases asserting that every member the listing returns reaches the screen.
+ *
+ * Assumptions: a named declaration rather than an inline `describe` body, for the reason the module
+ * header records -- every function expression owes a JSDoc block, and Prettier will not keep one in the
+ * position an inline group body would need it.
+ * @returns {void} Nothing; the registrations are the effect.
+ */
+function returnedMembersReachTheScreen(): void {
+  it('renders the holder block under the one caption', rendersTheHolderBlockUnderTheOneCaption);
+  it('leaves no caption cell empty', leavesNoCaptionCellEmpty);
+  it(
+    'renders every status member under the one caption',
+    rendersEveryStatusMemberUnderTheOneCaption,
+  );
+  it('keeps every status name off the screen', keepsEveryStatusNameOffTheScreen);
+  it('adopts the identifier the summary describes', adoptsTheIdentifierTheSummaryDescribes);
+  it('refuses to overwrite an entry being retyped', refusesToOverwriteAnEntryBeingRetyped);
+}
+
+/**
  * Registers every group of cases in this file.
  *
  * Assumptions: the groups are declared as named functions above rather than as inline callbacks, for
@@ -2425,6 +3820,10 @@ function fieldRefusals(): void {
  * @returns {void} Nothing; the registrations are the effect.
  */
 function authSummaryContractCases(): void {
+  describe('the search path under repeated submission', repeatedSubmission);
+  describe('the members the listing returns', returnedMembersReachTheScreen);
+  describe('the row table as a layout', rowTablePresentation);
+
   describe('field constraints from the COPAU00 symbolic map', fieldConstraints);
 
   describe('the five-row keyset browse', keysetBrowse);

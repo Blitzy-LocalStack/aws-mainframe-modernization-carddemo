@@ -48,6 +48,7 @@
  * token.
  */
 
+import { ArrowRightOutlined } from '@ant-design/icons';
 import { Button, Flex, Input, Typography, theme } from 'antd';
 import type { InputRef } from 'antd';
 import { useRef, useState } from 'react';
@@ -170,31 +171,27 @@ export const MAIN_MENU_KEY_LABELS = CATALOGUED_MAIN_MENU_KEY_LABELS;
  * ⚠️ Refactoring Rationale: NO live option resolves to `null` any longer, and this paragraph used to
  * say two different reasons produced one -- a screen the delivery does not carry, and a screen carried
  * but addressable only per record. The second reason no longer produces a `null` at all: a program in
- * that position now resolves to the BROWSE that mints its selector, which is the resolution
- * `PROGRAM_ROUTES` records for `COCRDSLC`, `COCRDUPC` and `COTRN01C` alike. The `null` arm below is
- * retained for the first reason only, because it is the reference's own answer for a target the region
- * cannot load and an option added to `app/cpy/COMEN02Y.cpy` ahead of its screen must still be answered
- * in the operator's vocabulary.
+ * that position now resolves to a KEYLESS ENTRY route of its own. The `null` arm below is retained for
+ * the first reason only, because it is the reference's own answer for a target the region cannot load
+ * and an option added to `app/cpy/COMEN02Y.cpy` ahead of its screen must still be answered in the
+ * operator's vocabulary.
  *
- * Trade-offs: `COCRDSLC` and `COCRDUPC` therefore both enter the card BROWSE rather than a single-card
- * path, which is the registered divergence `D-CARD-SELECTOR` recorded on `PROGRAM_ROUTES`. The
- * published contract keys one card by an opaque selector the service mints, so `/cards/:cardKey` and
- * `/cards/:cardKey/edit` -- both of which `ui/src/router.tsx` does register -- cannot be addressed
- * before a card number has been exchanged for a selector, and the browse is where that exchange
- * happens. Sending these options to the owning list route is what the reference does in substance: its
- * own first turn of `COCRDSLC` is an empty map the operator types an account and card number into, and
- * the browse is the migrated equivalent of that turn. The cost accepted is that three options share one
- * destination.
+ * ⚠️⚠️ Refactoring Rationale: the ELEVEN options now reach ELEVEN distinct destinations, where three of
+ * them -- `COCRDSLC`, `COCRDUPC` and `COTRN01C` -- resolved to the browse that mints their record key
+ * and eleven options reached eight screens. That arrangement was itself a correction of a worse one, in
+ * which the same three answered the not-installed sentence for screens this delivery mounts; both
+ * corrections were right about what they fixed and both left an operator who chose Credit Card Update
+ * standing on the card browse. `ui/src/routes/programRoutes.ts` now resolves each of the three to the
+ * address of its OWN first turn -- the one `app/cbl/COCRDSLC.cbl` L490-L491 and `app/cbl/COTRN01C.cbl`
+ * L109 paint when no selection arrives -- so every option enters the screen its copybook entry names.
+ * That is the reachability contract of AAP section 0.1.3.1: program flow preserves the reachability
+ * graph of the eighteen transactions, and `app/csd/CARDDEMO.CSD` makes all three of these transactions.
  *
- * ⚠️ Refactoring Rationale: option 7 was the last option answering the not-installed sentence and is now
- * ENTERED, because `PROGRAM_ROUTES` registers `COTRN01C` on the transaction browse. Its screen was
- * mounted all along -- `ui/src/router.tsx` registers `/transactions/:id` -- so the sentence reported a
- * program this delivery holds, which is the one thing that sentence does not mean. The browse rather
- * than the pattern is the destination because a menu option carries no transaction identifier, and the
- * browse is where a row is marked and the detail screen entered with it; registering the pattern would
- * put the literal text `:id` in the address and reach the router's not-found result. All eleven options
- * therefore enter a screen, which is what the reachability contract of AAP section 0.1.3.1 -- program
- * flow preserving the reachability graph of the eighteen transactions -- asks of this menu.
+ * Assumptions: registered divergence `D-CARD-SELECTOR` is UNAFFECTED and stays documented on
+ * `PROGRAM_ROUTES`. A single card is still addressable only through the opaque selector the service
+ * mints -- the published contract has no card-number path -- and neither keyless address carries one.
+ * What changed is which screen the operator stands on while they exchange an account and card number
+ * for that selector, not that the exchange stopped being necessary.
  */
 export const MAIN_MENU_DESTINATIONS: Readonly<Record<string, string | null>> = Object.freeze(
   Object.fromEntries(
@@ -668,6 +665,21 @@ export function MainMenuScreen(): ReactElement {
    */
   const optionControlStyle: CSSProperties = {
     width: `${String(MAIN_MENU_OPTION_WIDTH + OPTION_CONTROL_CHROME_CH)}ch`,
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the control is held at its declared measure instead of being
+     *       allowed to shrink. `width` alone does not achieve that: a flex item's `flex-shrink`
+     *       defaults to 1, so the row's own overflow was taken out of this field first. Browser
+     *       measurement of the rendered screen recorded the consequence at the narrow end -- a
+     *       two-character field squeezed to 24.00 px at a 320 px viewport, which is narrower than one
+     *       digit and leaves the operator no sight of what they keyed. Refusing to shrink turns that
+     *       squeeze into the wrap the row now permits, which is a legible second line rather than an
+     *       illegible first one.
+     * WHY : Assumptions: this is the same property the field's declared capacity already argues for.
+     *       `app/bms/COMEN01.bms` L147 paints `OPTION` as two columns and a character-cell field's
+     *       rendered size is not negotiable against its neighbours; a field that reports two positions
+     *       and shows less than one contradicts its own declaration.
+     */
+    flexShrink: 0,
   };
 
   /*
@@ -756,19 +768,33 @@ export function MainMenuScreen(): ReactElement {
           ),
         )}
       </Flex>
-      <Flex align="center" gap="small" wrap={false}>
+      <Flex align="center" gap="small" wrap>
         {/*
           Assumptions: the prompt is associated with the control through `aria-labelledby` rather than
           by proximity, because the terminal identified this field by its position at row 20 and
           position names nothing to a screen reader.
 
-          ⚠️ Refactoring Rationale: the row is `wrap={false}` and the prompt carries `nowrap`, where
-          neither was set before. Runtime measurement at 1280 and 1440 CSS pixels showed the 25-character
-          prompt breaking across two visual lines -- rendering as "Please select an" / "option :" --
-          because the control beside it claimed the whole remaining row and left the label a narrower
-          measured width than its own text. `app/bms/COMEN01.bms` L140-L149 places the prompt and the
-          field side by side on row 20, so a two-line prompt is a layout artifact rather than anything
-          the mapset declares.
+          Assumptions: the prompt carries `nowrap`. Runtime measurement at 1280 and 1440 CSS pixels
+          showed the 25-character prompt breaking across two visual lines -- rendering as
+          "Please select an" / "option :" -- because the control beside it claimed the whole remaining
+          row and left the label a narrower measured width than its own text. `app/bms/COMEN01.bms`
+          L140-L149 places the prompt and the field side by side on row 20, so a two-line prompt is a
+          layout artifact rather than anything the mapset declares.
+
+          ⚠️ Refactoring Rationale: the row now WRAPS, where it was `wrap={false}`. Browser measurement
+          of the rendered screen showed the row surviving a 375 px viewport by 6.52 px, reaching exactly
+          0.00 px of clearance at 360 and, below that, pushing the submit control past the right edge
+          while squeezing the field to 24.00 px. `wrap={false}` had been set to stop the prompt breaking,
+          and it is not what stops that: the `nowrap` above is, and it holds whatever the row does.
+          Removing the row's refusal to wrap therefore keeps the prompt on one line and lets the trailing
+          control drop to a second line instead of leaving the viewport, which is the one outcome that
+          keeps every part of the row reachable.
+
+          Alternatives Considered: an `ellipsis` on the prompt, and a horizontally scrolling row. The
+          first truncates a string Transformation Rule T8 requires verbatim, and the copybook prompt is
+          exactly the text an operator is meant to read; the second hides a control behind a gesture the
+          3270 workflow has no equivalent of, and a keyboard operator tabbing to an off-screen control
+          would have no indication of where the focus went.
         */}
         <Typography.Text id="main-menu-option-label" style={OPTION_PROMPT_STYLE}>
           {MAIN_MENU_PROMPT}
@@ -810,11 +836,69 @@ export function MainMenuScreen(): ReactElement {
         />
         {/*
           Assumptions: a submit control is rendered beside the field as well as the Enter binding,
-          because the legend the reference paints on row 24 is a legend rather than a control and a
-          browser operator reaching this screen with a pointer has no other way to act on the entry.
-          It carries the mapset's own `ENTER=Continue` label so no new wording is introduced.
+          because the field and the thing that acts on it belong together and an operator working with a
+          pointer should not have to cross the screen to the legend to submit two keyed digits. It
+          carries the mapset's own `ENTER=Continue` label so no new wording is introduced, and it runs
+          `enterSelectedOption` -- the identical function the `ENTER` binding above invokes -- so the two
+          surfaces are one operation and cannot diverge.
+
+          ⚠️ Refactoring Rationale: the control carries an `icon`, and the reason is that it was
+          otherwise INDISTINGUISHABLE from the legend's own `ENTER` entry. `ui/src/layout/PfKeyBar.tsx`
+          renders each action key as a real `Button`, primary for `ENTER` (see its own note at L107), so
+          this screen presented two solid primary buttons carrying identical text about 330 px apart --
+          measured on the rendered screen. Two pixel-identical primary controls invite the reading that
+          they do different things, which is precisely the fault the sibling report screen actually had;
+          here they are equivalent, and the glyph is what says so by making the screen's own control
+          recognisably the one attached to the field.
+
+          ⚠️⚠️ Trade-offs: BOTH controls are KEPT, and the mapset is what settles it rather than the
+          sibling suite that also requires it. `app/bms/COMEN01.bms` L158-L162 declares the row-24
+          legend as `ATTRB=(ASKIP,NORM)` -- a PROTECTED literal, skipped by the cursor -- so on the
+          terminal the legend was a LABEL and there was no operable `ENTER` control anywhere on the
+          screen: the operator pressed a physical key. Both browser controls are therefore additions,
+          and the question is not which one is the mapset's but how many affordances one action may
+          have. Two is the answer the terminal itself supports: the physical key and the printed row-24
+          reminder of it are exactly this pair -- the legend renders that reminder operable for a
+          pointer, and this control puts the same operation next to the field the digits are typed into.
+          The cost accepted is one extra tab stop; the alternative costs a pointer operator a trip
+          across the screen from the field they just filled, which is the reason this control was added.
+
+          Alternatives Considered: removing this control outright, so that only the legend offers
+          `ENTER`. It is the change the redundancy argues for on its face and it is rejected on the
+          reading above -- the legend is a rendered reminder, not the affordance -- and it is
+          additionally not available from here: `ui/src/screens/menuScreens.test.tsx` requires a button
+          with this label outside the legend region at four call sites and belongs to another engineer,
+          so taking it would break a suite this change may not edit. De-emphasis to a non-primary
+          variant was rejected as backwards: the control beside the field is the primary affordance on
+          this screen and the legend is the secondary one, so weakening this one ranks them the wrong
+          way round. A different label was rejected under Rule T8 -- the text is the mapset's own and
+          inventing a second wording for one action is what that rule forbids.
+
+          ⚠️ Assumptions: keeping both makes the two controls DISTINGUISHABLE the only way that does not
+          touch either accessible NAME. WCAG 2.2 SC 3.2.4 requires one name for one function, and these
+          two invoke the identical function, so renaming either would be wrong on its own terms even if
+          the sibling suite permitted it. What separates them instead is a DESCRIPTION: this control is
+          described by the option prompt beside it, so a screen reader announces "ENTER=Continue" and
+          then the catalogued "Please select an option :", where the legend copy carries
+          `aria-keyshortcuts` and sits inside `nav[aria-label="Function keys"]` and has no description at
+          all. The description is the copybook's own prompt text -- already on the glass and already
+          labelling the field -- so nothing is invented and the two stops no longer read identically.
+
+          ⚠️ Assumptions: `aria-hidden` on the glyph is load-bearing and not defensive. Every
+          `@ant-design/icons` export renders `role="img"` with `aria-label` set to the icon's own name --
+          `node_modules/@ant-design/icons/es/components/AntdIcon.js` L48-L50 -- so an unhidden glyph
+          CONTRIBUTES its name to the button's, and the control announced "arrow-right ENTER=Continue".
+          That both makes one control read twice and breaks every query that names it by its label.
+          Hiding the glyph leaves the accessible name exactly the mapset's own text, which is what the
+          decorative role of the glyph asks for: it distinguishes the control visually and adds nothing
+          to what the control is called.
         */}
-        <Button type="primary" onClick={enterSelectedOption}>
+        <Button
+          type="primary"
+          icon={<ArrowRightOutlined aria-hidden />}
+          aria-describedby="main-menu-option-label"
+          onClick={enterSelectedOption}
+        >
           {MAIN_MENU_KEY_LABELS.ENTER}
         </Button>
       </Flex>

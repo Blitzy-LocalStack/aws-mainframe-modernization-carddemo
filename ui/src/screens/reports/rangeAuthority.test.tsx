@@ -31,6 +31,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { CONFIRMATION_ANSWERS } from '../../api/client';
 import type * as ReportingModule from '../../api/reporting';
 import { submitTransactionReport } from '../../api/reporting';
 import type { ReportRequest, ReportSubmissionOutcome } from '../../api/reporting';
@@ -207,15 +208,24 @@ async function chooseReportType(
 /**
  * Confirms the turn through the overlay the submit control opens, which is how a run starts.
  *
- * Assumptions: the accept control is matched on the library's default name, because the screen leaves it
- * defaulted deliberately -- labelling it would put a second control of the legend's own name on the
- * document.
+ * ⚠️ Refactoring Rationale: the accept control was matched on the design system's default name, `'OK'`,
+ * which pinned the component library's vocabulary into a case about this program's contract. The screen
+ * now labels that control with the character the reference's affirmative arm accepts -- `WHEN CONFIRMI OF
+ * CORPT0AI = 'Y' OR 'y'` at `app/cbl/CORPT00C.cbl` L478, beside the map's own `'(Y/N)'` hint at
+ * `app/bms/CORPT00.bms` L213-L217 -- and this case reads that answer from the shared constant rather than
+ * retyping it, so it asserts the decision instead of the library's default.
+ *
+ * ⚠️ Assumptions: the earlier reasoning -- that labelling the control would put a second control of the
+ * legend's name on the document -- does not apply to this label and did not survive review. That risk
+ * exists for a caption like `ENTER=Continue`, which the row-24 legend already paints; `'Y'` appears on no
+ * other control, and the query below is by exact text, so a collision would fail loudly here rather than
+ * silently matching the legend.
  * @param {ReturnType<typeof userEvent.setup>} user - The interaction driver for this case.
  * @returns {Promise<void>} Resolves once the submission has been issued.
  */
 async function submitAndConfirm(user: ReturnType<typeof userEvent.setup>): Promise<void> {
   await user.click(screen.getByText(REPORTS_KEY_LABELS.ENTER));
-  await user.click(await screen.findByText('OK'));
+  await user.click(await screen.findByText(CONFIRMATION_ANSWERS.CONFIRM));
   await waitFor(
     /**
      * Waits for the single submission to be issued.

@@ -43,7 +43,7 @@
  * the preceding literal, which detaches it from the function it documents.
  */
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { createMemoryRouter, matchRoutes, RouterProvider } from 'react-router';
 import type { RouteObject } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -52,7 +52,16 @@ import { installApiHarness, removeApiHarness } from './test/apiHarness';
 import { endAnySession, establishSession } from './test/sessionHarness';
 
 import { APP_SHELL_TEST_ID, SHELL_SIGN_OFF_CONTROL_TEST_ID } from './layout/AppShell';
-import { ACCESS_DENIED_ADMIN_ONLY, SCREEN_NOT_AVAILABLE_TITLE } from './messages/messages';
+import {
+  ACCESS_DENIED_ADMIN_ONLY,
+  ADMIN_MENU_OPTIONS,
+  MAIN_MENU_HEADINGS,
+  MAIN_MENU_OPTIONS,
+  SCREEN_NOT_AVAILABLE_TITLE,
+  SIGN_ON_SUBMIT_LABEL,
+} from './messages/messages';
+import { MESSAGE_BAND_TEST_ID } from './layout/MessageBand';
+import { PF_KEY_BAR_REGION_LABEL } from './layout/PfKeyBar';
 import {
   ACCOUNT_UPDATE_PATH,
   ACCOUNT_VIEW_PATH,
@@ -61,6 +70,7 @@ import {
   BILL_PAY_PATH,
   CARD_DEMO_ROUTES,
   CARD_LIST_PATH,
+  KEYLESS_ENTRY_ROUTES,
   REF_TYPE_EDIT_PATH,
   REF_TYPE_LIST_PATH,
   REPORTS_PATH,
@@ -75,7 +85,13 @@ import {
 } from './router';
 import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from './routes/cards';
 import { SIGN_ON_ROUTE } from './routes/guards';
-import { ADMIN_MENU_ROUTE, MAIN_MENU_ROUTE } from './routes/navigation';
+import {
+  ADMIN_MENU_ROUTE,
+  MAIN_MENU_ROUTE,
+  REFERENCE_TYPE_ADD_ROUTE,
+  REFERENCE_TYPE_EDIT_ROUTE_TEMPLATE,
+  referenceTypeEditRoute,
+} from './routes/navigation';
 import { ADMIN_MENU_DESTINATIONS, ADMIN_MENU_SUBTITLE } from './screens/admin';
 import { AUTHORIZATION_DETAIL_ROUTE, AUTHORIZATION_SUMMARY_ROUTE } from './screens/authDetail';
 import {
@@ -250,23 +266,115 @@ const MIGRATED_SCREEN_COUNT = 21;
 const CATCH_ALL_PATTERN = '*';
 
 /**
+ * The administrative option names the not-found surface lists, one per distinct destination.
+ *
+ * Assumptions: retyped from `app/cpy/COADM02Y.cpy` rather than derived from the catalogue, so the case
+ * asserts an expectation and not the surface's own arithmetic. Four of the six options survive
+ * deduplication; {@link COLLAPSED_ADMINISTRATIVE_DESTINATIONS} names the two that do not, and the case
+ * checks the two lists account for all six.
+ */
+const LISTED_ADMINISTRATIVE_DESTINATIONS: readonly string[] = [
+  'User List (Security)',
+  'User Add (Security)',
+  'Transaction Type List/Update (Db2)',
+  'Transaction Type Maintenance (Db2)',
+];
+
+/**
+ * The administrative option names that collapse onto a destination another option already names.
+ *
+ * Assumptions: both need a user identifier the browse acquires, so `ui/src/routes/programRoutes.ts`
+ * resolves both to `/users` -- the same route `User List (Security)` names. Listing them would offer one
+ * destination under three labels.
+ */
+const COLLAPSED_ADMINISTRATIVE_DESTINATIONS: readonly string[] = [
+  'User Update (Security)',
+  'User Delete (Security)',
+];
+
+/**
+ * The main-menu option names the not-found surface lists for an operator holding no admin group.
+ *
+ * Assumptions: retyped from `app/cpy/COMEN02Y.cpy` rather than derived from the catalogue, for the same
+ * reason {@link LISTED_ADMINISTRATIVE_DESTINATIONS} is -- a list derived from the catalogue and
+ * deduplicated by the same helper the surface uses would restate the surface's arithmetic instead of
+ * checking it, and would pass against a surface that listed the wrong thing consistently.
+ *
+ * ⚠️ Refactoring Rationale: ALL ELEVEN options are listed, where eight were and three were expected
+ * absent. The three -- Credit Card View, Credit Card Update and Transaction View -- were expected absent
+ * because their programs resolved to the browse that mints their record key, so listing them would have
+ * painted the card browse three times and the transaction browse twice. Each of those three programs now
+ * has a KEYLESS entry route of its own (`ui/src/router.tsx` publishes them as `KEYLESS_ENTRY_ROUTES`),
+ * which is the address of the first turn the reference paints when its selection carrier arrives blank --
+ * so the eleven options name eleven distinct destinations and deduplication removes nothing. That is
+ * the reachability graph `app/cpy/COMEN02Y.cpy` describes, and the companion case below now requires the
+ * collapsed list to be EMPTY so a re-collapse fails here rather than being noticed in a browser.
+ */
+const LISTED_ORDINARY_DESTINATIONS: readonly string[] = [
+  'Account View',
+  'Account Update',
+  'Credit Card List',
+  'Credit Card View',
+  'Credit Card Update',
+  'Transaction List',
+  'Transaction View',
+  'Transaction Add',
+  'Transaction Reports',
+  'Bill Payment',
+  'Pending Authorization View',
+];
+
+/**
+ * The main-menu option names that collapse onto a destination another option already names.
+ *
+ * ⚠️ Assumptions: EMPTY, and it is kept rather than deleted so that the census below stays a census.
+ * The case asserts the two lists account for all eleven options AND that every name here is absent from
+ * the surface; with nothing collapsed, the arithmetic is what reports a regression -- an option that
+ * loses its own destination stops being in `LISTED_ORDINARY_DESTINATIONS` and the eleven no longer add
+ * up. Deleting the constant would remove that check along with its contents.
+ */
+const COLLAPSED_ORDINARY_DESTINATIONS: readonly string[] = [];
+
+/**
+ * The administrative destination required ABSENT from an ordinary operator's list of ways out.
+ *
+ * Assumptions: the user browse is chosen, which is administrative option 1's destination. It is the
+ * strongest single check available: it is guarded, so offering it to this operator would offer a control
+ * that answers with the refusal surface, and it appears in no ordinary option table at all.
+ *
+ * Assumptions: it is a NAMED constant rather than the first element of
+ * {@link LISTED_ADMINISTRATIVE_DESTINATIONS}. `ui/tsconfig.json` sets `noUncheckedIndexedAccess`, so an
+ * index into a `readonly string[]` is `string | undefined`, and `exactOptionalPropertyTypes` then
+ * refuses that union where a query option requires a name -- so the index form does not type-check at
+ * all. Naming the label also states WHICH destination is being withheld, where an index stated only a
+ * position.
+ */
+const ADMINISTRATIVE_DESTINATION_WITHHELD = 'User List (Security)';
+
+/**
  * Every concrete path that must be reachable only by an administrator.
  *
  * Assumptions: the reference-maintenance ADD path is listed as its concrete sentinel form rather than as
  * the dynamic pattern, because that is the path the administrative menu and the list screen actually
  * navigate to -- so this is the spelling a non-administrator would arrive with.
  *
- * ⚠️ Refactoring Rationale: the administrative MENU route is no longer listed, and the user-maintenance
- * PATTERN is no longer listed beside its concrete form. The menu is gone because the gated set is
- * exactly the six options of `app/cpy/COADM02Y.cpy` and the screen that lists them is not one of them
- * -- `ui/src/router.tsx` records what that concedes -- and a case demanding a refusal there would now
- * demand the opposite of the delivered contract. The pattern is gone because a pattern is not a path an
- * operator arrives with: `:id` would have been matched literally, so the case proved a refusal at an
- * address nothing navigates to while the concrete form below proves it at the address the browse sends.
- * What remains is six concrete paths covering all six gated patterns.
+ * ⚠️⚠️ Refactoring Rationale: the administrative MENU route is listed again, and the note that removed
+ * it is withdrawn. That note argued the gated set is exactly the six options of `app/cpy/COADM02Y.cpy`
+ * and the screen that lists them is not one of them, so a case demanding a refusal there demanded the
+ * opposite of the delivered contract. It did -- and the delivered contract was the defect. An ordinary
+ * operator rendered the complete administrative menu: the `COADM01C` identity band, all six option
+ * labels, and a focused option field that dispatched them to `/users`, where the refusal finally
+ * arrived. `app/cbl/COSGN00C.cbl` L230-L240 transfers only an `'A'` operator to `COADM01C`, so the
+ * refusal belongs at the menu, and this list is what holds it there.
+ *
+ * Assumptions: the user-maintenance PATTERN stays absent beside its concrete form, for the reason the
+ * withdrawn note gave and which still holds: a pattern is not a path an operator arrives with, `:id`
+ * would be matched literally, and the concrete form below proves the refusal at the address the browse
+ * actually sends. What this list holds is SEVEN concrete paths covering all seven gated patterns.
  */
 
 const ADMINISTRATIVE_PATHS: readonly string[] = [
+  ADMIN_MENU_ROUTE,
   USER_LIST_PATH,
   USER_ADD_PATH,
   '/users/000000AA/edit',
@@ -404,6 +512,204 @@ function userMaintenanceIsReachedThroughTheBrowse(): void {
 }
 
 /**
+ * Asserts the not-found surface keeps the frame and renders the list its own sentence promises.
+ *
+ * ⚠️ Refactoring Rationale: this case is NEW, and it covers two defects of one surface. It was mounted
+ * outside the frame, so header, footer, main, message row, legend and skip link all measured zero -- an
+ * operator who mistyped an address lost the entire chrome. And its subtitle ends `Use a listed screen
+ * below.` while NOTHING was listed: the surface offered a single OUTLINED control opening the card
+ * browse, and zero anchors, so the weakest available emphasis sat under a sentence describing a list
+ * that did not exist.
+ *
+ * Assumptions: the destinations asserted are the administrative option names, because the case signs on
+ * as an administrator and the list is drawn from the operator's own option table -- `app/cpy/COADM02Y.cpy`
+ * for an administrator, `app/cpy/COMEN02Y.cpy` for everyone else -- so every label on the surface is a
+ * transcription rather than an invention.
+ *
+ * Assumptions: the rejected address is still required ABSENT. That property was correct before and is
+ * preserved: the catch-all is reachable by an unauthenticated caller with any address, so echoing the
+ * requested path would put caller-chosen text on a page this application serves.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theNotFoundSurfaceOffersAFramedWayOut(): Promise<void> {
+  await signOnAs([ADMIN_GROUP]);
+  openRoute('/zzmarkerzz-not-a-route');
+
+  expect(await screen.findByText(NOT_FOUND_TITLE)).toBeInTheDocument();
+  expect(screen.getByTestId(APP_SHELL_TEST_ID)).toBeInTheDocument();
+  expect(screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL })).toBeInTheDocument();
+
+  /*
+   * WHY : Assumptions: the row-23 message line is required PRESENT and EMPTY, and both halves matter.
+   *       Present, because the withdrawn surface measured no band at all -- an operator who mistyped an
+   *       address lost the one line every screen in this application reports through, so the next
+   *       message they were shown appeared in a place they had not been reading. Empty, because this
+   *       surface has nothing to say on that line: the reference paints row 23 from a program's own
+   *       `WS-MESSAGE`, and no program refused anything here. The surface asks for the channel by
+   *       delegating `text: null`, which is how all 21 screens reserve the line before they have a
+   *       message, and this is the measurement of that delegation arriving.
+   */
+  const band = screen.getByTestId(MESSAGE_BAND_TEST_ID);
+  expect(band).toBeInTheDocument();
+  expect(band.textContent?.trim()).toBe('');
+
+  /*
+   * WHY : Assumptions: the primary control is identified by its accessible NAME and its variant class
+   *       together. The name proves it opens the menu; the class proves it carries antd's primary
+   *       emphasis, which is the half that was wrong -- the withdrawn surface's only control was the
+   *       library's default outlined variant.
+   *
+   * ⚠️ Refactoring Rationale: every query below is scoped to the MAIN landmark, where they were
+   *       document-wide. `ui/src/layout/AppShell.tsx` now paints a persistent main-menu crossing in
+   *       the frame's chrome for an administrator, so a document-wide query for that accessible name
+   *       matches two controls -- the chrome one in `banner` and this surface's own in `main` -- and
+   *       reported an ambiguous match rather than a defect. Scoping states what this case is actually
+   *       about: the ways out THIS SURFACE offers. The chrome crossing is asserted where it belongs,
+   *       in `ui/src/layout/appShell.test.tsx`.
+   */
+  const surface = within(screen.getByRole('main'));
+  const primary = surface.getByRole('button', { name: MAIN_MENU_HEADINGS.SCREEN });
+  expect(primary).toBeInTheDocument();
+  expect(primary.className).toContain('ant-btn-primary');
+
+  for (const label of LISTED_ADMINISTRATIVE_DESTINATIONS) {
+    expect(
+      surface.getByRole('button', { name: label }),
+      `${label} must be listed as a way out`,
+    ).toBeInTheDocument();
+  }
+
+  /*
+   * WHY : Assumptions: the two administrative options NOT listed are asserted absent, and their
+   *       absence is the deduplication working rather than a gap. `COUSR02C` and `COUSR03C` both
+   *       resolve to `/users`, because the browse is what acquires the identifier each of them needs --
+   *       `ui/src/routes/programRoutes.ts` records the collapse -- so listing them would paint one
+   *       destination three times under three names. A MENU must show all six because an operator types
+   *       an option number; a list of destinations must show each destination once.
+   */
+  for (const label of COLLAPSED_ADMINISTRATIVE_DESTINATIONS) {
+    expect(
+      screen.queryByRole('button', { name: label }),
+      `${label} collapses onto the user browse and must not be listed twice`,
+    ).toBeNull();
+  }
+  expect(
+    LISTED_ADMINISTRATIVE_DESTINATIONS.length + COLLAPSED_ADMINISTRATIVE_DESTINATIONS.length,
+  ).toBe(ADMIN_MENU_OPTIONS.length);
+
+  expect(document.body.textContent).not.toContain('zzmarkerzz');
+}
+
+/**
+ * Asserts the not-found surface lists the ORDINARY operator's destinations, not the administrator's.
+ *
+ * ⚠️ Refactoring Rationale: this case is NEW, and it is the companion the administrative case needed.
+ * That case signs on with the administrative group, so on its own it could not tell a surface that
+ * reads the operator's claim from one that lists the administrative options to everybody -- both pass
+ * it. Pairing it with an ordinary operator is what makes the list role-sensitive rather than merely
+ * present, and the administrative labels are required ABSENT here for exactly that reason.
+ *
+ * ⚠️ Refactoring Rationale: this roster is no longer deduplicated at all -- eleven options reach eleven
+ * destinations -- where it collapsed from eleven to eight. The three that collapsed had no keyless route
+ * to be sent to and resolved to the browse that mints their record key; each now has one, so every
+ * option carries its own way out. The arithmetic below is unchanged and is what reports a re-collapse:
+ * `LISTED_ORDINARY_DESTINATIONS` holds all eleven names and every one is required PRESENT, so a program
+ * repointed back at a browse drops a name from the surface and fails here.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theNotFoundSurfaceListsTheOrdinaryDestinations(): Promise<void> {
+  await signOnAs([]);
+  openRoute('/zzmarkerzz-still-not-a-route');
+
+  expect(await screen.findByText(NOT_FOUND_TITLE)).toBeInTheDocument();
+  expect(screen.getByTestId(APP_SHELL_TEST_ID)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: MAIN_MENU_HEADINGS.SCREEN })).toBeInTheDocument();
+
+  for (const label of LISTED_ORDINARY_DESTINATIONS) {
+    expect(
+      screen.getByRole('button', { name: label }),
+      `${label} must be listed as a way out`,
+    ).toBeInTheDocument();
+  }
+
+  for (const label of COLLAPSED_ORDINARY_DESTINATIONS) {
+    expect(
+      screen.queryByRole('button', { name: label }),
+      `${label} collapses onto a browse and must not be listed twice`,
+    ).toBeNull();
+  }
+  expect(LISTED_ORDINARY_DESTINATIONS.length + COLLAPSED_ORDINARY_DESTINATIONS.length).toBe(
+    MAIN_MENU_OPTIONS.length,
+  );
+
+  /*
+   * WHY : Assumptions: an administrative destination is required ABSENT, and the one chosen is the
+   *       user browse -- the destination administrative option 1 names. It is the strongest single
+   *       check available: it is guarded, so offering it to this operator would offer a control that
+   *       answers with the refusal surface, and it appears in no ordinary option table at all.
+   */
+  expect(screen.queryByRole('button', { name: ADMINISTRATIVE_DESTINATION_WITHHELD })).toBeNull();
+
+  expect(document.body.textContent).not.toContain('zzmarkerzz');
+}
+
+/**
+ * Asserts an operator holding no session reaches the not-found surface and is offered sign-on.
+ *
+ * Assumptions: this is the property that decides WHICH frame branch the catch-all belongs in. An
+ * unmatched address is the one surface an unauthenticated caller reaches without passing a guard, so
+ * putting the catch-all in the guarded branch would answer a mistyped URL with a credential prompt.
+ * Requiring the surface to render for an anonymous caller is what holds it in the public branch.
+ *
+ * Assumptions: the destinations are required ABSENT for that caller, because every one of them is
+ * guarded -- offering them would offer transitions that immediately bounce the operator back.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theNotFoundSurfaceIsReachableAnonymously(): Promise<void> {
+  openRoute('/no-such-carddemo-screen');
+
+  expect(await screen.findByText(NOT_FOUND_TITLE)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: SIGN_ON_SUBMIT_LABEL })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: MAIN_MENU_HEADINGS.SCREEN })).toBeNull();
+}
+
+/**
+ * Asserts the catch-all shadows none of the twenty-one declared paths.
+ *
+ * ⚠️ Refactoring Rationale: this case is NEW, and it exists because the catch-all MOVED. It used to be
+ * a top-level sibling of both frame mounts; it is now a child of the public frame branch, so that an
+ * operator who mistypes an address keeps the header, the footer, the row-23 message line, the row-24
+ * legend and the skip link. React Router scores a dynamic splat below every static and parameterised
+ * segment, so relocating it cannot change which route wins -- but "cannot" is a claim about the matcher,
+ * and this case is the measurement instead of the claim.
+ *
+ * Assumptions: it resolves through `matchRoutes` on the DELIVERED route objects rather than by
+ * rendering, which is what makes it a complete sweep: rendering twenty-one lazily loaded screens is
+ * what the per-path sweep below already pays for, and a static resolution answers the shadowing question
+ * for every path at once.
+ * @returns {void} Nothing; failure is reported by the expectation.
+ */
+function theCatchAllShadowsNoDeclaredPath(): void {
+  for (const pattern of REGISTERED_PATHS) {
+    const concrete = concretePathFor(pattern);
+    const leaf = (matchRoutes([...CARD_DEMO_ROUTES], concrete) ?? []).at(-1);
+
+    expect(leaf, `${concrete} matches no route`).toBeDefined();
+    expect(leaf?.route.path, `${concrete} is shadowed by the catch-all`).not.toBe(
+      CATCH_ALL_PATTERN,
+    );
+  }
+
+  /*
+   * WHY : Assumptions: the control is asserted in the same case, because a sweep proving no path
+   *       reaches the catch-all would also pass against a table with no catch-all registered at all --
+   *       which is the state in which an unmatched address renders nothing.
+   */
+  const unmatched = (matchRoutes([...CARD_DEMO_ROUTES], '/no-such-carddemo-screen') ?? []).at(-1);
+  expect(unmatched?.route.path).toBe(CATCH_ALL_PATTERN);
+}
+
+/**
  * Asserts the table declares exactly the twenty-one screen paths the reachability graph names.
  *
  * Assumptions: twenty-one is the count the graph closes at -- eleven main-menu options, six
@@ -461,6 +767,54 @@ function addDestinationResolvesUnderTheDynamicRoute(): void {
 }
 
 /**
+ * Asserts the maintenance template agrees with the mounted route and that a producer for it exists.
+ *
+ * ⚠️ Refactoring Rationale: this case is NEW, and it covers a route that was mounted, guarded, and
+ * producible by nothing. `ui/src/routes/navigation.ts` published the template spelled `:typeCd` while
+ * the router mounts `:cd` and the screen reads `useParams<{ cd: string }>()`, and the divergence was
+ * invisible precisely because no caller built a path from the template -- the only navigation into that
+ * screen is the `new` sentinel, so a fetched record stayed on the add address and was neither
+ * addressable nor recoverable by the browser's back control.
+ *
+ * Assumptions: the producer is asserted by RESOLVING its output against the delivered route objects
+ * rather than by string equality with the template. Equality would pass for a builder that emitted the
+ * template's own text with the parameter left in it, which is the mistake a builder exists to prevent;
+ * matching proves an operator handed this address arrives at the maintenance screen with the key bound.
+ *
+ * Assumptions: the add sentinel is required to be REFUSED by the producer. One dynamic route serves
+ * both entries, so a builder that accepted `new` would mint the add address under the name of a key
+ * lookup and the two entries would become indistinguishable at the call site.
+ * @returns {void} Nothing; failure is reported by the expectation.
+ */
+function theMaintenanceTemplateHasAProducer(): void {
+  expect(REFERENCE_TYPE_EDIT_ROUTE_TEMPLATE).toBe(REF_TYPE_EDIT_PATH);
+  expect(REFERENCE_TYPE_ADD_ROUTE).toBe(REF_TYPE_ADD_ROUTE);
+
+  const built = referenceTypeEditRoute('05');
+  expect(built).toBe(`${REF_TYPE_LIST_PATH}/05`);
+
+  const leaf = (matchRoutes([...CARD_DEMO_ROUTES], built) ?? []).at(-1);
+  expect(leaf?.route.path, `${built} must resolve to the maintenance route`).toBe(
+    REF_TYPE_EDIT_PATH,
+  );
+  expect(leaf?.params.cd).toBe('05');
+
+  /*
+   * WHY : Assumptions: the refusals cover the three values a caller is most likely to pass by mistake
+   *       -- the add sentinel, an unpadded key, and a key the screen never produces. The maintenance
+   *       screen canonicalises a typed entry with `padStart(2, '0')`, so `'5'` is a key that was not
+   *       canonicalised and `'005'` is one that overflowed the two-character column
+   *       `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L2 declares.
+   */
+  for (const rejected of [REF_TYPE_NEW_SENTINEL, '5', '005', '', 'AB']) {
+    expect(
+      buildingTheEditRouteFor(rejected),
+      `${rejected === '' ? '(empty)' : rejected} must be refused`,
+    ).toThrow(RangeError);
+  }
+}
+
+/**
  * Asserts every destination the two menus name resolves to a screen in the shipped tree.
  *
  * Assumptions: only the non-null destinations are checked. A null entry is an option this delivery
@@ -502,6 +856,122 @@ function everyMenuDestinationResolves(): void {
       CATCH_ALL_PATTERN,
     );
   }
+}
+
+/**
+ * Asserts each keyless entry route aliases a published program and inherits that program's guard.
+ *
+ * ⚠️ Purpose: this case is NEW and it is the guard on the second route table. `KEYLESS_ENTRY_ROUTES`
+ * exists so `ROUTE_TABLE` can stay a bijection, and that division only holds if an alias is provably an
+ * alias: it must name a program the primary table declares, it must not shadow a primary path, and it
+ * must sit behind the same guard as the screen it reaches. An alias mounted one branch out would be a
+ * screen reachable with the wrong claim, and nothing else in this file would report it, because every
+ * other case reads `ROUTE_TABLE` and an alias is not in it.
+ *
+ * ⚠️ Assumptions: the guard is compared by ROUTE-OBJECT IDENTITY, using the same ancestor walk
+ * {@link signOnSitsBesideTheGuardedBranch} uses, rather than by an access field on the alias row. The
+ * alias table deliberately carries no access field: recording one would create a second place for the
+ * guard to be declared, and the two could then disagree while both looked deliberate. Comparing the
+ * mounted chains asks the question directly -- does an operator reaching the alias pass the same guards
+ * as one reaching the primary.
+ *
+ * Assumptions: the alias paths are required DISJOINT from the primary paths rather than merely
+ * distinct from one another, because a collision is the failure that would silently withdraw a keyed
+ * route: two rows at one path leaves React Router serving whichever was declared first.
+ * @returns {void} Nothing; failure is reported by the expectation.
+ */
+function eachKeylessEntryAliasesAPublishedProgram(): void {
+  const primaryPaths = new Set(ROUTE_TABLE.map(pathOf));
+  const aliasPaths = KEYLESS_ENTRY_ROUTES.map(keylessPathOf);
+
+  expect(new Set(aliasPaths).size, 'each keyless entry must be its own path').toBe(
+    KEYLESS_ENTRY_ROUTES.length,
+  );
+
+  for (const alias of KEYLESS_ENTRY_ROUTES) {
+    const named = ROUTE_TABLE.filter(
+      /**
+       * Keeps the primary rows naming the same reference program as this alias.
+       * @param {(typeof ROUTE_TABLE)[number]} entry - One row of the primary table.
+       * @returns {boolean} True when the row replaces the same program.
+       */
+      (entry) => entry.program === alias.program,
+    );
+    expect(named, `${alias.path} must alias exactly one published program row`).toHaveLength(1);
+
+    expect(
+      primaryPaths.has(alias.path),
+      `${alias.path} must not shadow a path the primary table publishes`,
+    ).toBe(false);
+
+    const leaf = (matchRoutes([...CARD_DEMO_ROUTES], alias.path) ?? []).at(-1);
+    expect(leaf, `${alias.path} matches no route`).toBeDefined();
+    expect(leaf?.route.path, `${alias.path} resolves only to the not-found result`).not.toBe(
+      CATCH_ALL_PATTERN,
+    );
+    expect(leaf?.route.path, `${alias.path} must resolve to its own route`).toBe(alias.path);
+
+    const primaryPath = named[0]?.path ?? '';
+    expect(
+      ancestorsOf(alias.path),
+      `${alias.path} must stand behind the same guards as ${primaryPath}`,
+    ).toEqual(ancestorsOf(primaryPath));
+  }
+}
+
+/**
+ * Reads one alias row's path, as a named callback the lint rules accept in a `map`.
+ * @param {(typeof KEYLESS_ENTRY_ROUTES)[number]} entry - One row of the alias table.
+ * @returns {string} The row's path.
+ */
+function keylessPathOf(entry: (typeof KEYLESS_ENTRY_ROUTES)[number]): string {
+  return entry.path;
+}
+
+/**
+ * Asserts the eleven main-menu options reach ELEVEN distinct screens, and the six administrative ones
+ * reach the screens their own table names.
+ *
+ * ⚠️ Purpose: this case is NEW and it is the guard on the finding. `app/cpy/COMEN02Y.cpy` gives the main
+ * menu eleven options naming eleven distinct programs, and three of them -- `COCRDSLC`, `COCRDUPC` and
+ * `COTRN01C` -- had no keyless route to be sent to, so they resolved to the browse that mints their
+ * record key and eleven options reached EIGHT destinations. An operator who chose Credit Card Update
+ * arrived at the card browse. Nothing failed, because every option resolved to a real screen: only
+ * counting the DISTINCT destinations can report it.
+ *
+ * ⚠️ Assumptions: the count is asserted against the catalogue's own option count rather than against a
+ * literal eleven, so the case follows `app/cpy/COMEN02Y.cpy` if the copybook is ever retyped and cannot
+ * be satisfied by an expectation edited down to match a collapse.
+ *
+ * Assumptions: no main-menu destination may be `null`. A null is the reference's not-installed answer,
+ * which is correct for a program the region cannot load and wrong for all eleven of these, every one of
+ * which this delivery mounts -- so admitting a null here would let an option go dark without failing.
+ *
+ * Assumptions: the administrative table is checked for null and for its own count but NOT for distinct
+ * destinations, because two of its six options legitimately share the user browse: `COUSR02C` and
+ * `COUSR03C` are addressed per record and the browse is where a record is selected, as recorded at those
+ * entries in `ui/src/routes/programRoutes.ts`. Demanding distinctness there would demand a change this
+ * case has no evidence for.
+ * @returns {void} Nothing; failure is reported by the expectation.
+ */
+function theMainMenuOptionsReachDistinctScreens(): void {
+  const ordinary = Object.values(MAIN_MENU_DESTINATIONS);
+
+  expect(ordinary).toHaveLength(MAIN_MENU_OPTIONS.length);
+  expect(ordinary, 'every main-menu option must name a screen this delivery mounts').not.toContain(
+    null,
+  );
+  expect(
+    new Set(ordinary).size,
+    'each main-menu option must reach a screen of its own, not another option\u2019s',
+  ).toBe(MAIN_MENU_OPTIONS.length);
+
+  const administrative = Object.values(ADMIN_MENU_DESTINATIONS);
+  expect(administrative).toHaveLength(ADMIN_MENU_OPTIONS.length);
+  expect(
+    administrative,
+    'every administrative option must name a screen this delivery mounts',
+  ).not.toContain(null);
 }
 
 /**
@@ -729,17 +1199,23 @@ function administrativePathRefusesANonAdministrator(path: string): () => Promise
 }
 
 /**
- * Asserts an unknown path still resolves to the bounded not-found result.
+ * Asserts an unknown path resolves to the not-found surface INSIDE the application frame.
  *
  * Assumptions: the case signs on first, so the assertion proves the not-found route is reached rather
  * than the sign-on redirect being reached -- the failure a guarded catch-all would have produced.
- * @returns {Promise<void>} Resolves once the not-found result has been found.
+ *
+ * ⚠️ Refactoring Rationale: the second expectation is inverted. It required the frame to be ABSENT,
+ * which was the delivered behaviour and the defect: the catch-all was a top-level sibling of both frame
+ * mounts, so an operator who mistyped an address lost the header, the footer, the message row, the key
+ * legend and the skip link at once, leaving the browser's own back control as the only way out. The
+ * surface is now a child of the public frame branch, so the frame is required to be present.
+ * @returns {Promise<void>} Resolves once the not-found surface has been found inside the frame.
  */
 async function anUnknownPathResolvesToNotFound(): Promise<void> {
   await signOnAs([ADMIN_GROUP]);
   openRoute('/no-such-carddemo-screen');
   expect(await screen.findByText(NOT_FOUND_TITLE)).toBeInTheDocument();
-  expect(screen.queryByTestId(APP_SHELL_TEST_ID)).toBeNull();
+  expect(screen.queryByTestId(APP_SHELL_TEST_ID)).not.toBeNull();
 }
 
 /**
@@ -783,7 +1259,7 @@ function programOf(entry: (typeof ROUTE_TABLE)[number]): string {
 }
 
 /**
- * Asserts exactly six paths are administrative, and that they are the six the reference names.
+ * Asserts exactly seven paths are administrative: the six reference options and the menu listing them.
  *
  * ⚠️ Refactoring Rationale: this case is NEW. Eight paths sat behind the administrative guard where
  * `app/cpy/COADM02Y.cpy` names six options, and the two extras were the administrative MENU and the
@@ -791,28 +1267,107 @@ function programOf(entry: (typeof ROUTE_TABLE)[number]): string {
  * gives option 8 the user type `'U'`). The refusal sweep below could never report that, because a route
  * gated in error refuses exactly as convincingly as a route gated correctly; only the SET can be wrong.
  *
- * Assumptions: the expectation is the retyped copybook roster rather than a filter of the table, and
- * the public class is asserted at the same time -- exactly one path may be reachable with no session,
- * and it must be sign-on, because a second public path would be a screen with no credential behind it.
+ * ⚠️⚠️ Refactoring Rationale: the expected set is now the six options PLUS `ADMIN_MENU_ROUTE`, where it
+ * was the six options alone and the menu was asserted `authenticated` by name. That expectation encoded
+ * a measured defect: an ordinary operator rendered the complete administrative menu -- the `COADM01C`
+ * identity band, all six option labels and a focused option field that dispatched them onward -- with an
+ * empty message band, and the refusal arrived one screen late at `/users`. `app/cbl/COSGN00C.cbl`
+ * L230-L240 transfers only an `'A'` operator to `COADM01C`, so the menu is administrative and the
+ * refusal belongs at it.
+ *
+ * Assumptions: {@link COADM02Y_OPTION_PATHS} is left at six entries and the menu is added to the
+ * expectation HERE rather than into that roster. The roster is the retyped copybook, and the copybook
+ * names six options; widening it would redefine the reference to make the delivery fit, which is the
+ * one thing a hand-retyped expectation exists to prevent.
+ *
+ * Assumptions: the expectation is a retyped roster rather than a filter of the table, and the public
+ * class is asserted at the same time -- exactly one path may be reachable with no session, and it must
+ * be sign-on, because a second public path would be a screen with no credential behind it.
  * @returns {void} Nothing; failure is reported by the expectation.
  */
-function exactlySixPathsAreAdministrative(): void {
+function exactlySevenPathsAreAdministrative(): void {
   const administrative = ROUTE_TABLE.filter(isAdministrative).map(pathOf);
-  expect([...administrative].sort()).toEqual([...COADM02Y_OPTION_PATHS].sort());
+  expect([...administrative].sort()).toEqual([ADMIN_MENU_ROUTE, ...COADM02Y_OPTION_PATHS].sort());
 
   const publicPaths = ROUTE_TABLE.filter(isPublic).map(pathOf);
   expect(publicPaths).toEqual([SIGN_ON_ROUTE]);
 
   /*
-   * WHY : Assumptions: the two paths that were gated in error are named individually as well, because a
-   *       set comparison reports the difference and not the reason for it. The administrative menu is
-   *       `authenticated` because it is the screen that LISTS the six options rather than one of them,
-   *       and transaction capture is `authenticated` because the reference gives main-menu option 8 the
-   *       user type `'U'` -- the `(Admin Only)` label a reader might cite sits on a commented-out line
+   * WHY : ⚠️ Refactoring Rationale: the administrative menu is named individually as ADMINISTRATIVE
+   *       here, where the withdrawn form of this block named it as `authenticated` and explained that
+   *       it merely LISTS the six options. Transaction capture keeps its individual assertion for the
+   *       reason the withdrawn note gave, which still holds: the reference gives main-menu option 8 the
+   *       user type `'U'`, and the `(Admin Only)` label a reader might cite sits on a commented-out line
    *       of `app/cpy/COMEN02Y.cpy`, so reading it as live is the likeliest well-meant regression.
    */
-  expect(accessOf(ADMIN_MENU_ROUTE)).toBe('authenticated');
+  expect(accessOf(ADMIN_MENU_ROUTE)).toBe('administrative');
   expect(accessOf(TRANSACTION_ADD_PATH)).toBe('authenticated');
+}
+
+/**
+ * The access class every published path must carry, written out path by path.
+ *
+ * ⚠️ Refactoring Rationale: this map is NEW, and it exists because of how V195 was able to happen. The
+ * suite already counted the administrative rows and named two paths individually, so a row whose class
+ * was neither counted nor named could be wrong without failing anything -- which is exactly what
+ * `/admin` was. Writing all twenty-one classes out means a route added or reclassified later has to be
+ * declared here as well, so an omission is a failing case rather than a review someone has to notice.
+ *
+ * Assumptions: it is a retyped roster and not a projection of `ROUTE_TABLE`, for the same reason
+ * {@link COADM02Y_OPTION_PATHS} is: a projection would assert the table equals itself. The
+ * classification each entry carries is the reference's, not the delivery's -- `app/cbl/COSGN00C.cbl`
+ * L230-L240 for the administrative menu, `app/cpy/COADM02Y.cpy` for its six options, and
+ * `app/cpy/COMEN02Y.cpy`'s `'U'` user type for every main-menu screen.
+ */
+const EXPECTED_ACCESS_BY_PATH: ReadonlyArray<readonly [string, string]> = [
+  [SIGN_ON_ROUTE, 'public'],
+  [MAIN_MENU_ROUTE, 'authenticated'],
+  [ACCOUNT_VIEW_PATH, 'authenticated'],
+  [ACCOUNT_UPDATE_PATH, 'authenticated'],
+  [CARD_LIST_PATH, 'authenticated'],
+  [CARD_DETAIL_ROUTE, 'authenticated'],
+  [CARD_EDIT_ROUTE, 'authenticated'],
+  [TRANSACTION_LIST_PATH, 'authenticated'],
+  [TRANSACTION_ADD_PATH, 'authenticated'],
+  [TRANSACTION_DETAIL_PATH, 'authenticated'],
+  [REPORTS_PATH, 'authenticated'],
+  [BILL_PAY_PATH, 'authenticated'],
+  [AUTH_SUMMARY_PATH, 'authenticated'],
+  [AUTH_DETAIL_PATH, 'authenticated'],
+  [ADMIN_MENU_ROUTE, 'administrative'],
+  [USER_LIST_PATH, 'administrative'],
+  [USER_ADD_PATH, 'administrative'],
+  [USER_UPDATE_PATH, 'administrative'],
+  [USER_DELETE_PATH, 'administrative'],
+  [REF_TYPE_LIST_PATH, 'administrative'],
+  [REF_TYPE_EDIT_PATH, 'administrative'],
+];
+
+/**
+ * Asserts every published path carries the access class the reference gives it, and that none is
+ * left unclassified.
+ *
+ * Assumptions: the case asserts the map and the table cover the SAME paths before comparing classes,
+ * so a path added to the table and forgotten here fails on the roster comparison rather than passing
+ * silently because nothing looked for it.
+ * @returns {void} Nothing; failure is reported by the expectation.
+ */
+function everyPathCarriesItsDeclaredAccessClass(): void {
+  const declared = EXPECTED_ACCESS_BY_PATH.map(pathOfExpectation);
+  expect([...declared].sort()).toEqual([...ROUTE_TABLE.map(pathOf)].sort());
+
+  for (const [path, access] of EXPECTED_ACCESS_BY_PATH) {
+    expect(accessOf(path)).toBe(access);
+  }
+}
+
+/**
+ * Reads the path from one entry of the expected-access roster.
+ * @param {readonly [string, string]} entry - One `[path, access]` pair.
+ * @returns {string} The path the pair classifies.
+ */
+function pathOfExpectation(entry: readonly [string, string]): string {
+  return entry[0];
 }
 
 /**
@@ -941,27 +1496,86 @@ function signOnSitsBesideTheGuardedBranch(): void {
 }
 
 /**
- * Asserts a signed-on operator with no administrative claim still reaches the administrative menu.
+ * Asserts an operator without the administrative claim is refused at the menu and shown NONE of it.
  *
- * ⚠️ Refactoring Rationale: this case is NEW and it pins the reclassification of `/admin`, which the
- * refusal sweep above used to cover with the opposite expectation. The frozen contract gates exactly
- * the six options of `app/cpy/COADM02Y.cpy`, and the menu that lists them is not one of them, so the
- * route is authenticated.
+ * ⚠️⚠️ Refactoring Rationale: this case asserted the OPPOSITE -- that a signed-on operator without the
+ * claim "still reaches the administrative menu" -- on the argument that `app/cpy/COADM02Y.cpy` names six
+ * options and the screen listing them is not one of them, so the residual was a concession written down
+ * rather than hidden. The concession was larger than the note claimed. What an ordinary operator
+ * received was the whole administrative capability inventory: the `COADM01C` identity band, every one of
+ * the six option labels, and a focused option field that accepted an entry and moved them to `/users`,
+ * where the refusal finally arrived -- with an EMPTY message band throughout, so nothing on the screen
+ * said they were not entitled to be there. `app/cbl/COSGN00C.cbl` L230-L240 transfers only an `'A'`
+ * operator to `COADM01C`.
  *
- * Assumptions: what an ordinary operator gets there is a list of six static option labels and nothing
- * else -- the screen reads no record and calls no service to paint them -- and each option dispatches
- * to one of the six gated paths, every one of which refuses them, as the sweep above proves at each
- * path in turn. That residual is asserted rather than hidden: the case requires the menu to be
- * reachable AND requires the refusal not to be on the glass, so the concession is written down where a
- * reader of the guard will find it.
- * @returns {Promise<void>} Resolves once the menu has been found.
+ * Assumptions: this case survives alongside the refusal sweep rather than being deleted as a duplicate
+ * of it, because the sweep asserts the refusal and the ABSENCE OF THE CAPTION, and the caption is not
+ * the disclosure. The disclosure was the option list, so this case names every destination the menu
+ * offers and requires each label to be absent -- which is the property the withdrawn case measured as
+ * present and called acceptable.
+ * @returns {Promise<void>} Resolves once the refusal is on the glass and no option label is.
  */
-async function anOrdinaryOperatorReachesTheAdministrativeMenu(): Promise<void> {
+async function anOrdinaryOperatorIsRefusedTheAdministrativeMenu(): Promise<void> {
   await signOnAs([USER_GROUP]);
   openRoute(ADMIN_MENU_ROUTE);
 
-  expect(await screen.findByText(ADMIN_MENU_SUBTITLE)).toBeInTheDocument();
-  expect(screen.queryByText(ACCESS_DENIED_ADMIN_ONLY.trim())).toBeNull();
+  expect(await screen.findByText(ACCESS_DENIED_ADMIN_ONLY.trim())).toBeInTheDocument();
+  expect(screen.queryByText(ADMIN_MENU_SUBTITLE)).toBeNull();
+
+  for (const option of ADMIN_MENU_OPTIONS) {
+    /*
+     * WHY : Assumptions: the label is matched with a substring predicate rather than exactly, because
+     *       the menu composes each option into one fixed-pitch line -- option number, separator and the
+     *       35-character padded name -- so an exact match on the name alone would report absence for a
+     *       label that is on the glass inside a longer line.
+     * WHY : Assumptions: the roster is the CATALOGUE's option table rather than the admin screen's
+     *       `ADMIN_MENU_DESTINATIONS`, which is keyed by program name and carries routes rather than
+     *       labels. What was disclosed was the operator-visible names, so those are what this asserts.
+     */
+    expect(
+      screen.queryByText(labelSubstringMatcher(option.name)),
+      `${option.name.trim()} must not be disclosed to an operator without the claim`,
+    ).toBeNull();
+  }
+}
+
+/**
+ * Builds a Testing Library text matcher that succeeds on any node CONTAINING the wanted label.
+ *
+ * Assumptions: the matcher reads the node's own text content rather than the accumulated text of its
+ * ancestors, which is what `queryByText` supplies it, so a match reports the label painted on the
+ * glass and not merely present somewhere in the document.
+ * @param {string} label - The operator-visible option name to look for.
+ * @returns {(content: string) => boolean} Predicate `queryByText` accepts.
+ */
+function labelSubstringMatcher(label: string): (content: string) => boolean {
+  /**
+   * Reports whether one candidate text carries the captured label.
+   * @param {string} content - Text of one node the query offered.
+   * @returns {boolean} `true` when the trimmed label appears within it.
+   */
+  return function carriesTheLabel(content: string): boolean {
+    return content.includes(label.trim());
+  };
+}
+
+/**
+ * Builds a thunk that asks for one maintenance edit route, so its refusal can be asserted.
+ *
+ * Assumptions: a named factory rather than an inline thunk at the assertion, matching the convention
+ * `ui/src/api/client.test.ts` established -- `ui/eslint.config.js` selects a function expression in
+ * every position, so an inline thunk would owe its own block at each of the five specimens.
+ * @param {string} candidate - Type code to ask for, valid or not.
+ * @returns {() => string} A thunk invoking the published route builder.
+ */
+function buildingTheEditRouteFor(candidate: string): () => string {
+  /**
+   * Invokes the route builder for the captured candidate.
+   * @returns {string} The concrete route, when the candidate is accepted.
+   */
+  return function buildOne(): string {
+    return referenceTypeEditRoute(candidate);
+  };
 }
 
 /** Registers the route-table cases. */
@@ -977,9 +1591,22 @@ function routeTableCases(): void {
     'resolves the reference add destination under the dynamic maintenance route',
     addDestinationResolvesUnderTheDynamicRoute,
   );
+  it('publishes a producer for the maintenance template', theMaintenanceTemplateHasAProducer);
   it('resolves every destination the two menus name', everyMenuDestinationResolves);
+  it(
+    'aliases a published program for every keyless entry',
+    eachKeylessEntryAliasesAPublishedProgram,
+  );
+  it(
+    'reaches a distinct screen from every main-menu option',
+    theMainMenuOptionsReachDistinctScreens,
+  );
   it('registers one path per migrated program', theTableRegistersOnePathPerProgram);
-  it('gates exactly the six administrative options', exactlySixPathsAreAdministrative);
+  it(
+    'gates the six administrative options and the menu listing them',
+    exactlySevenPathsAreAdministrative,
+  );
+  it('publishes the declared access class for every path', everyPathCarriesItsDeclaredAccessClass);
   it('places sign-on beside the guarded branch, not inside it', signOnSitsBesideTheGuardedBranch);
 
   for (const pattern of REGISTERED_PATHS) {
@@ -1005,10 +1632,20 @@ function routeTableCases(): void {
     anAdministratorReachesTheAdministrativeMenu,
   );
   it(
-    'admits a signed-on operator without the claim to the administrative menu',
-    anOrdinaryOperatorReachesTheAdministrativeMenu,
+    'refuses a signed-on operator without the claim at the administrative menu',
+    anOrdinaryOperatorIsRefusedTheAdministrativeMenu,
   );
+  it('shadows no declared path with the catch-all', theCatchAllShadowsNoDeclaredPath);
   it('resolves an unknown path to the bounded not-found result', anUnknownPathResolvesToNotFound);
+  it('offers a framed way out of the not-found surface', theNotFoundSurfaceOffersAFramedWayOut);
+  it(
+    'lists the ordinary destinations for an operator holding no admin group',
+    theNotFoundSurfaceListsTheOrdinaryDestinations,
+  );
+  it(
+    'reaches the not-found surface with no session at all',
+    theNotFoundSurfaceIsReachableAnonymously,
+  );
 }
 
 describe('route table', routeTableCases);

@@ -222,9 +222,18 @@ function refusesEveryEntryOutsideTheOptionDomain(): void {
  * ⚠️ Refactoring Rationale: this case asserted that option 7 reported itself NOT INSTALLED, and it
  * ratified a defect. `COTRN01C`'s screen is delivered and mounted at `/transactions/:id`; the sentence
  * reports a program the CICS region does not HOLD, so answering an operator with it named an absence that
- * does not exist. `ui/src/routes/programRoutes.ts` now resolves that program to the transaction browse --
- * the screen that selects a transaction and enters the detail screen with it -- so the assertion is
- * inverted rather than deleted, and the whole option table is checked instead of one entry.
+ * does not exist. `ui/src/routes/programRoutes.ts` now resolves that program to its own KEYLESS ENTRY
+ * route `TRANSACTION_DETAIL_ENTRY_ROUTE` (`/transactions/view`) -- the address of the turn where the
+ * operator supplies the transaction identifier -- so the assertion is inverted rather than deleted, and
+ * the whole option table is checked instead of one entry.
+ *
+ * ⚠️ Refactoring Rationale: the expectation below read `/transactions` until the navigation graph gained
+ * keyless entry routes. Routing option 7 at the transaction BROWSE made two menu options share one
+ * destination, so eleven options reached only eight screens; `COCRDSLC`, `COCRDUPC` and `COTRN01C` now
+ * each own a static selector-free path instead. A static path rather than a sentinel under the
+ * parameterised template is load-bearing: `transactionDetail` seeds its lookup from the route parameter
+ * and reads on a present one, so a sentinel would issue a service read for the literal sentinel text,
+ * whereas an absent parameter is the selector-free arrival the screen already documents.
  *
  * Assumptions: the eleven options are asserted EXHAUSTIVELY rather than by sample. AAP section 0.1.3.1
  * states that program flow preserves the reachability graph of the eighteen transactions, which is a
@@ -247,7 +256,7 @@ function entersEveryMainMenuOption(): void {
   const transactionView = MAIN_MENU_OPTIONS[6];
   expect(transactionView?.programName).toBe('COTRN01C');
   const detail = resolveMenuOption('7', false);
-  expect(detail.destination).toBe('/transactions');
+  expect(detail.destination).toBe('/transactions/view');
   expect(detail.message).toBeNull();
 
   for (const option of MAIN_MENU_OPTIONS) {

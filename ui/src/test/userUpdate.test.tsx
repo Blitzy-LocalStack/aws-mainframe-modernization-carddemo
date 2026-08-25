@@ -81,7 +81,18 @@
  */
 
 import { screen, waitFor, within } from '@testing-library/react';
-import { Route, Routes } from 'react-router';
+import type { UserEvent } from '@testing-library/user-event';
+import { Route, Routes, useNavigate } from 'react-router';
+/*
+ * WHY : Assumptions: `StrictMode` is imported as a VALUE, and it is the instrument one case below needs
+ *       rather than a convenience. React's strict mode double-invokes every effect of the tree beneath
+ *       it, which is the same shape as the suspend-and-resume replay that made this screen read one row
+ *       twice in a production bundle -- a cleanup followed by a second run of an unchanged effect. It is
+ *       the only way to reproduce that replay deterministically in a test, since suspending an
+ *       already-mounted tree on demand would need a second lazily-loaded component and a promise the
+ *       case controlled, which would put the mechanism under test outside this screen.
+ */
+import { StrictMode } from 'react';
 import type { ReactElement } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
@@ -191,7 +202,7 @@ vi.mock(
  *       dependency verification exists to prevent.
  */
 import { USER_ID_MAX_LENGTH } from '../api/auth';
-import { ApiRequestError } from '../api/client';
+import { ApiRequestError, claimRetainedOutcome } from '../api/client';
 import { CARDDEMO_ADMIN_GROUP, CARDDEMO_USER_GROUP, COGNITO_GROUPS_CLAIM } from '../hooks/useAuth';
 import { AppShell } from '../layout/AppShell';
 import { MESSAGE_BAND_CONTENT_WIDTH, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
@@ -211,7 +222,13 @@ import {
   SHARED_MESSAGE_SOURCES,
   formatMessageTemplate,
 } from '../messages/messages';
-import { ADMIN_MENU_ROUTE } from '../routes/navigation';
+import {
+  ADMIN_MENU_ROUTE,
+  MAIN_MENU_ROUTE,
+  USER_LIST_ROUTE,
+  USER_UPDATE_ROUTE_TEMPLATE,
+  navigateSafely,
+} from '../routes/navigation';
 import { RequireAdmin } from '../routes/guards';
 import {
   USER_UPDATE_CAPTION,
@@ -222,7 +239,7 @@ import {
   USER_UPDATE_MAPSET,
   UserUpdateScreen,
 } from '../screens/userUpdate';
-import { FIELD_ERROR_TOKENS } from '../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS } from '../theme/tokens';
 import {
   apiError,
   expectMaxLength,
@@ -243,6 +260,28 @@ import {
  * turn while appearing to exercise the right one.
  */
 const USER_UPDATE_ROUTE = '/users/:id/edit';
+
+/**
+ * Converts an antd token name into the CSS custom-property segment it resolves to.
+ *
+ * Assumptions: the design system themes through CSS variables at this version, so a token reaches the
+ * DOM as a `var(--...)` reference whose name is the token identifier in kebab case. Deriving the segment
+ * from `ui/src/theme/tokens.ts` rather than writing the property out is what lets a case assert which
+ * ROLE a rendered value resolves through while holding no design literal of its own.
+ * @param {string} tokenName - The antd token identifier, as the theme bridge records it.
+ * @returns {string} The kebab-case segment of the custom property it becomes.
+ */
+function cssVariableSegment(tokenName: string): string {
+  /**
+   * Replaces one capital with its hyphenated lower-case form.
+   * @param {string} upper - The matched capital letter.
+   * @returns {string} The replacement.
+   */
+  function hyphenate(upper: string): string {
+    return `-${upper.toLowerCase()}`;
+  }
+  return tokenName.replace(/[A-Z]/gu, hyphenate);
+}
 
 /** The eight-character identifier the routed cases administer. */
 const EDITED_USER_ID = 'USER0001';
@@ -288,6 +327,21 @@ const UPDATE_MESSAGE_LINES = PROGRAM_MESSAGE_SOURCES.COUSR02C;
  * asserted directly by {@link describe}'s credential group below rather than left as a gap in this list.
  */
 const RENDERED_FIELDS = ['userId', 'firstName', 'lastName', 'userType'] as const;
+
+/**
+ * A composed accent: ONE code point, one UTF-16 unit, TWO UTF-8 bytes.
+ *
+ * Assumptions: this specimen exists because it is the case where the three readings of "width" a
+ * `PIC X(n)` field could have diverge in the direction that LOSES data -- a value `maxLength` admits and
+ * the twenty-byte record cannot hold.
+ */
+const COMPOSED_ACCENT = '\u00E9';
+
+/** The same accent decomposed: TWO code points, THREE bytes, and identical on the glass. */
+const DECOMPOSED_ACCENT = 'e\u0301';
+
+/** A party popper: ONE code point, TWO UTF-16 units, FOUR UTF-8 bytes. */
+const ASTRAL_CHARACTER = '\u{1F389}';
 
 /**
  * Returns the row-24 key legend the shell paints for this screen.
@@ -554,6 +608,186 @@ function fieldConstraintCases(): void {
   }
 
   /**
+   * Pastes one value into one control, which is how an over-capacity entry actually arrives.
+   *
+   * ⚠️ Assumptions: a PASTE rather than a run of keystrokes, and the difference is what the three cases
+   * below measure. Typing reaches the clamp once per character, so the last admitted character is the
+   * only one it ever has to drop; a paste hands it the whole value at once, which is the arrival the
+   * measured defect was reported from and the one where a naive implementation could split a surrogate
+   * pair. Every specimen below is within the control's `maxLength` counted in UTF-16 units, so no case
+   * depends on how the test DOM enforces that attribute -- only on what the screen does with what it is
+   * handed.
+   * @param {UserEvent} user - The interaction driver the mount returned.
+   * @param {(typeof RENDERED_FIELDS)[number]} field - Which control to paste into.
+   * @param {string} value - The value to paste.
+   * @returns {Promise<void>} Resolves once the paste has been applied.
+   */
+  async function pasteInto(
+    user: UserEvent,
+    field: (typeof RENDERED_FIELDS)[number],
+    value: string,
+  ): Promise<void> {
+    await user.clear(control(field));
+    await user.click(control(field));
+    await user.paste(value);
+  }
+
+  /**
+   * Confirms a value that exactly fills a declared width is admitted whole.
+   *
+   * Purpose: establish the other side of the clamp. A measure that refused a value AT its declared
+   * width would be the same defect in the opposite direction, and a twenty-character surname is the
+   * ordinary case rather than an edge one.
+   * @returns {Promise<void>} Resolves once the assertion has run.
+   */
+  async function admitsAValueThatFillsItsDeclaredWidth(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    const { user } = await mountScreen();
+    await waitForTheRowToLand();
+    const filled = 'A'.repeat(USER_UPDATE_FIELD_WIDTHS.lastName);
+
+    await pasteInto(user, 'lastName', filled);
+
+    expect(
+      control('lastName'),
+      'a value at the declared width must survive intact in all three readings of that width',
+    ).toHaveValue(filled);
+  }
+
+  /**
+   * Confirms capacity is measured in the record's BYTES, not in the control's UTF-16 code units.
+   *
+   * ⚠️ Purpose: this is the defect. `SEC-USR-LNAME PIC X(20)` (`app/cpy/CSUSR01Y.cpy` L20) is twenty
+   * BYTES on the record and `maxLength` counts UTF-16 code units, so twenty composed accents are twenty
+   * code units the attribute admits and forty bytes the record cannot hold. Before the clamp the
+   * control accepted all twenty and the overflow was discovered by whatever refused it downstream.
+   *
+   * Assumptions: the survivor count is COMPUTED from the specimen's own byte cost rather than written
+   * as ten, so the case states the rule instead of a number.
+   * @returns {Promise<void>} Resolves once the assertions have run.
+   */
+  async function measuresCapacityInBytesRatherThanCodeUnits(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    const { user } = await mountScreen();
+    await waitForTheRowToLand();
+    const declared = USER_UPDATE_FIELD_WIDTHS.lastName;
+    const admitted = Math.floor(declared / new TextEncoder().encode(COMPOSED_ACCENT).length);
+
+    expect(
+      COMPOSED_ACCENT.repeat(declared).length,
+      'the specimen must be one the maxLength attribute admits, or the case proves nothing',
+    ).toBeLessThanOrEqual(declared);
+
+    await pasteInto(user, 'lastName', COMPOSED_ACCENT.repeat(declared));
+
+    expect(
+      control('lastName'),
+      'a twenty-byte field must hold ten two-byte characters and not twenty of them',
+    ).toHaveValue(COMPOSED_ACCENT.repeat(admitted));
+  }
+
+  /**
+   * Confirms the identifier the read is issued on is measured the same way, and never half a character.
+   *
+   * ⚠️ Purpose: on this screen the clamped field is the KEY. Its declared width is eight in both units
+   * (`SEC-USR-ID PIC X(08)`, `app/cpy/CSUSR01Y.cpy` L18), and a key silently truncated at eight UTF-16
+   * units would be a DIFFERENT key from the one typed -- so the turn it opens would read a record the
+   * operator never named. Each specimen here is one code point, two UTF-16 units and four bytes, which
+   * also covers the failure a byte-arithmetic implementation would produce: a clamp walking UTF-16 units
+   * could stop halfway through one and leave an unpaired surrogate.
+   *
+   * Assumptions: the survivors are counted as CODE POINTS through the string iterator, because
+   * `String.prototype.length` is the measure under test and asserting with it would beg the question.
+   * @returns {Promise<void>} Resolves once the assertions have run.
+   */
+  async function keepsAnAstralCharacterWholeInTheKey(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    const { user } = await mountScreen();
+    await waitForTheRowToLand();
+    const declared = USER_UPDATE_FIELD_WIDTHS.userId;
+    const admitted = Math.floor(declared / new TextEncoder().encode(ASTRAL_CHARACTER).length);
+    const pasted = ASTRAL_CHARACTER.repeat(admitted + 2);
+
+    expect(
+      pasted.length,
+      'the specimen must be one the maxLength attribute admits, or the case proves nothing',
+    ).toBeLessThanOrEqual(declared);
+
+    await pasteInto(user, 'userId', pasted);
+
+    const held = control('userId').value;
+
+    expect([...held], 'the key must hold whole characters up to its byte capacity').toHaveLength(
+      admitted,
+    );
+    expect(held, 'and every one of them must be the character that was pasted').toBe(
+      ASTRAL_CHARACTER.repeat(admitted),
+    );
+  }
+
+  /**
+   * Confirms two spellings of one accent converge, so an edited name has one form on the wire.
+   *
+   * ⚠️ Purpose: the composed and decomposed spellings are indistinguishable on the glass and differ byte
+   * for byte, which on a system whose keys are compared as characters means two records an operator
+   * cannot tell apart and a search that finds one of them. Composing where the value is captured removes
+   * the ambiguity at the last boundary where it can still be removed.
+   * @returns {Promise<void>} Resolves once the assertions have run.
+   */
+  async function normalisesTwoSpellingsOfOneAccent(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    const { user } = await mountScreen();
+    await waitForTheRowToLand();
+
+    expect(
+      [...DECOMPOSED_ACCENT],
+      'the specimen must genuinely be the longer spelling, or nothing is being normalised',
+    ).toHaveLength(2);
+
+    await pasteInto(user, 'firstName', DECOMPOSED_ACCENT);
+
+    expect(
+      control('firstName'),
+      'the captured value must carry the one canonical spelling',
+    ).toHaveValue(COMPOSED_ACCENT);
+  }
+
+  /**
+   * Confirms every control is sized to the character width its copybook declares.
+   *
+   * ⚠️ Purpose: regress the measured geometry. An eight-character identifier input rendered 1172 pixels
+   * wide and the blank-field asterisk this screen paints at the field's right-hand edge landed at
+   * x≈1211, roughly 1150 pixels from the value it qualifies -- and the one-position user type rendered
+   * at that same full width, so nothing about a control said how much it would take.
+   *
+   * ⚠️ Assumptions: the DECLARATION is asserted and not a rendered pixel width, because the test DOM
+   * performs no layout -- every box in it measures zero, so a width assertion would pass on the broken
+   * value too. What can be checked here is that each control carries a maximum measure stated in the
+   * field's own character units. The pixel outcome was measured in a browser; this case exists to stop
+   * the declaration being removed.
+   * @returns {Promise<void>} Resolves once all four controls have been asserted.
+   */
+  async function sizesEveryControlToItsDeclaredWidth(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    await mountScreen();
+    await waitForTheRowToLand();
+
+    for (const field of RENDERED_FIELDS) {
+      const declared = USER_UPDATE_FIELD_WIDTHS[field];
+      const measure = control(field).style.maxInlineSize;
+
+      expect(measure, `${field} must declare a maximum measure of its own`).not.toBe('');
+      expect(measure, `${field} must be capped at its own declared width`).toContain(
+        `${String(declared)}ch`,
+      );
+      expect(
+        control(field).style.inlineSize,
+        `${field} must still shrink inside a narrow viewport`,
+      ).toBe('100%');
+    }
+  }
+
+  /**
    * Confirms each of the four labels is carried character-for-character, trailing space included.
    * @returns {void} Nothing; the four published constants are compared to the mapset's own literals.
    */
@@ -730,6 +964,14 @@ function fieldConstraintCases(): void {
     'keeps the painted 78-character band and the 75-character content contract distinct',
     keepsTheMessageWidthsDistinct,
   );
+  it('admits a value that fills its declared width', admitsAValueThatFillsItsDeclaredWidth);
+  it(
+    'measures capacity in the record bytes rather than in code units',
+    measuresCapacityInBytesRatherThanCodeUnits,
+  );
+  it('keeps an astral character whole in the key', keepsAnAstralCharacterWholeInTheKey);
+  it('normalises two spellings of one accent', normalisesTwoSpellingsOfOneAccent);
+  it('sizes every control to its declared width', sizesEveryControlToItsDeclaredWidth);
 }
 
 describe('field constraints measured from the mapset and the record layout', fieldConstraintCases);
@@ -825,9 +1067,25 @@ function twoTurnWorkflowCases(): void {
     );
     expect(UPDATE_MESSAGES.PRESS_PF5_KEY_TO_SAVE_YOUR_UPDATES).toContain(' ...');
     expect(UPDATE_MESSAGE_LINES.PRESS_PF5_KEY_TO_SAVE_YOUR_UPDATES).toEqual([336]);
-    expect(
-      expectVerbatimMessage(UPDATE_MESSAGES.PRESS_PF5_KEY_TO_SAVE_YOUR_UPDATES),
-    ).toBeInTheDocument();
+    const sentence = expectVerbatimMessage(UPDATE_MESSAGES.PRESS_PF5_KEY_TO_SAVE_YOUR_UPDATES);
+
+    expect(sentence).toBeInTheDocument();
+
+    // WHY : ⚠️ Assumptions: the sentence resolves through the NEUTRAL role and not the informational
+    //       one, which is the distinction `MOVE DFHNEUTR TO ERRMSGC` at `app/cbl/COUSR02C.cbl` L338
+    //       makes -- L241 moves `DFHRED` for a refusal and L371 moves `DFHGREEN` for the
+    //       acknowledgement, so the program uses three colours on one field and each must map to its
+    //       own severity. `ui/src/theme/tokens.ts` resolves NEUTRAL to `colorTextSecondary` and
+    //       TURQUOISE to `colorTextLabel`; publishing this line at the `'info'` severity painted it in
+    //       the informational hue, which is the substitution the token bridge's G3 note exists to
+    //       prevent and which a rendering review recorded on this route as info-coloured content in
+    //       the outcome band. Asserted through the token name, so the case holds no colour literal.
+    expect(sentence.getAttribute('style') ?? '').toContain(
+      cssVariableSegment(BMS_TEXT_COLOR_TOKENS.NEUTRAL),
+    );
+    expect(sentence.getAttribute('style') ?? '').not.toContain(
+      cssVariableSegment(BMS_TEXT_COLOR_TOKENS.TURQUOISE),
+    );
   }
 
   /**
@@ -1271,7 +1529,24 @@ function functionKeyCases(): void {
   }
 
   /**
-   * Confirms the design system's emphasis mapping is applied by key rather than by per-screen meaning.
+   * ⚠️ Confirms emphasis follows what each key WRITES, so both saves read as the screen's actions.
+   *
+   * ⚠️ Purpose: close a measured defect. A rendering pass recorded this bar carrying TWO primary-blue
+   * controls at once -- `ENTER=Fetch` and `F5=Save` -- while `F3=Save&&Exit`, a key that performs
+   * `PUT /api/v1/auth/users/{id}` before it leaves, was the visually WEAKEST of the three. So the
+   * emphasis distinguished neither the two writing keys nor the reading one.
+   *
+   * ⚠️ Refactoring Rationale: this case used to assert the opposite and therefore PINNED the defect. It
+   * required `PRIMARY_ACTION_AIDS` membership to decide the class, and recorded PF3's weak paint as
+   * "deliberate rather than an oversight" with a warning not to "fix the mapping for this screen". That
+   * warning was right about the mechanism -- an AID-keyed table cannot be changed for one screen,
+   * because `PFK03` is `F3=Back` on nine other mapsets -- and wrong about the conclusion. The screen now
+   * declares what each key does and the table is left untouched for every screen that has not.
+   *
+   * ⚠️ Assumptions: the expected class per key is derived from the mapset's own legend, not from the
+   * AID. `app/bms/COUSR02.bms` L163-L164 paints `ENTER=Fetch  F3=Save&&Exit  F4=Clear  F5=Save
+   * F12=Cancel`, and only the two `Save` arms reach `UPDATE-USER-INFO` (`app/cbl/COUSR02C.cbl` L112 and
+   * L121) -- so exactly two controls are primary and three are not.
    * @returns {Promise<void>} Resolves once every control's emphasis has been asserted.
    */
   async function appliesTheEmphasisMappingByKey(): Promise<void> {
@@ -1279,24 +1554,34 @@ function functionKeyCases(): void {
     await mountScreen();
     await waitForTheRowToLand();
 
-    // WHY : Assumptions: AAP section 0.3.2 fixes primary emphasis to ENTER and PF5 and the default to
-    //       PF3, PF4 and PF12, and `ui/src/layout/PfKeyBar.tsx` publishes that as `PRIMARY_ACTION_AIDS`.
-    //       The membership is asserted against that constant rather than restated, so the two cannot
-    //       disagree.
+    /*
+     * ⚠️ Assumptions: the AID fallback is asserted UNCHANGED, which is what makes the assertions below
+     * evidence that the declared risk overrode it rather than merely agreed with it. It still lists
+     * `ENTER`, so a fetch key rendering non-primary can only be the screen's own classification taking
+     * effect; and it still omits `PFK03`, so a save-and-exit rendering primary can only be the same.
+     */
     expect(PRIMARY_ACTION_AIDS).toEqual(['ENTER', 'PFK05']);
 
-    // WHY : ⚠️ Assumptions: PF3 renders with DEFAULT emphasis even though it commits on this screen, and
-    //       the divergence between its visual weight and its meaning is deliberate rather than an
-    //       oversight. The design-system mapping keys off the ATTENTION IDENTIFIER, not off what a
-    //       particular screen binds to it, so the one screen whose PF3 writes is also the one screen
-    //       where the emphasis under-states the consequence. It is recorded here so a later reader does
-    //       not "fix" the mapping for this screen and thereby make PF3 look different from every other
-    //       PF3 in the application.
-    for (const { aid, label } of boundKeys()) {
-      const expectedClass = PRIMARY_ACTION_AIDS.includes(aid)
-        ? 'ant-btn-primary'
-        : 'ant-btn-default';
-      expect(keyButton(label).className).toContain(expectedClass);
+    /** The two keys whose arms reach `UPDATE-USER-INFO`, and therefore carry the primary emphasis. */
+    const mutatingLabels: readonly string[] = [
+      USER_UPDATE_KEY_LABELS.PFK03,
+      USER_UPDATE_KEY_LABELS.PFK05,
+    ];
+
+    for (const { label } of boundKeys()) {
+      const writes = mutatingLabels.includes(label);
+      const expectedClass = writes ? 'ant-btn-primary' : 'ant-btn-default';
+
+      expect(keyButton(label).className, label).toContain(expectedClass);
+
+      /*
+       * ⚠️ Assumptions: neither save is asserted as DANGEROUS, and that is the classification and not an
+       * omission. `'mutating'` and `'destructive'` resolve to different paints on purpose -- an operator
+       * can come straight back and edit this row again, so a save must read as the screen's primary
+       * action and not as its irreversible one. Asserting the absence is what keeps a well-meant
+       * escalation to `'destructive'` from passing here.
+       */
+      expect(keyButton(label).className, label).not.toContain('ant-btn-dangerous');
     }
   }
 
@@ -1447,6 +1732,22 @@ function functionKeyCases(): void {
       },
     );
     expect(identityTransport.updateUser).not.toHaveBeenCalled();
+
+    /*
+     * WHY : ⚠️ Assumptions: the CURSOR is asserted as well as the values, and it is the half that makes
+     *       clearing the identifier usable rather than obstructive. `INITIALIZE-ALL-FIELDS` moves `-1`
+     *       into `USRIDINL` at `app/cbl/COUSR02C.cbl` L405 in the same statement group that blanks the
+     *       fields, which is the 3270 way of placing the cursor, so the reference empties the key and
+     *       then puts the operator on it ready to type the next one. A rendering review filed the
+     *       cleared key as a defect on the grounds that F4 "clears all four fields including the key
+     *       field"; the reference does exactly that, deliberately, and this assertion records the
+     *       affordance that goes with it so the pair cannot be split by a later change that spares the
+     *       key.
+     */
+    expect(
+      control('userId'),
+      'L405 places the cursor back on the identifier the clear has just emptied',
+    ).toHaveFocus();
   }
 
   /**
@@ -1531,7 +1832,7 @@ function functionKeyCases(): void {
     paintsTheFiveMeasuredDescriptors,
   );
   it(
-    'applies the primary emphasis to ENTER and PF5 and the default to PF3, PF4 and PF12',
+    'applies the primary emphasis to the two keys that write and the default to the three that do not',
     appliesTheEmphasisMappingByKey,
   );
   it('saves and only then exits on PF3, which no other screen does', pf3SavesAndThenExits);
@@ -2112,12 +2413,685 @@ function fieldRefusalCases(): void {
     expect(rendered).not.toMatch(/\d{9,}/u);
   }
 
+  /**
+   * Confirms a refusal naming TWO controls marks both, describes each separately and focuses the first.
+   *
+   * ⚠️ Purpose: this screen and `/users/new` are the delivery's reference implementation of the
+   * conforming-400 treatment, and other surfaces are being brought up to match them, so the
+   * multi-offender case is pinned rather than inferred from the single-offender one above. It cannot be
+   * inferred: a screen that applied only the array's first entry, or that pointed both marked controls
+   * at one shared help element, satisfies every assertion in that case and still drops one refusal.
+   *
+   * ⚠️ Assumptions: the cursor goes to the array's FIRST entry, which is this screen's published rule --
+   * `ui/src/screens/userUpdate/index.tsx` takes `fieldErrors[0]` as the control to focus. The fixture
+   * therefore names the controls in an order that is NOT their painted order, so a screen that focused
+   * by field position rather than array position fails here where an in-order fixture would pass.
+   * @returns {Promise<void>} Resolves once both marks, both descriptions and the cursor are observed.
+   */
+  async function marksBothControlsATwoFieldRefusalNames(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    identityTransport.updateUser.mockRejectedValue(
+      new ApiRequestError(
+        'PROBLEM',
+        400,
+        apiError({
+          status: 400,
+          fieldErrors: [
+            fieldError('userType', 'User Type can NOT be empty...', 'NOT_OK'),
+            fieldError('firstName', 'First Name can NOT be empty...', 'NOT_OK'),
+          ],
+        }),
+        'the service refused two fields',
+      ),
+    );
+    const { user } = await mountScreen();
+    await fetchThenEdit(user);
+
+    await pressPfKey(user, 'PFK05');
+
+    const userType = control('userType');
+    const firstName = control('firstName');
+
+    await waitFor(
+      /**
+       * Waits until both refused controls have been marked.
+       * @returns {void} Nothing; throws until both marks are present.
+       */
+      () => {
+        expect(userType).toHaveAttribute('aria-invalid', 'true');
+        expect(firstName).toHaveAttribute('aria-invalid', 'true');
+      },
+    );
+
+    expect(userType, 'the cursor goes to the refusal the array names first').toHaveFocus();
+
+    // WHY : ⚠️ Assumptions: each control is asserted to carry its OWN sentence through its OWN
+    //       `aria-describedby`, and the two identifiers are asserted DISTINCT -- which is the assertion
+    //       that catches the plausible failure. A screen binding both controls to one help element would
+    //       announce the first-name refusal on the user-type control and satisfy everything else here.
+    //       `app/cpy/CSSETATY.cpy` L17-L26 is templated per field for exactly this reason: one
+    //       substitution per control, never one statement shared between two.
+    const userTypeHelpId = fieldErrorId(userType.id);
+    const firstNameHelpId = fieldErrorId(firstName.id);
+
+    expect(userTypeHelpId).not.toBe(firstNameHelpId);
+    expect(userType.getAttribute('aria-describedby') ?? '').toContain(userTypeHelpId);
+    expect(firstName.getAttribute('aria-describedby') ?? '').toContain(firstNameHelpId);
+    expect(document.getElementById(userTypeHelpId)).toHaveTextContent(
+      'User Type can NOT be empty...',
+    );
+    expect(document.getElementById(firstNameHelpId)).toHaveTextContent(
+      'First Name can NOT be empty...',
+    );
+
+    // WHY : Assumptions: the two controls the array does not name stay clean, so marking is still
+    //       per-field once more than one field is named. A screen that marked the whole form as soon as a
+    //       second refusal arrived would satisfy the positive half of this case entirely.
+    expect(control('lastName')).not.toHaveAttribute('aria-invalid', 'true');
+    expect(control('userId')).not.toHaveAttribute('aria-invalid', 'true');
+  }
+
   it(
     'marks only the control a refusal names, and leaves the others unmarked',
     marksOnlyTheControlARefusalNames,
   );
+  it('marks both controls a two-field refusal names', marksBothControlsATwoFieldRefusalNames);
   it('adds the copybook literal asterisk to a blank field', marksABlankFieldWithTheLiteralAsterisk);
   it('discloses no cardholder identifier of any kind', disclosesNoCardholderIdentifiers);
 }
 
 describe('field refusals and what the screen never discloses', fieldRefusalCases);
+
+/**
+ * A second stored row, so a genuine route change is distinguishable from a replayed effect.
+ *
+ * Assumptions: a DIFFERENT identifier and different names, because the property under test is which row
+ * reached the controls. Two rows sharing a first name would let a case pass while the screen displayed
+ * the wrong one.
+ */
+const OTHER_ROW: UserResponse = {
+  userId: 'USER0002',
+  firstName: 'JEAN',
+  lastName: 'BARTIK',
+  userType: 'A',
+  cognitoSub: '00000000-0000-4000-8000-000000000002',
+};
+
+/**
+ * Answers a keyed read from the two rows these cases administer.
+ *
+ * Assumptions: an implementation keyed on the identifier rather than a single resolved value, because a
+ * case that navigates from one row to another has to be able to tell which read landed. A single
+ * `mockResolvedValue` answers both reads with one row, which would make a wrong-row regression invisible.
+ * Assumptions: it is a PLAIN function returning a resolved promise rather than an `async` one, because
+ * it awaits nothing and `@typescript-eslint/require-await` rejects the `async` form. The returned type
+ * is unchanged, which is what the transport stub it stands in for declares.
+ * @param {string} userId - Identifier the screen asked for.
+ * @returns {Promise<UserResponse>} The row that identifier names.
+ * @throws {Error} If a case asks for an identifier neither row carries, which is a fault in the case
+ *   rather than in the screen and is surfaced rather than answered with a substitute row.
+ */
+function rowFor(userId: string): Promise<UserResponse> {
+  if (userId === STORED_ROW.userId) {
+    return Promise.resolve(STORED_ROW);
+  }
+  if (userId === OTHER_ROW.userId) {
+    return Promise.resolve(OTHER_ROW);
+  }
+  throw new Error(`no fixture row for ${userId}`);
+}
+
+/** Label of the probe control that moves the route from one administered row to the other. */
+const ROUTE_JUMP_LABEL = 'open the other row';
+
+/**
+ * Renders a control that moves the router to the second administered row.
+ *
+ * Assumptions: the jump is driven by a rendered control rather than by re-rendering with a different
+ * initial entry, because a fresh render is a fresh MOUNT -- which is the one case that would pass
+ * whether the screen guarded a replay or not. A navigation keeps the component mounted and changes only
+ * the route parameter, which is what the effect under test reacts to.
+ * @returns {ReactElement} The probe control.
+ */
+function RouteJumpProbe(): ReactElement {
+  const navigate = useNavigate();
+
+  return (
+    <button
+      type="button"
+      onClick={
+        /**
+         * Moves the route to the second row.
+         *
+         * Assumptions: the transition goes through `navigateSafely` rather than through `navigate`
+         * directly, because `NavigateFunction` answers `void | Promise<void>` in the pinned router and
+         * the promise arm is a floating one at a bare call site. That helper is the tree's own seam for
+         * exactly this -- it settles the promise and falls back to a document navigation on rejection --
+         * so the probes navigate the way every screen does.
+         * @returns {void} Completion is the requested route transition.
+         */
+        (): void => {
+          navigateSafely(navigate, `/users/${OTHER_ROW.userId}/edit`);
+        }
+      }
+    >
+      {ROUTE_JUMP_LABEL}
+    </button>
+  );
+}
+
+/**
+ * Groups the cases holding the routed read to exactly one request per identifier asked for.
+ *
+ * ⚠️ Purpose: these pin the defect a browser sweep of the production bundle measured -- two
+ * `GET /api/v1/auth/users/{id}` requests, with two distinct correlation identifiers, for ONE arrival at
+ * `/users/:id/edit`. The screen is mounted through `lazy()` under a `Suspense` boundary in
+ * `ui/src/router.tsx`, and React runs a mounted tree's effect cleanups and then its effects again when
+ * that tree suspends and resumes, so the read effect ran twice for one unchanged route.
+ * @returns {void} Nothing; registering the cases is the whole of its effect.
+ */
+function routedReadCases(): void {
+  /**
+   * Confirms a replayed effect reads the row once and still lands it on the controls.
+   * @returns {Promise<void>} Resolves once the row is on the controls and the read has been counted.
+   */
+  async function readsOneRowPerRequestedIdentifier(): Promise<void> {
+    identityTransport.getUser.mockImplementation(rowFor);
+
+    /*
+     * WHY : Assumptions: the strict-mode wrapper is INSIDE the route element rather than around the
+     *       whole harness, because what has to be double-invoked is this screen's effects. Wrapping the
+     *       harness would also double-invoke the shell's, which is another module's contract to keep.
+     */
+    await renderInAppShell(
+      <StrictMode>
+        <UserUpdateScreen />
+      </StrictMode>,
+      { routePath: USER_UPDATE_ROUTE, initialEntries: [`/users/${EDITED_USER_ID}/edit`] },
+    );
+    await waitForTheRowToLand();
+
+    // WHY : Assumptions: BOTH halves are asserted in one case, and neither is sufficient alone. A
+    //       screen that read once and displayed nothing would satisfy the count while being broken
+    //       worse than the duplicate was, because the row it was mounted to edit would never appear --
+    //       which is precisely what suppressing the second read would have caused had the unmount
+    //       invalidation stayed. Waiting for the row above is the first half; the count is the second.
+    expect(
+      identityTransport.getUser.mock.calls,
+      'one arrival at the route reads the row it names exactly once',
+    ).toEqual([[EDITED_USER_ID]]);
+  }
+
+  /**
+   * Confirms a route change to another row still issues that row's read.
+   * @returns {Promise<void>} Resolves once the second row is on the controls.
+   */
+  async function readsAgainWhenTheRouteNamesAnotherRow(): Promise<void> {
+    identityTransport.getUser.mockImplementation(rowFor);
+    const { user } = await renderWithProviders(
+      <>
+        <RouteJumpProbe />
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path={USER_UPDATE_ROUTE} element={<UserUpdateScreen />} />
+          </Route>
+        </Routes>
+      </>,
+      { initialEntries: [`/users/${EDITED_USER_ID}/edit`] },
+    );
+    await waitForTheRowToLand();
+
+    await user.click(screen.getByRole('button', { name: ROUTE_JUMP_LABEL }));
+
+    await waitFor(
+      /**
+       * Re-reads the first-name control until the second row has been applied to it.
+       * @returns {void} Nothing; throws until the second row's first name is present.
+       */
+      () => {
+        expect(control('firstName')).toHaveValue(OTHER_ROW.firstName);
+      },
+    );
+    // WHY : Assumptions: the two calls are compared as a SEQUENCE rather than counted, because the
+    //       order is the property: a guard that remembered only "some identifier has been read" would
+    //       leave the second row unread and the first row's values under the second row's identifier,
+    //       which is the state that makes the next save write one operator's values onto another's.
+    expect(identityTransport.getUser.mock.calls).toEqual([[EDITED_USER_ID], [OTHER_ROW.userId]]);
+  }
+
+  /**
+   * Confirms the Enter key still re-reads the row the route already delivered.
+   * @returns {Promise<void>} Resolves once the second read has been observed.
+   */
+  async function readsAgainWhenTheOperatorAsksForTheSameRow(): Promise<void> {
+    identityTransport.getUser.mockImplementation(rowFor);
+    const { user } = await mountScreen();
+    await waitForTheRowToLand();
+
+    await pressPfKey(user, 'ENTER');
+
+    // WHY : Assumptions: the guard suppresses a read caused by the EFFECT running again, and nothing
+    //       else. `app/cbl/COUSR02C.cbl` L108-L110 dispatches Enter to `PROCESS-ENTER-KEY` on every
+    //       turn, so an operator asking for the row again is answered by reading it again -- and the
+    //       save arm re-reads for the same reason at L215-L217. A guard that covered those would refuse
+    //       a read the reference performs.
+    await waitFor(
+      /**
+       * Waits until the Enter turn has issued its own read.
+       * @returns {void} Nothing; throws until the second read has been recorded.
+       */
+      () => {
+        expect(identityTransport.getUser.mock.calls).toEqual([[EDITED_USER_ID], [EDITED_USER_ID]]);
+      },
+    );
+  }
+
+  it('reads the routed row exactly once per arrival', readsOneRowPerRequestedIdentifier);
+  it('reads the other row when the route names it', readsAgainWhenTheRouteNamesAnotherRow);
+  it('re-reads the same row when Enter asks for it', readsAgainWhenTheOperatorAsksForTheSameRow);
+}
+
+describe('the routed read issues one request per identifier asked for', routedReadCases);
+
+/**
+ * Name the save handover is retained under, composed the way both screens compose it.
+ *
+ * Assumptions: the route half comes from `ui/src/routes/navigation.ts` and the suffix is written out,
+ * which is exactly how `ui/src/screens/userUpdate/index.tsx` and `ui/src/screens/userList/index.tsx`
+ * each compose it. That is deliberate: the two screens agree on this name without importing each other,
+ * so the agreement is what a case has to be able to fail on.
+ */
+const USER_UPDATE_SAVE_CLAIM = `${USER_UPDATE_ROUTE_TEMPLATE}#saved`;
+
+/** The two members a collected handover carries, as this file asserts against them. */
+interface CollectedHandover {
+  /** The sentence the save published on its own band before it transferred. */
+  readonly message: string;
+  /** The tone it published that sentence with. */
+  readonly severity: string;
+}
+
+/**
+ * Collects whatever the exit key left behind, failing the case when it left nothing.
+ *
+ * Assumptions: the absence of an outcome is reported as a FAILED ASSERTION here rather than returned as
+ * `undefined` for a caller to check, because "nothing was handed over" is the defect every case in this
+ * group exists to catch and the message should say so where it happened.
+ * @returns {CollectedHandover} The sentence and tone the update screen retained.
+ * @throws {Error} When no outcome is held under the claim, or one is held that did not complete.
+ */
+function collectHandover(): CollectedHandover {
+  const held = claimRetainedOutcome<CollectedHandover>(USER_UPDATE_SAVE_CLAIM);
+
+  expect(
+    held,
+    'the exit key must leave its own sentence for the screen it transfers to',
+  ).toBeDefined();
+  if (held === undefined || held.settled !== 'COMPLETED') {
+    throw new Error('no completed save handover was retained');
+  }
+
+  return held.value;
+}
+
+/** Marker naming the browse stand-in, so an arrival back at the list is observable. */
+const BROWSE_PROBE_TEXT = 'user browse reached';
+
+/** Label of the control that opens a row the way the browse opens one. */
+const OPEN_FROM_BROWSE_LABEL = 'open the row from the browse';
+
+/**
+ * A browse stand-in that opens a row and hands its own route over as the caller origin.
+ *
+ * ⚠️ Purpose: the origin is the property that decides where `F3=Save&&Exit` lands, and it travels in
+ * router STATE rather than in the path -- which is exactly the channel `navigateSafely` writes it to and
+ * `ui/src/screens/userList/index.tsx` fills on a row action. The provider helper this file mounts
+ * through accepts history entries as plain strings, so state cannot be attached to an initial entry; a
+ * rendered control that navigates is the only way to arrange the arrival the browse actually produces.
+ *
+ * Assumptions: a stand-in and not the real browse, because what is under test is what the update screen
+ * does with an origin it was given. The real list would issue its own read and a failure there would
+ * present as a failure here.
+ * @returns {ReactElement} The marker and the control that opens the row.
+ */
+function UserBrowseProbe(): ReactElement {
+  const navigate = useNavigate();
+
+  return (
+    <>
+      <p>{BROWSE_PROBE_TEXT}</p>
+      <button
+        type="button"
+        onClick={
+          /**
+           * Opens the administered row carrying this route as the caller origin.
+           *
+           * Assumptions: through `navigateSafely` for the reason {@link RouteJumpProbe} records, and it
+           * is the same helper `ui/src/screens/userList/index.tsx` uses on the row action this stands in
+           * for -- so the origin reaches router state by the same route it does in the application.
+           * @returns {void} Completion is the requested route transition.
+           */
+          (): void => {
+            navigateSafely(navigate, `/users/${EDITED_USER_ID}/edit`, { from: USER_LIST_ROUTE });
+          }
+        }
+      >
+        {OPEN_FROM_BROWSE_LABEL}
+      </button>
+    </>
+  );
+}
+
+/**
+ * Mounts the screen as the browse opens it, so its back arm returns to the browse rather than the menu.
+ *
+ * Assumptions: the row is opened by TAKING the browse's action rather than by starting the history at
+ * the edit path, because the origin is what the case is about. Starting at the edit path models a direct
+ * arrival, which is a different destination and a different outcome -- and both are asserted, by this
+ * helper and by {@link mountScreenWithDestination} respectively.
+ * @returns {Promise<Awaited<ReturnType<typeof renderWithProviders>>>} The render result and its operator.
+ */
+async function mountScreenFromTheBrowse(): Promise<
+  Awaited<ReturnType<typeof renderWithProviders>>
+> {
+  const mounted = await renderWithProviders(
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route path={USER_LIST_ROUTE} element={<UserBrowseProbe />} />
+        <Route path={USER_UPDATE_ROUTE} element={<UserUpdateScreen />} />
+        <Route path={ADMIN_MENU_ROUTE} element={<AdminMenuProbe />} />
+      </Route>
+    </Routes>,
+    { initialEntries: [USER_LIST_ROUTE] },
+  );
+
+  await mounted.user.click(screen.getByRole('button', { name: OPEN_FROM_BROWSE_LABEL }));
+
+  return mounted;
+}
+
+/** Marker naming the main-menu stand-in, so an arrival at a NON-collecting destination is observable. */
+const MAIN_MENU_PROBE_TEXT = 'main menu reached';
+
+/** Label of the control that opens a row while naming the main menu as the caller origin. */
+const OPEN_FROM_MAIN_MENU_LABEL = 'open the row from the main menu';
+
+/**
+ * A stand-in for a caller that is an in-application route but collects no save outcome.
+ *
+ * ⚠️ Purpose: keep the retention guard's CONDITIONALITY provable now that both of this key's ordinary
+ * destinations collect. `originDestination` in `ui/src/screens/userUpdate/index.tsx` answers
+ * `inApplicationRoute(...) ?? ADMIN_MENU_ROUTE`, and `navigableRoutes()` in
+ * `ui/src/routes/navigation.ts` admits every route this application has -- so an origin naming the main
+ * menu is admitted, reached, and collects nothing. Without a case on that arm, a change that retained
+ * unconditionally would pass every remaining case in this group while leaving a durable claim for a
+ * screen that never takes it.
+ *
+ * Assumptions: the main menu is used rather than an invented route BECAUSE it is admitted. An origin
+ * outside the closed set is rejected by `inApplicationRoute` and falls back to the administrative menu,
+ * which now collects -- so a forged unknown origin could not exercise this arm at all.
+ * @returns {ReactElement} The marker and the control that opens the row.
+ */
+function MainMenuOriginProbe(): ReactElement {
+  const navigate = useNavigate();
+
+  return (
+    <>
+      <p>{MAIN_MENU_PROBE_TEXT}</p>
+      <button
+        type="button"
+        onClick={
+          /**
+           * Opens the administered row naming the main menu as the caller origin.
+           *
+           * Assumptions: through `navigateSafely` for the reason {@link RouteJumpProbe} records.
+           * @returns {void} Completion is the requested route transition.
+           */
+          (): void => {
+            navigateSafely(navigate, `/users/${EDITED_USER_ID}/edit`, { from: MAIN_MENU_ROUTE });
+          }
+        }
+      >
+        {OPEN_FROM_MAIN_MENU_LABEL}
+      </button>
+    </>
+  );
+}
+
+/**
+ * Mounts the screen as a caller that collects nothing would open it.
+ *
+ * Assumptions: the row is opened by TAKING the control rather than by starting the history at the edit
+ * path, for the reason {@link UserBrowseProbe} records -- the origin travels in router state and the
+ * provider helper accepts history entries as plain strings, so a rendered navigation is the only way to
+ * arrange it.
+ * @returns {Promise<Awaited<ReturnType<typeof renderWithProviders>>>} The render result and its operator.
+ */
+async function mountScreenFromANonCollectingCaller(): Promise<
+  Awaited<ReturnType<typeof renderWithProviders>>
+> {
+  const mounted = await renderWithProviders(
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route path={MAIN_MENU_ROUTE} element={<MainMenuOriginProbe />} />
+        <Route path={USER_UPDATE_ROUTE} element={<UserUpdateScreen />} />
+        <Route path={ADMIN_MENU_ROUTE} element={<AdminMenuProbe />} />
+      </Route>
+    </Routes>,
+    { initialEntries: [MAIN_MENU_ROUTE] },
+  );
+
+  await mounted.user.click(screen.getByRole('button', { name: OPEN_FROM_MAIN_MENU_LABEL }));
+
+  return mounted;
+}
+
+/**
+ * Waits until the back arm has landed on the browse stand-in.
+ * @returns {Promise<void>} Resolves once the browse marker is on the document.
+ */
+async function waitForTheBrowseToBeReached(): Promise<void> {
+  await waitFor(
+    /**
+     * Re-queries for the browse marker until the transfer has happened.
+     * @returns {void} Nothing; throws until the destination is mounted.
+     */
+    (): void => {
+      expect(screen.getByText(BROWSE_PROBE_TEXT)).toBeInTheDocument();
+    },
+  );
+}
+
+/**
+ * Groups the cases holding `F3=Save&&Exit` to handing its outcome on rather than discarding it.
+ *
+ * ⚠️ Purpose: a browser sweep measured `PUT /api/v1/auth/users/{id}` returning `200` followed
+ * immediately by a route change whose band was EMPTY -- the write happened and the operator was told
+ * nothing, on the one key whose own legend at `app/bms/COUSR02.bms` L163 promises `F3=Save&&Exit`. The
+ * reference does send its outcome on this path (`app/cbl/COUSR02C.cbl` L370-L377 composes the green
+ * sentence and performs `SEND-USRUPD-SCREEN`); what discards it there is the `EXEC CICS XCTL` at
+ * L258-L261 overwriting the terminal, which is a delivery artefact and not a decision.
+ * @returns {void} Nothing; registering the cases is the whole of its effect.
+ */
+function saveHandoverCases(): void {
+  /**
+   * Confirms a committed write hands the composed acknowledgement over at success severity.
+   * @returns {Promise<void>} Resolves once the retained sentence has been asserted.
+   */
+  async function handsTheCommittedSentenceOver(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    identityTransport.updateUser.mockResolvedValue(SAVED_ROW);
+    /*
+     * WHY : Assumptions: the row is opened FROM THE BROWSE, because the hand-over is retained only for a
+     *       destination that collects it and the browse is that destination. A case that arrived directly
+     *       would leave for the administrative menu, which collects nothing -- and the case immediately
+     *       below asserts that nothing is left behind on that path, so the two together pin both arms of
+     *       the reference's own destination choice at `app/cbl/COUSR02C.cbl` L113-L118.
+     */
+    const { user } = await mountScreenFromTheBrowse();
+    await fetchThenEdit(user);
+
+    await pressPfKey(user, 'PFK03');
+
+    await waitForTheBrowseToBeReached();
+
+    // WHY : Assumptions: the sentence is COMPOSED from the template rather than retyped, for the reason
+    //       the band case above records -- the reference's `STRING` at L372-L374 concatenates `'User '`,
+    //       the key `DELIMITED BY SPACE` and `' has been updated ...'`, and composing it here applies
+    //       the same delimiter rule. Comparing against a retyped literal would let a lost space pass.
+    expect(collectHandover()).toEqual({
+      message: formatMessageTemplate(MESSAGE_TEMPLATES.USER_HAS_BEEN_UPDATED, {
+        'SEC-USR-ID': SAVED_ROW.userId,
+      }),
+      severity: 'success',
+    });
+  }
+
+  /**
+   * Confirms a REFUSED write hands its refusal over too, at error severity.
+   * @returns {Promise<void>} Resolves once the retained refusal has been asserted.
+   */
+  async function handsARefusedWriteOver(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    identityTransport.updateUser.mockRejectedValue(refusedWith(500));
+    const { user } = await mountScreenFromTheBrowse();
+    await fetchThenEdit(user);
+
+    await pressPfKey(user, 'PFK03');
+
+    await waitForTheBrowseToBeReached();
+
+    // WHY : Assumptions: the refusal matters MORE than the acknowledgement, not less. No `ERR-FLG` test
+    //       sits between `UPDATE-USER-INFO` and `RETURN-TO-PREV-SCREEN` at L112 and L119, so this key
+    //       transfers whether the write committed or was refused -- and an operator who leaves on a
+    //       refused write, believing they saved, is the one the sentence is most needed by.
+    expect(collectHandover()).toEqual({
+      message: SHARED_MESSAGES.UNABLE_TO_UPDATE_USER,
+      severity: 'error',
+    });
+  }
+
+  /**
+   * Confirms the save key that STAYS on the screen hands nothing over.
+   * @returns {Promise<void>} Resolves once the absence of a handover has been asserted.
+   */
+  async function leavesNothingBehindWhenItDoesNotLeave(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    identityTransport.updateUser.mockResolvedValue(SAVED_ROW);
+    const { user } = await mountScreenWithDestination();
+    await fetchThenEdit(user);
+
+    await pressPfKey(user, 'PFK05');
+    await waitFor(
+      /**
+       * Waits until the acknowledgement is on this screen's own band.
+       * @returns {void} Nothing; throws until the sentence is present.
+       */
+      () => {
+        expect(messageBand()).toHaveTextContent(SAVED_ROW.userId);
+      },
+    );
+
+    // WHY : Assumptions: retaining on PF5 would be a defect and not merely redundant. The outcome is
+    //       collected by whichever screen mounts next and is delivered exactly once, so an uncollected
+    //       one left here would surface on the operator's next arrival at the browse and report a write
+    //       they were already told about -- which they cannot tell apart from a second write.
+    expect(
+      claimRetainedOutcome(USER_UPDATE_SAVE_CLAIM),
+      'a save that stays on the screen has already shown its outcome',
+    ).toBeUndefined();
+  }
+
+  /**
+   * ⚠️ Confirms a DEEP-LINKED arrival hands its sentence to the administrative menu it leaves for.
+   *
+   * ⚠️ Purpose: this is the arm the finding was reported about, and it is the arm that was open. An
+   * operator who reaches this route by its address names no calling program, so
+   * `app/cbl/COUSR02C.cbl` L113-L118 sends this key to `'COADM01C'` -- and until the administrative menu
+   * carried a collector, the retention guard admitted the browse alone and this operator saw a
+   * `200`-returning write followed by an empty band. The guard now admits both destinations, so the
+   * sentence survives the transfer on the path a deep link takes.
+   *
+   * Assumptions: the arrival is modelled by starting the history at the edit path with NO origin in its
+   * state, which is what a deep link produces and what selects the reference's own fallback.
+   * @returns {Promise<void>} Resolves once the retained sentence has been asserted.
+   */
+  async function handsTheSentenceToTheAdministrativeMenu(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    identityTransport.updateUser.mockResolvedValue(SAVED_ROW);
+    const { user } = await mountScreenWithDestination();
+    await fetchThenEdit(user);
+
+    await pressPfKey(user, 'PFK03');
+    await waitFor(
+      /**
+       * Waits until the administrative menu has been reached.
+       * @returns {void} Nothing; throws until the destination is mounted.
+       */
+      (): void => {
+        expect(screen.getByText(ADMIN_MENU_PROBE_TEXT)).toBeInTheDocument();
+      },
+    );
+
+    // WHY : Assumptions: the sentence is composed from the template rather than retyped, for the reason
+    //       the browse case above records -- the reference's `STRING` at L372-L374 concatenates `'User '`,
+    //       the key `DELIMITED BY SPACE` and `' has been updated ...'`.
+    expect(collectHandover()).toEqual({
+      message: formatMessageTemplate(MESSAGE_TEMPLATES.USER_HAS_BEEN_UPDATED, {
+        'SEC-USR-ID': SAVED_ROW.userId,
+      }),
+      severity: 'success',
+    });
+  }
+
+  /**
+   * Confirms nothing is left behind when the destination has no collector.
+   * @returns {Promise<void>} Resolves once the absence of a retained outcome has been asserted.
+   */
+  async function retainsNothingForADestinationThatCannotCollect(): Promise<void> {
+    identityTransport.getUser.mockResolvedValue(STORED_ROW);
+    identityTransport.updateUser.mockResolvedValue(SAVED_ROW);
+    /*
+     * WHY : ⚠️ Assumptions: the destination is reached through an ADMITTED origin that collects nothing,
+     *       for the reason {@link MainMenuOriginProbe} records. Both of this key's ordinary destinations
+     *       now collect, so a deep link no longer exercises this arm -- and an origin outside the closed
+     *       set falls back to the administrative menu, which collects too. The main menu is the only
+     *       shape left that reaches a non-collecting destination, which is exactly why the guard is still
+     *       written as an enumeration of collectors rather than as an approval of every destination.
+     */
+    const { user } = await mountScreenFromANonCollectingCaller();
+    await fetchThenEdit(user);
+
+    await pressPfKey(user, 'PFK03');
+    await waitFor(
+      /**
+       * Waits until the main-menu stand-in has been reached again.
+       * @returns {void} Nothing; throws until the destination is mounted.
+       */
+      (): void => {
+        expect(screen.getByText(MAIN_MENU_PROBE_TEXT)).toBeInTheDocument();
+      },
+    );
+
+    // WHY : ⚠️ Assumptions: this is the case that keeps the hand-over from becoming a WORSE defect than
+    //       the silence it fixes. A retained outcome is held until somebody takes it, so one retained for
+    //       a screen that never collects would be taken by the next screen that does -- the browse -- and
+    //       an operator arriving there minutes later would read an acknowledgement of a write they were
+    //       never shown, indistinguishable from one describing what they just did.
+    expect(
+      claimRetainedOutcome(USER_UPDATE_SAVE_CLAIM),
+      'an outcome no screen will collect must not be left in the store',
+    ).toBeUndefined();
+  }
+
+  it('hands the committed sentence to the screen it transfers to', handsTheCommittedSentenceOver);
+  it('hands a refused write over as well', handsARefusedWriteOver);
+  it('hands nothing over when it does not leave', leavesNothingBehindWhenItDoesNotLeave);
+  it('hands the sentence to the administrative menu too', handsTheSentenceToTheAdministrativeMenu);
+  it(
+    'leaves nothing behind for a destination that cannot collect it',
+    retainsNothingForADestinationThatCannotCollect,
+  );
+}
+
+describe('the exit key carries its own outcome across the transfer', saveHandoverCases);

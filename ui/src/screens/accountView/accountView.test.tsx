@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { ConfigProvider } from 'antd';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
@@ -38,7 +38,9 @@ import type { AccountViewResponse } from '../../api/accounts';
 import { ApiRequestError } from '../../api/client';
 import type { ApiError, FieldError } from '../../api/types';
 import { AppShell } from '../../layout/AppShell';
-import { fieldErrorId } from '../../layout/fieldHelp';
+import { PF_KEY_BAR_REGION_LABEL } from '../../layout/PfKeyBar';
+import { MESSAGE_BAND_TEST_ID } from '../../layout/MessageBand';
+import { BUSY_ANNOUNCEMENT_TEST_ID, fieldErrorId } from '../../layout/fieldHelp';
 import { RECORD_VIEW_BREAKPOINT, RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
 /*
  * WHY : Refactoring Rationale: the customer-block labels are imported from the message catalog and were
@@ -51,7 +53,10 @@ import { RECORD_VIEW_BREAKPOINT, RECORD_VIEW_COLUMNS } from '../../layout/record
 import {
   ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS,
   ACCOUNT_VIEW_HEADINGS,
+  PERSISTENT_FAILURE_REPORT_IT,
+  REQUEST_IN_PROGRESS,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
 } from '../../messages/messages';
 import { cardDemoTheme } from '../../theme/antdTheme';
 import { BREAKPOINT_TOKENS, FIELD_ERROR_TOKENS } from '../../theme/tokens';
@@ -253,6 +258,30 @@ async function readAnotherAccount(value: string): Promise<void> {
 }
 
 /**
+ * Waits for the two record blocks to be rendered, handing back no node captured while they settled.
+ *
+ * ⚠️ Purpose: a case must never hold a DOM node across an `await`, and four cases here did. Awaiting
+ * `findByText` for a record value resolves on the FIRST commit that paints the block, and the record
+ * blocks are painted twice: `Descriptions` groups its items into rows from the RESPONSIVE `column`
+ * this screen passes, and the responsive value resolves in an effect after the first paint, so the
+ * commit that follows regroups the items and replaces every label and value cell. The node the await
+ * resolved with is then detached, which fails `toBeInTheDocument` and answers `null` to
+ * `closest('tr')` -- both of which were observed as the record itself rendered correctly.
+ *
+ * Assumptions: this returns nothing on purpose. Handing back the awaited element is the very habit
+ * that produced the stale handles, so each case re-queries synchronously afterwards and reads the DOM
+ * as it stands rather than as it was mid-settle.
+ *
+ * Assumptions: it awaits the TABLE role rather than a fixture value, so one helper serves cases whose
+ * fixtures differ. Both blocks are `bordered` `Descriptions`, which the design system renders as a
+ * real table, and no other table exists on this screen.
+ * @returns {Promise<void>} Resolves once at least one record block has been painted.
+ */
+async function awaitRecordBlocks(): Promise<void> {
+  await screen.findAllByRole('table');
+}
+
+/**
  * A successful read leaves the information line on the reference's prompt.
  *
  * Assumptions: the response carries no information line, which is the only way this screen's fallback
@@ -269,7 +298,8 @@ async function keepsThePromptOnASuccessfulRead(): Promise<void> {
 
   await readAccount(VALID_ACCOUNT_ID);
 
-  expect(await screen.findByText('LOVELACE')).toBeInTheDocument();
+  await awaitRecordBlocks();
+  expect(screen.getByText('LOVELACE')).toBeInTheDocument();
   expect(screen.getByText(MESSAGES.WS_PROMPT_FOR_INPUT.text)).toBeInTheDocument();
   expect(screen.queryByText(MESSAGES.WS_INFORM_OUTPUT.text)).not.toBeInTheDocument();
 }
@@ -451,8 +481,8 @@ async function rendersBothAddressLinesUnderOneLabel(): Promise<void> {
 
   await readAccount(VALID_ACCOUNT_ID);
 
-  const label = await screen.findByText(ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.ADDRESS_LINE_1);
-  const row = label.closest('tr');
+  await awaitRecordBlocks();
+  const row = screen.getByText(ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.ADDRESS_LINE_1).closest('tr');
   expect(row).not.toBeNull();
   expect(row?.textContent).toContain('1 ANALYTICAL WAY');
   expect(row?.textContent).toContain('APT 4B');
@@ -468,8 +498,8 @@ async function omitsAnAbsentSecondAddressLine(): Promise<void> {
 
   await readAccount(VALID_ACCOUNT_ID);
 
-  const label = await screen.findByText(ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.ADDRESS_LINE_1);
-  const row = label.closest('tr');
+  await awaitRecordBlocks();
+  const row = screen.getByText(ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS.ADDRESS_LINE_1).closest('tr');
   expect(row?.textContent).toContain('1 ANALYTICAL WAY');
   // Assumptions: the row is asserted to hold the first line and NOT the word `null`, which is what a
   //   nullable member reaches the DOM as when it is rendered without being checked.
@@ -693,11 +723,187 @@ async function rendersOneColumnNarrowAndTwoWide(): Promise<void> {
 }
 
 /**
+ * Builds the failure the shared client raises when a request never reached the service.
+ *
+ * ⚠️ Assumptions: the document is SYNTHESISED with a null message, which is what the client does for
+ * these kinds -- there is no service answer to take words from. That null is why these cases exist: a
+ * screen reading only the document's message and then falling through to its own account-master
+ * sentence tells the operator their account does not exist.
+ *
+ * Assumptions: the failure is a real `ApiRequestError` so that the `transient` member is DERIVED by the
+ * client from the kind rather than asserted by this fixture. A hand-built object could claim any
+ * combination, including ones the client never produces, and the selection under test is exactly the
+ * one the client makes.
+ * @param {'TIMEOUT' | 'NETWORK'} kind - Which no-answer failure to build.
+ * @returns {ApiRequestError} The rejection to configure the read stub with.
+ */
+function noAnswer(kind: 'TIMEOUT' | 'NETWORK'): ApiRequestError {
+  const problem: ApiError = {
+    code: kind === 'TIMEOUT' ? 'CARDDEMO-UI-TIMEOUT' : 'CARDDEMO-UI-NETWORK',
+    secondaryCode: '',
+    message: null,
+    /*
+     * WHY : Assumptions: the severity is `CRITICAL`, which is what the client's own
+     *       `severityForStatus` returns for the absent status these kinds carry -- so the fixture
+     *       states the document the client actually synthesises rather than one it never would.
+     */
+    severity: 'CRITICAL',
+    subsystem: 'APPLICATION',
+    status: 0,
+    correlationId: 'UITESTACCT000000000AA',
+    path: '/api/v1/accounts/view',
+    timestamp: '2022-07-18 22:10:31.000000',
+    fieldErrors: [],
+    abend: null,
+  };
+
+  return new ApiRequestError(kind, 0, problem, kind);
+}
+
+/**
+ * Drives one read that never gets an answer and reports what the message channel then says.
+ * @param {'TIMEOUT' | 'NETWORK'} kind - Which no-answer failure to arrange.
+ * @param {string} sentence - The sentence the channel is expected to carry.
+ * @returns {Promise<void>} Resolves once the channel carries it.
+ */
+async function expectNoAnswerToRead(kind: 'TIMEOUT' | 'NETWORK', sentence: string): Promise<void> {
+  readStub().mockRejectedValue(noAnswer(kind));
+  render(renderAccountView('/account/view'));
+
+  await readAccount(VALID_ACCOUNT_ID);
+
+  const band = await screen.findByTestId(MESSAGE_BAND_TEST_ID);
+  await waitFor(
+    /**
+     * Re-reads the band until it carries the expected sentence.
+     * @returns {void} Nothing; the assertion carries the outcome.
+     */
+    (): void => {
+      expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).toHaveTextContent(sentence);
+    },
+  );
+  expect(band).not.toHaveTextContent(MESSAGES.DID_NOT_FIND_ACCT_IN_ACCTDAT.text);
+}
+
+/**
+ * A read that timed out is reported as a momentary condition, not as a missing account.
+ *
+ * ⚠️ Purpose: the screen stated `Did not find this account in account master file` for every rejection
+ * whose document carried no sentence, and a timeout is one of those -- so an operator whose request was
+ * simply never answered was told their account does not exist, and sent to check an identifier that was
+ * correct.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function aTimedOutReadIsReportedAsMomentary(): Promise<void> {
+  await expectNoAnswerToRead('TIMEOUT', TRANSIENT_FAILURE_TRY_AGAIN);
+}
+
+/**
+ * A read that reached no service at all is reported as a condition that will not clear on its own.
+ *
+ * ⚠️ Assumptions: this is the necessary pair to the timeout case, and the pair is what proves the screen
+ * SELECTS between the two sentences. Either alone would be satisfied by a screen that had replaced its
+ * old fallback with one new constant -- which would invite a repeat for a failure repeating cannot
+ * clear, or refuse one for a failure a second press would have got through.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function anUnreachableServiceIsReportedAsPersistent(): Promise<void> {
+  await expectNoAnswerToRead('NETWORK', PERSISTENT_FAILURE_REPORT_IT);
+}
+
+/**
+ * The live region carries the outstanding-request sentence while the read runs, and nothing after it.
+ *
+ * ⚠️ Purpose: the only sign this screen gave that it was working was the overlay over the record blocks,
+ * so an operator who could not see it had the screen go silent for the length of the request and then
+ * speak only its answer.
+ *
+ * ⚠️ Assumptions: the region is asserted PRESENT and empty before the read, which is not a formality.
+ * `ui/src/layout/fieldHelp.tsx` records that a live region must be in the accessibility tree before its
+ * text changes for the change to be announced, so a region mounted only while busy would announce
+ * nothing on the first read -- the one that matters most.
+ *
+ * Assumptions: the read is left UNRESOLVED for the middle assertion rather than raced against a
+ * deferred response, because this suite drives the transport through resolved stubs. A promise that
+ * never settles is the simplest way to hold the screen in the outstanding state, and the final
+ * assertion uses a separate settled read.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function announcesTheOutstandingReadWhileItRuns(): Promise<void> {
+  readStub().mockReturnValue(
+    new Promise(
+      /**
+       * Holds the read outstanding by never settling, so the busy state can be read.
+       * @returns {void} Nothing; the promise is deliberately left pending.
+       */
+      (): void => undefined,
+    ),
+  );
+  render(renderAccountView('/account/view'));
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toBeEmptyDOMElement();
+
+  await readAccount(VALID_ACCOUNT_ID);
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  readStub().mockResolvedValue({ account: accountView(null, 'APT 4B'), revision: 'W/"1"' });
+  await readAnotherAccount(VALID_ACCOUNT_ID);
+  await awaitRecordBlocks();
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toBeEmptyDOMElement();
+}
+
+/**
+ * The screen advertises no action that changes anything, and its legend says so.
+ *
+ * ⚠️ Purpose: this screen is read-only in the reference -- `app/cbl/COACTVWC.cbl` admits exactly two
+ * attention identifiers at L307 to L308, one to read and one to leave -- and the shared legend now
+ * emphasises a control by the CONSEQUENCE of its action rather than by which identifier carries it. A
+ * primary-emphasised control here would tell an operator that pressing it commits something, which on
+ * this screen is never true.
+ *
+ * ⚠️ Assumptions: the assertion is over EVERY control the legend paints rather than over the one key
+ * this screen names, so it holds against a later binding as well. That is what makes it worth having:
+ * declaring `read-only` on the two current keys changes no pixel today, because the shared fallback
+ * already resolves both to the plain treatment, and this is the guard that would fail if a mutating key
+ * were ever added to a read-only screen.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theLegendEmphasisesNothingOnAReadOnlyScreen(): Promise<void> {
+  readStub().mockResolvedValue({ account: accountView(null, 'APT 4B'), revision: 'W/"1"' });
+  render(renderAccountView('/account/view'));
+
+  const legend = await screen.findByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL });
+  const painted = within(legend).getAllByRole('button');
+
+  expect(painted.length).toBeGreaterThan(0);
+  painted.forEach(
+    /**
+     * Asserts one painted control carries neither the primary nor the danger treatment.
+     * @param {HTMLElement} control - One control the legend paints.
+     * @returns {void} Nothing; the assertion carries the outcome.
+     */
+    (control: HTMLElement): void => {
+      expect(control.className).not.toContain('ant-btn-primary');
+      expect(control.className).not.toContain('ant-btn-dangerous');
+    },
+  );
+}
+
+/**
  * Registers the account-view cases.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
 function accountViewCases(): void {
   it('keeps the reference prompt on a successful read', keepsThePromptOnASuccessfulRead);
+  it('reports a timed-out read as momentary', aTimedOutReadIsReportedAsMomentary);
+  it('reports an unreachable service as persistent', anUnreachableServiceIsReportedAsPersistent);
+  it('announces the outstanding read while it runs', announcesTheOutstandingReadWhileItRuns);
+  it(
+    'emphasises no legend control on a read-only screen',
+    theLegendEmphasisesNothingOnAReadOnlyScreen,
+  );
   it('emits no sentence when the exit key is pressed', emitsNoSentenceOnExit);
   it(
     'ignores an account identifier supplied in the query string',

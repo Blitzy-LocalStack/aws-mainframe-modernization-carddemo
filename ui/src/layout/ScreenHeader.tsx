@@ -151,7 +151,7 @@ import type { CSSProperties, ReactElement } from 'react';
 
 import { APP_ORGANISATION_TITLE_DISPLAY, APP_TITLE_DISPLAY } from '../messages/messages';
 import { BMS_TEXT_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
-import { APP_TITLE_HEADING_LEVEL, screenHeadingSizeStyle } from './ScreenTitle';
+import { APP_TITLE_HEADING_LEVEL, appTitleSizeStyle } from './ScreenTitle';
 
 /**
  * The four status-line prompt words the band paints beside its value slots,
@@ -437,6 +437,68 @@ export interface ScreenHeaderProps {
 }
 
 /**
+ * Props for {@link AppTitleHeading}.
+ */
+export interface AppTitleHeadingProps {
+  /**
+   * Identifier to place on the heading element, or omitted when nothing labels itself by it.
+   *
+   * Assumptions: this exists for {@link ScreenHeader}, whose band is a `<section>` labelled by
+   * this heading through `aria-labelledby`. A caller that renders the heading outside such a
+   * section omits it, because an `id` nothing references is dead weight a later reader has to
+   * check.
+   */
+  readonly id?: string | undefined;
+}
+
+/**
+ * Paints the application's own name as the document's rank-one heading.
+ *
+ * Purpose: the brand is the identity of the APPLICATION and not of whichever screen is mounted, so
+ * it is the one heading every surface carries -- including the surfaces that deliberately delegate
+ * no screen identity of their own. It is extracted here rather than written twice because
+ * `ui/src/layout/AppShell.tsx` renders it directly on those surfaces, and a second copy of the
+ * markup would let the rank, the size or the colour of the two drift apart silently.
+ *
+ * ⚠️ Refactoring Rationale: this used to be inline in {@link ScreenHeader} and therefore reachable
+ * only through a screen-identity publication. A browser measurement of the not-found surface, which
+ * publishes none, found its heading outline to be `['H4:Screen not available']` -- a document with
+ * no rank-one heading at all, so an operator navigating by heading level met a level-four heading
+ * as the highest thing on the page.
+ * @param {AppTitleHeadingProps} props the component's props, destructured below
+ * @returns {ReactElement} The heading, at {@link APP_TITLE_HEADING_LEVEL}, sized and coloured from
+ *   the token bridge.
+ *
+ * Exceptions or errors: none are raised. The component reads the enclosing theme and nothing else.
+ */
+export function AppTitleHeading(props: AppTitleHeadingProps): ReactElement {
+  const { id } = props;
+  /*
+   * Assumptions: `cssVar` rather than `token`, for the reason recorded at length on
+   * {@link ScreenHeader}'s own read of the same hook -- the reference form keeps the element on
+   * the CSS-variable surface antd 6 themes through, where a resolved value would opt it out.
+   */
+  const { cssVar } = theme.useToken();
+
+  return (
+    <Typography.Title
+      level={APP_TITLE_HEADING_LEVEL}
+      /*
+       * Assumptions: the prop is SPREAD conditionally rather than passed as `id={id}`, because
+       * `ui/tsconfig.json` enables `exactOptionalPropertyTypes` and the component's own `id` is
+       * declared `string` rather than `string | undefined`. Passing the absent case explicitly is
+       * a type error, and writing an empty string instead would put a real, empty `id` attribute
+       * on the element for an `aria-labelledby` nothing carries.
+       */
+      {...(id === undefined ? {} : { id })}
+      style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.YELLOW], ...appTitleSizeStyle(cssVar) }}
+    >
+      {APP_TITLE_DISPLAY}
+    </Typography.Title>
+  );
+}
+
+/**
  * Renders the shared two-row title band above a screen's content.
  *
  * The band reproduces the measured rows 1 and 2 of the base mapsets: the
@@ -504,6 +566,28 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
   // 4.5:1 for normal text. The text-grade shade of the same ramp measures 6.16:1, so the
   // band keeps its measured hue family and becomes readable to the standard. tokens.ts
   // records the per-role numbers in BMS_TEXT_CONTRAST_AUDIT.
+  // Assumptions: the four PROMPT words take the same blue role as the values beside them, and this
+  // is the measured source colour rather than an oversight worth correcting. A rendering review
+  // observed `rgb(9,88,217)` on `Tran:`, `Prog:`, `Date:` and `Time:` and proposed the secondary
+  // grade instead, on the ground that NEUTRAL is the bridge's mapping for a label. The mapsets do not
+  // support that reading: in `app/bms/COACTVW.bms` the `Tran:` prompt field is L29-L33 with
+  // `COLOR=BLUE` at L30 and its `TRNNAME` value is L34-L36 with `COLOR=BLUE` at L35, and the same
+  // pairing holds for `Date:`/`CURDATE` at L42-L51, `Prog:`/`PGMNAME` at L52-L60 and
+  // `Time:`/`CURTIME` at L65-L73 - eight fields, one operand. All twenty mapsets that declare these
+  // prompts declare them BLUE; `app/bms/COSGN00.bms` differs only in declaring `LENGTH=6`. So the
+  // source paints prompt and value alike, AAP section 0.3.3 maps BLUE onto the primary role, and
+  // repainting the prompts grey would introduce a distinction the baseline does not draw.
+  //
+  // Assumptions: the bridge's NEUTRAL row is honoured where the source actually declares NEUTRAL -
+  // the row-4 screen caption, which `ui/src/layout/ScreenTitle.tsx` resolves to the secondary text
+  // grade for all eighteen mapsets that carry one. That is the element the review's expectation
+  // belongs to, and it is where the mapping is now asserted.
+  //
+  // Trade-offs: prompt and value are then distinguished by FONT alone - the value slots take the
+  // fixed-pitch face below. That is thinner than a colour difference would be, and it is the
+  // baseline's own arrangement: on a 3270 the two were told apart by position on a character grid,
+  // which design gap G1 gives up, so the face is what remains. It is a real channel rather than a
+  // decorative one, since the values are fixed-width data and the prompts are prose.
   const promptStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE] };
 
   // Assumptions: the value slots are rendered in the code face because the
@@ -538,26 +622,35 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
   const appTitleStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.YELLOW] };
 
   return (
-    // Alternatives Considered: a bare <header> with aria-labelledby, and a
-    // role="banner". Both were rejected, and the EXPLICIT role is what makes the
-    // outcome the same under both of this component's mount arrangements. Per ARIA
-    // in HTML the implicit mapping of a <header> depends on where it sits: on the
-    // three screens that compose this band inside their own body it is nested in
-    // antd's <main>, which maps it to a generic role and exposes no landmark at
-    // all, while on the eighteen delegating screens the shell renders it inside
-    // its own <header>, whose nearest sectioning root is still <body> - so the
-    // implicit mapping there would be a SECOND banner in the document. Neither is
-    // wanted, and role="region" overrides both: banner is the page-level
-    // introductory landmark and should appear once per document, whereas this band
-    // is per screen. `appShellIntegration.test.tsx` asserts exactly one banner in
-    // the frame, which is the assertion this attribute keeps true.
-    // A region is only exposed to assistive technology when it is named - which
-    // aria-labelledby supplies from the title heading below. The header element is
-    // kept underneath so the DOM still says what the block is to anyone reading or
-    // querying it.
+    // ⚠️ Refactoring Rationale: this band is a <section> now, and it was a <header> carrying an
+    // explicit role="region". The REASONING for wanting a region is unchanged and is preserved
+    // below; what changed is that the element and the role no longer contradict each other. Per
+    // ARIA in HTML a <header> permits only group, none, presentation and doc-footnote, so
+    // role="region" on one is an invalid combination - axe-core reports it as `aria-allowed-role`
+    // and the Lighthouse agentic-browsing audit failed on it. A <section> maps to region
+    // IMPLICITLY once it is named, which aria-labelledby below does, so the outcome the previous
+    // arrangement was reaching for arrives without an overriding attribute at all.
+    //
+    // Assumptions: the outcome is identical under both of this component's mount arrangements,
+    // which is why the element could be changed rather than the role dropped. On the three screens
+    // that compose this band inside their own body it sits in antd's <main>; on the eighteen
+    // delegating screens the shell renders it inside its own <header>. A named <section> is a
+    // region in both, where the <header> it replaces mapped to generic in the first and would have
+    // mapped to a SECOND banner in the second - banner being the page-level introductory landmark,
+    // which should appear once per document, whereas this band is per screen.
+    // `appShellIntegration.test.tsx` asserts exactly one banner in the frame, which this keeps true.
+    //
+    // Alternatives Considered: keeping the <header> and dropping the role, which is the other fix
+    // the audit accepts. Rejected because it gives up the named landmark on all twenty-one screens:
+    // inside <main> the element would expose nothing at all, so an operator navigating by landmark
+    // would lose the title band entirely on the three self-composing screens.
+    //
+    // Alternatives Considered: a plain <div role="region">. Rejected because the implicit mapping
+    // is the stronger statement - a <div> needs the attribute to be anything, so the same defect
+    // could return by deleting one attribute, where <section> cannot stop being a region while it
+    // has a name.
     <Flex
-      component="header"
-      role="region"
+      component="section"
       aria-labelledby={titleId}
       vertical
       // Assumptions: gap takes antd's semantic size rather than a number, so the
@@ -658,13 +751,16 @@ export function ScreenHeader(props: ScreenHeaderProps): ReactElement {
              * measures 1.90:1 as text; the reasoning for the snap is recorded at
              * that style's declaration.
              */}
-            <Typography.Title
-              level={APP_TITLE_HEADING_LEVEL}
-              id={titleId}
-              style={{ ...appTitleStyle, ...screenHeadingSizeStyle(cssVar) }}
-            >
-              {APP_TITLE_DISPLAY}
-            </Typography.Title>
+            {/*
+              Refactoring Rationale: the SIZE now comes from `appTitleSizeStyle` rather than from
+              `screenHeadingSizeStyle`, which is the caption's entry. Both elements read the caption
+              entry before, so the band and the caption beneath it rendered at one size - measured
+              `20px/600` for both on all nine screens that paint two headings - and the rank this
+              element carries was invisible. The two helpers now differ by one step of the design
+              system's heading scale, so the visual hierarchy states what the outline states. The
+              rank moved with it, from three to one, for the reason recorded on the constant.
+            */}
+            <AppTitleHeading id={titleId} />
           </Flex>
         </Col>
         <Col span={24} md={6}>

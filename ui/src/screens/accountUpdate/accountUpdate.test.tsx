@@ -41,7 +41,11 @@ import type {
 import { AppShell } from '../../layout/AppShell';
 import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../../layout/MessageBand';
 import { fieldErrorId } from '../../layout/fieldHelp';
-import { STATUS_MESSAGES } from '../../messages/messages';
+import {
+  PERSISTENT_FAILURE_REPORT_IT,
+  STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
+} from '../../messages/messages';
 import { cardDemoTheme } from '../../theme/antdTheme';
 import { FIELD_ERROR_TOKENS } from '../../theme/tokens';
 import {
@@ -808,6 +812,106 @@ async function clearsTheChannelOnASuccessfulRead(): Promise<void> {
 }
 
 /**
+ * Builds the failure the shared client raises when a request never reached the service.
+ *
+ * ⚠️ Assumptions: the problem document is SYNTHESISED with a null message, which is what the client
+ * itself does for these kinds -- there is no service answer to take words from. That null is the whole
+ * reason these two cases exist: a screen that reads only the document's message and then falls through
+ * to its own not-found sentence tells the operator their account does not exist.
+ * @param {'TIMEOUT' | 'NETWORK'} kind - Which no-answer failure to build; the first is momentary and
+ *   the second is not, which is the distinction the two sentences turn on.
+ * @returns {ApiRequestError} The rejection to configure the read stub with.
+ */
+function noAnswer(kind: 'TIMEOUT' | 'NETWORK'): ApiRequestError {
+  const problem: ApiError = {
+    code: kind === 'TIMEOUT' ? 'CARDDEMO-UI-TIMEOUT' : 'CARDDEMO-UI-NETWORK',
+    secondaryCode: '',
+    message: null,
+    /*
+     * WHY : Assumptions: the severity is `CRITICAL`, which is what the client's own
+     *       `severityForStatus` returns for the absent status these kinds carry -- so the fixture
+     *       states the document the client actually synthesises rather than one it never would.
+     */
+    severity: 'CRITICAL',
+    subsystem: 'APPLICATION',
+    status: 0,
+    correlationId: 'UITESTACCT000000000AA',
+    path: '/api/v1/accounts/view',
+    timestamp: '2022-07-18 22:10:31.000000',
+    fieldErrors: [],
+    abend: null,
+  };
+
+  return new ApiRequestError(kind, 0, problem, kind);
+}
+
+/**
+ * Reads the message channel once it carries a sentence, which is what a failed read paints.
+ * @param {string} sentence - The sentence the channel is expected to carry.
+ * @returns {Promise<void>} Resolves once the channel carries it.
+ */
+async function waitForTheMessageChannel(sentence: string): Promise<void> {
+  await waitFor(
+    /**
+     * Asserts the channel carries the sentence.
+     * @returns {void} Nothing; the assertion carries the outcome.
+     */
+    (): void => {
+      expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).toHaveTextContent(sentence);
+    },
+  );
+}
+
+/**
+ * Drives one read that the transport never gets an answer for.
+ * @param {'TIMEOUT' | 'NETWORK'} kind - Which no-answer failure to arrange.
+ * @returns {Promise<void>} Resolves once the read has settled.
+ */
+async function readWithNoAnswer(kind: 'TIMEOUT' | 'NETWORK'): Promise<void> {
+  readStub().mockRejectedValueOnce(noAnswer(kind));
+  render(renderAccountUpdate());
+
+  await userEvent.type(screen.getByLabelText(/account number/iu), VALID_ACCOUNT_ID);
+  await userEvent.keyboard('{Enter}');
+}
+
+/**
+ * A read that timed out is reported as a momentary condition, not as a missing account.
+ *
+ * ⚠️ Purpose: the screen used to state `Did not find this account in account card xref file` for every
+ * failure that carried no service sentence, and a timeout is one of those -- so an operator whose
+ * request simply did not get answered was told their account does not exist, and sent to check an
+ * identifier that was correct.
+ *
+ * ⚠️ Assumptions: the not-found sentence is asserted ABSENT alongside the expected one. The band holds
+ * one sentence at a time, so a screen that appended rather than replaced would satisfy a positive
+ * assertion alone while still making the false statement.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function aTimedOutReadIsReportedAsMomentary(): Promise<void> {
+  await readWithNoAnswer('TIMEOUT');
+
+  await waitForTheMessageChannel(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).not.toHaveTextContent(ACCOUNT_NOT_FOUND);
+}
+
+/**
+ * A read that reached no service at all is reported as a condition that will not clear on its own.
+ *
+ * ⚠️ Assumptions: this case is the necessary pair to the timeout one, and the pair is what proves the
+ * screen SELECTS. Either sentence alone would be satisfied by a screen that had simply replaced the
+ * not-found fallback with one new constant -- which would invite a retry for a failure repeating cannot
+ * clear, or refuse one for a failure a second press would have got through.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function anUnreachableServiceIsReportedAsPersistent(): Promise<void> {
+  await readWithNoAnswer('NETWORK');
+
+  await waitForTheMessageChannel(PERSISTENT_FAILURE_REPORT_IT);
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).not.toHaveTextContent(ACCOUNT_NOT_FOUND);
+}
+
+/**
  * Registers the account-update cases.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
@@ -834,6 +938,8 @@ function accountUpdateCases(): void {
   it('refuses a second enter while checking', refusesASecondEnterWhileChecking);
   it('refuses a zeroed and a short filter', refusesAZeroedAndAShortFilter);
   it('clears the message channel on a successful read', clearsTheChannelOnASuccessfulRead);
+  it('reports a timed-out read as momentary', aTimedOutReadIsReportedAsMomentary);
+  it('reports an unreachable service as persistent', anUnreachableServiceIsReportedAsPersistent);
 }
 
 beforeEach(resetTransport);

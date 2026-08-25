@@ -5,9 +5,32 @@
  * What this module holds
  * ----------------------
  * One delivered page, the two sealed cursors addressing the pages either side of it, the ordinal of
- * the page on display, whether a request is outstanding, how the last one ended, and the two
- * imperative steps a screen binds to its backward and forward keys. Nothing else: no row is
- * formatted, no sentence is chosen, no keyboard event is bound and no request target is addressed.
+ * the page on display, whether a request is outstanding, how the last one ended -- as a problem
+ * document and as the transport's own classification of it -- and the two imperative steps a screen
+ * binds to its backward and forward keys. Nothing else: no row is formatted, no sentence is chosen, no
+ * keyboard event is bound and no request target is addressed.
+ *
+ * What one page turn is, and why it is awaitable and single-flighted
+ * -----------------------------------------------------------------
+ * Refactoring Rationale: the three steps returned nothing, and a review measured both consequences on
+ * live browses. A caller could not tell when a turn ended, so the only busy affordance any browse had
+ * was the table's own overlay and the pressed key stayed indistinguishable from idle for the whole
+ * flight; and nothing suppressed a repeat, so two presses of one forward key 400 ms apart produced two
+ * identical requests and left the ordinal reading one page beyond the rows on display, while three
+ * presses of a search control produced three identical posts. The two halves are fixed together and
+ * separately: every step now resolves when its turn has SETTLED into this browse, and the dispatch is
+ * additionally routed through `withoutConcurrentDuplicate` so that an identical turn already in flight
+ * is JOINED rather than re-issued. The second half is what protects a screen that never adopts the
+ * first -- adoption is per screen and will not be simultaneous.
+ *
+ * Assumptions: a caller that discards the returned promise behaves exactly as it did when the steps
+ * returned nothing. Both outcomes of a read are handled inside the settlement and applied through the
+ * reducer, so the promise resolves either way and never rejects -- there is no rejection for a
+ * discarding caller to leave unhandled, and no outcome it fails to receive.
+ *
+ * Assumptions: what counts as the SAME turn is stated once, at {@link coalescingKeyOf}, because getting
+ * it wrong in either direction is a defect: too narrow and the duplicate survives, too wide and a
+ * legitimate turn is silently suppressed and the browse strands.
  *
  * Refactoring Rationale: the reference opens a browse with STARTBR, walks it with READNEXT and
  * READPREV, closes it with ENDBR, and carries its position across the screen turn in the passed
@@ -60,10 +83,20 @@
  * performs no numeric conversion, no rounding, no locale or date rendering, and no sort, filter or
  * other rearrangement of the rows it was handed. Formatting belongs to the screens.
  *
- * Assumptions: how a consumer wires this up. A screen renders an antd `Table` with `pagination`
- * turned off, because the component's built-in row-counting pager is exactly the mechanism rejected
- * above; it binds its backward control's `disabled` to `hasPrev` and its forward control's to
- * `hasNext`; and it reaches this module's two steps from its own key bindings.
+ * Assumptions: how a consumer wires this up, and ⚠️ this paragraph is CORRECTED. A screen renders an
+ * antd `Table` with `pagination` turned off, because the component's built-in row-counting pager is
+ * exactly the mechanism rejected above; it reaches this module's two steps from its own key bindings;
+ * and at a boundary it shows its own verbatim sentence chosen from {@link PageBoundary}. What this
+ * paragraph said before was that a screen binds its backward control's `disabled` to `hasPrev` and its
+ * forward control's to `hasNext`, and that instruction was wrong on the oracle: not one of the five
+ * source programs refuses a paging key -- each answers it and re-sends the screen with a message, at
+ * the lines cited on {@link PageBoundary} -- so a greyed key replaces a verbatim string that
+ * transformation rule T8 requires with the unmapped-key message `ui/src/layout`'s function-key hook
+ * emits for a disabled binding. A review of the shipped build measured the consequence: five browses,
+ * five different boundary idioms, one of them greying both keys and so showing "invalid key" where the
+ * reference shows "You are already at the top of the page...", and the zero-row case answered on some
+ * browses and silent on others. The two availability members remain what a STEP is guarded on -- they
+ * are what makes the step a no-op -- and {@link PageBoundary} is what a SENTENCE is chosen from.
  *
  * Alternatives Considered: binding the two paging keys in here, which is the shorter route because
  * the reference dispatches them directly -- `app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl` L239
@@ -81,7 +114,8 @@
 
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 
-import { isApiError, isApiRequestError } from '../api/client';
+import { isApiError, isApiRequestError, withoutConcurrentDuplicate } from '../api/client';
+import type { ApiRequestError } from '../api/client';
 import type { ApiError, PageDirection, PageResponse } from '../api/types';
 
 /**
@@ -92,6 +126,88 @@ import type { ApiError, PageDirection, PageResponse } from '../api/types';
  * a bare number in the guards below so that each guard reads as the reference's own test.
  */
 const FIRST_PAGE_NUMBER = 1;
+
+/**
+ * Prefix that keeps this module's single-flight keys apart from every other user of the shared guard.
+ *
+ * Assumptions: `withoutConcurrentDuplicate` in `ui/src/api/client.ts` holds ONE module-scoped map, and
+ * the deletion screens already key it by method and target -- `DELETE /auth/users/USER0100`. A browse
+ * turn is neither a method nor a target, so it is prefixed rather than spelled the same way: two
+ * different kinds of work sharing one map must not be able to compose the same string, or a page turn
+ * would join a deletion and be answered by its outcome.
+ */
+const COALESCING_KEY_PREFIX = 'BROWSE';
+
+/**
+ * The cursor stand-in used in a key when the turn is an opening read.
+ *
+ * Assumptions: a literal is needed because `null` and the empty string are both spellings a cursor
+ * could in principle take, and the key is a string comparison -- so the opening read needs a token no
+ * sealed cursor can equal. Parenthesised for that reason: the services seal base64url tokens, which
+ * cannot contain a parenthesis.
+ */
+const OPENING_READ_POSITION = '(opening)';
+
+/**
+ * How many browses have been mounted in this document, which is where a browse identity comes from.
+ *
+ * Alternatives Considered: `useId`, which React provides for exactly this shape of problem and needs no
+ * module state. Rejected because its value is derived from the component's position in the tree, so two
+ * mounts of the same screen at the same position across a route change could reuse one -- and reuse is
+ * the single thing this counter exists to rule out. A monotonic counter cannot repeat within a
+ * document's lifetime, which is the whole of what the key needs from it.
+ */
+let browsesMounted = 0;
+
+/**
+ * Claims an identity no other mounted browse in this document holds.
+ *
+ * Purpose: the shared single-flight guard is keyed by string in one module-scoped map, so two browses
+ * that composed the same key would collapse into one read. Two list screens mounted together -- or one
+ * screen holding two browses -- both take their opening turn with no cursor and the forward direction,
+ * so without an identity in the key the second would be handed the first's page and would never issue
+ * a read of its own.
+ * @returns {number} The claimed identity, distinct from every identity claimed before it.
+ */
+function claimBrowseIdentity(): number {
+  browsesMounted += 1;
+  return browsesMounted;
+}
+
+/**
+ * Composes the key one page turn is coalesced under.
+ *
+ * Purpose: ⚠️ this states which turns count as THE SAME TURN, which is the whole of the coalescing
+ * decision. Two turns collapse only when all four parts match: the same mounted browse, the same
+ * generation of the set it is browsing, the same direction, and the same position read from.
+ *
+ * Assumptions: so two forward steps from one trailing cursor ARE the same turn and the second joins the
+ * first -- that is the measured defect, where three presses of a forward key produced three identical
+ * requests. And a forward step and a backward step from the same cursor are NOT the same turn, because
+ * they read opposite ways from one position and answer with different pages; suppressing either would
+ * strand the browse. Nor is a turn of one browse ever the same as a turn of another, nor a turn taken
+ * after the set changed identity the same as one taken before, which is what {@link claimBrowseIdentity}
+ * and the epoch supply.
+ *
+ * Assumptions: the cursor goes LAST and every other part is a number or one of two direction words, so
+ * no two distinct turns can compose one key by running a delimiter together with a neighbouring value.
+ * An opaque cursor may hold anything, and putting it anywhere but last would make that a real risk.
+ * @param {number} identity - Which mounted browse is taking the turn.
+ * @param {number} epoch - Which generation of that browse's set the turn belongs to; see the epoch ref
+ *   in {@link usePagedQuery}.
+ * @param {PageDirection} direction - Direction the cursor is replayed in.
+ * @param {string | null} cursor - Position the turn reads from, or `null` for an opening read.
+ * @returns {string} The key this turn is coalesced under.
+ */
+function coalescingKeyOf(
+  identity: number,
+  epoch: number,
+  direction: PageDirection,
+  cursor: string | null,
+): string {
+  const position = cursor ?? OPENING_READ_POSITION;
+  return `${COALESCING_KEY_PREFIX} ${String(identity)}.${String(epoch)} ${direction} ${position}`;
+}
 
 /**
  * The two values one browse request carries.
@@ -209,6 +325,64 @@ export interface UsePagedQueryOptions<T> {
 }
 
 /**
+ * Where the page on display sits in the browse, as one value.
+ *
+ * Purpose: ⚠️ this is the single derivation of boundary state, and it exists because five screens had
+ * five. A review of the shipped build found the two availability members composed differently on each
+ * browse -- one decided a backward step from the page ordinal, one from `hasPrev`, one from the cursor
+ * pair, and the zero-row case was expressed on some screens and not on others -- so the same browse
+ * state produced four different answers to "am I at the top?". Every one of those derivations was
+ * CORRECT; what diverged was the idiom, and an idiom that diverges five ways is one a sixth screen
+ * cannot copy. This member states the position once so a screen branches on a named state instead of
+ * re-deriving one.
+ *
+ * Assumptions: the five states are exhaustive and mutually exclusive, and the dead end is one of them
+ * rather than a flag beside them. A browse with nothing on display and nowhere to go is not "the first
+ * of several pages with nothing on it": neither step is expressible, no ordinal is worth showing, and
+ * the sentence a screen shows is neither boundary sentence. Folding it in is what stops each screen
+ * deciding for itself whether that counts as a boundary -- which is how one browse came to leave both
+ * paging keys offering a step with no rows loaded while another greyed both.
+ *
+ * Assumptions: ⚠️ what a screen does with this is to CHOOSE A SENTENCE, not to disable a key, and that
+ * is taken from the reference rather than preferred. None of the five source programs refuses a paging
+ * key: each answers it and re-sends the screen with a message attached -- `app/cbl/COUSR00C.cbl` L248
+ * to L254 and L271 to L277, `app/cbl/COTRN00C.cbl` L245 to L251 and L268 to L274,
+ * `app/app-authorization-ims-db2-mq/cbl/COPAUS0C.cbl` L380 to L384 and L408 to L411,
+ * `app/cbl/COCRDLIC.cbl` L901 to L903, and
+ * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L766 to L767 and L780 to L781. A greyed key
+ * therefore loses a verbatim string transformation rule T8 requires, and worse, `ui/src/layout`'s
+ * function-key hook answers a disabled binding with the unmapped-key message -- so disabling a
+ * backward key on the opening page shows "invalid key" exactly where the reference shows "You are
+ * already at the top of the page...". The step itself is already a documented no-op here, so nothing
+ * needs disabling to stay safe.
+ *
+ * Alternatives Considered: publishing a `hasPrevious` member on the wire envelope so the server
+ * answered this. Refused on two grounds. It is not what the reference does -- every one of the
+ * programs cited above decides a backward step from its own ordinal with no read issued to check --
+ * and AAP section 0.4.4 fixes the envelope at `items`, `firstKey`, `lastKey` and `hasNext`, which the
+ * seven published contracts implement and `ui/src/api/contracts.test.ts` holds them to. Backward
+ * availability is a client derivation by design, and this is where it is derived.
+ */
+export type PageBoundary =
+  /**
+   * Nothing on display and nowhere to go: no rows, no further page and no page behind.
+   *
+   * Assumptions: this is narrower than "no rows", and the difference matters. A page can carry no rows
+   * while the browse continues on both sides -- the reference filters AFTER reading a screen's worth,
+   * at `app/cbl/COCRDLIC.cbl` L1382, and `PageResponse.ofFilteredEmpty` reproduces it -- and such a
+   * page reports whichever positional state its cursors support, not this one.
+   */
+  | 'EMPTY'
+  /** The only page: rows are on display and neither step is expressible. */
+  | 'ONLY'
+  /** The opening page of several: a forward step is expressible, a backward one is not. */
+  | 'FIRST'
+  /** Between two pages: both steps are expressible. */
+  | 'INTERIOR'
+  /** The final page of several: a backward step is expressible, a forward one is not. */
+  | 'LAST';
+
+/**
  * The browse as a screen observes it.
  * @template T The row type of one page, as supplied to {@link UsePagedQueryOptions}.
  */
@@ -284,6 +458,24 @@ export interface UsePagedQueryResult<T> {
    * to L770, then moves the leading cursor and decrements at L782 to L784.
    */
   readonly pageNumber: number;
+  /**
+   * Where this page sits in the browse, as one named state.
+   *
+   * Assumptions: this is derived from `items`, `hasNext` and `hasPrev` and adds no information beyond
+   * them -- deliberately, because the defect it answers was not missing information but five different
+   * expressions of the same information. A screen showing a boundary sentence branches on this; a
+   * screen showing a page ordinal reads {@link UsePagedQueryResult.pageNumber}; a screen wanting to
+   * know whether one step is expressible reads {@link UsePagedQueryResult.hasNext} or
+   * {@link UsePagedQueryResult.hasPrev}. Those three uses were previously served by
+   * each screen composing its own predicate, which is how `EMPTY` came to be handled on some browses
+   * and not on others.
+   *
+   * Trade-offs: it is published as well as the two booleans rather than instead of them, because the
+   * booleans are what a step is guarded on and what an availability test asserts, and collapsing them
+   * into this would force every guard to compare against a set of names. The redundancy is stated
+   * here so nobody removes one half believing it duplicates the other.
+   */
+  readonly boundary: PageBoundary;
   /** How many rows the screen has room for, as supplied, so it renders that many row positions. */
   readonly pageSize: number;
   /** Whether a read is outstanding. */
@@ -321,6 +513,36 @@ export interface UsePagedQueryResult<T> {
    */
   readonly error: ApiError | null;
   /**
+   * The shared client's classified failure from the most recent read, or `null`.
+   *
+   * Purpose: ⚠️ a browse could not tell a retryable transport fault from a refusal the operator has to
+   * act on, and two reviews measured the consequence from opposite ends. One found a timeout, a dropped
+   * connection and a 500 rendered identically on every route, with one screen describing a 404 as a
+   * temporary availability problem because nothing on the failure said otherwise. The other found a
+   * conflict on a save reported as "the record does not exist". The information existed the whole time:
+   * `ui/src/api/client.ts` classifies every failure into one of four kinds and carries
+   * `transient` and `repeatable` beside it, and this module already narrowed the rejection to that type
+   * in order to read {@link UsePagedQueryResult.error} out of it -- and then dropped everything else.
+   *
+   * Assumptions: this sits BESIDE `error` rather than replacing or re-typing it, and that is deliberate
+   * rather than cautious. `error` is the flattened problem document a screen renders a sentence and its
+   * per-field entries from, five screens already read it, and it is populated on routes this member is
+   * not -- a reader that rejects with a bare document supplies one and no classified failure. Re-typing
+   * it would have made every existing consumer reach one member deeper to reach the sentence it already
+   * has, for no gain to any of them.
+   *
+   * Assumptions: `null` therefore means one of three things -- nothing has failed, the read rejected
+   * with something that is not one of the shared client's failures (a reader's own `Error`, or a bare
+   * document), or this module refused the delivered page itself. In the last case no service failed at
+   * all, so there is no kind to report and none is invented; `isFailed` remains the flag to branch on.
+   *
+   * Assumptions: a screen reads this through the exported predicates rather than comparing `kind`
+   * itself -- `isTransientFailure`, `isRepeatableFailure` and `isConflictFailure` in
+   * `ui/src/api/client.ts` -- for the reason those predicates were exported: a status list copied into
+   * each screen is a status list one screen will omit an entry from.
+   */
+  readonly failure: ApiRequestError | null;
+  /**
    * Reads the page after the one on display, which is the forward paging key's action.
    *
    * Assumptions: a call made while `hasNext` is false, with no trailing cursor to read from, or while
@@ -330,9 +552,23 @@ export interface UsePagedQueryResult<T> {
    * at `app/cbl/COCRDLIC.cbl` L486 to L487 and at
    * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L766 to L767 and answers the refused step by
    * re-sending the screen with a sentence attached.
-   * @returns {void} Nothing; the outcome is observed through this result on a later render.
+   *
+   * Assumptions: ⚠️ the returned promise resolves when the turn has SETTLED into this browse -- the
+   * page published or the failure recorded -- and a refused step resolves immediately having issued
+   * nothing. It never rejects: both outcomes are recorded through the reducer, which is what lets a
+   * caller that discards it behave exactly as it did when this returned nothing.
+   *
+   * Refactoring Rationale: it returned `void`, and a caller therefore could not tell when the turn
+   * ended. A review measured both halves of the consequence on one browse: the pressed key stayed
+   * `disabled:false` with an unchanged class for the whole flight, because the only busy affordance was
+   * the table's own overlay, and two presses 400 ms apart produced two identical requests that left the
+   * ordinal reading one page further than the rows on display. Awaiting the turn is what lets a screen
+   * paint a busy state over the control that owns it; the duplicate itself is closed inside this module
+   * so that a screen which never adopts the promise is protected anyway.
+   * @returns {Promise<void>} Resolves once the turn has settled into this browse, or immediately when
+   *   the step is refused. The outcome itself is observed through this result on a later render.
    */
-  readonly nextPage: () => void;
+  readonly nextPage: () => Promise<void>;
   /**
    * Reads the page before the one on display, which is the backward paging key's action.
    *
@@ -342,9 +578,13 @@ export interface UsePagedQueryResult<T> {
    * way, on its ordinal rather than on anything read from the file --
    * `app/cbl/COCRDLIC.cbl` L501 to L502 and
    * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L780 to L781.
-   * @returns {void} Nothing; the outcome is observed through this result on a later render.
+   *
+   * Assumptions: the returned promise behaves exactly as `nextPage`'s does -- it resolves when the turn
+   * has settled, resolves immediately for a refused step, and never rejects.
+   * @returns {Promise<void>} Resolves once the turn has settled into this browse, or immediately when
+   *   the step is refused. The outcome itself is observed through this result on a later render.
    */
-  readonly prevPage: () => void;
+  readonly prevPage: () => Promise<void>;
   /**
    * Returns the browse to its opening page and reads it again.
    *
@@ -357,9 +597,15 @@ export interface UsePagedQueryResult<T> {
    * no-op, as the two paging steps are. This step has no guard of its own -- an opening read is always
    * expressible -- so the switch is the only thing that refuses it, and it does so at the one point all
    * three steps pass through.
-   * @returns {void} Nothing; the outcome is observed through this result on a later render.
+   *
+   * Assumptions: the returned promise behaves exactly as `nextPage`'s does, and awaiting it is what lets
+   * a screen refreshing after a mutation write its sentence once the refreshed page is on display rather
+   * than over the page the mutation replaced.
+   * @returns {Promise<void>} Resolves once the refreshed opening page has settled into this browse, or
+   *   immediately when the browse is held back. The outcome itself is observed through this result on a
+   *   later render.
    */
-  readonly reset: () => void;
+  readonly reset: () => Promise<void>;
 }
 
 /**
@@ -412,6 +658,15 @@ interface PagedQueryState<T> {
   /** Problem document from the most recent failure, or `null`. */
   readonly error: ApiError | null;
   /**
+   * Classified failure from the most recent read, or `null`.
+   *
+   * Assumptions: held beside the document rather than being the only member, because the two are
+   * populated on overlapping but different sets of rejections -- a bare document supplies the first and
+   * not the second, and this module's own refusal of an over-long page supplies neither. Deriving one
+   * from the other in the reducer would therefore have to invent the missing half.
+   */
+  readonly failure: ApiRequestError | null;
+  /**
    * Sequence number of the most recently STARTED read.
    *
    * Assumptions: this is the whole of the stale-response guard, and it lives in the state rather than
@@ -449,7 +704,21 @@ type PagedQueryAction<T> =
       readonly direction: PageDirection;
       readonly page: PageResponse<T>;
     }
-  | { readonly kind: 'browse-failed'; readonly sequence: number; readonly error: ApiError | null }
+  | {
+      readonly kind: 'browse-failed';
+      readonly sequence: number;
+      readonly error: ApiError | null;
+      /**
+       * The shared client's classified failure, when the rejection was one.
+       *
+       * Assumptions: carried as a SECOND member of this transition rather than being derived from
+       * `error` inside the reducer. The document and the classification are read out of the rejection
+       * by two separate narrowings at the dispatch site, and a reducer given only the document could
+       * not recover the classification from it -- a synthesised document for a timeout and a service's
+       * own document for a refusal are the same shape, which is the whole reason the kind exists.
+       */
+      readonly failure: ApiRequestError | null;
+    }
   | { readonly kind: 'browse-idled'; readonly sequence: number };
 
 /**
@@ -483,6 +752,45 @@ function ordinalAfter(current: number, cursor: string | null, direction: PageDir
     return FIRST_PAGE_NUMBER;
   }
   return direction === 'previous' ? Math.max(current - 1, FIRST_PAGE_NUMBER) : current + 1;
+}
+
+/**
+ * Names where the page on display sits in the browse.
+ *
+ * Assumptions: ⚠️ `EMPTY` requires no rows AND no step in either direction, and the row count alone is
+ * deliberately NOT enough. A page can carry no rows while records remain on both sides of it, and that
+ * state is the reference baseline's rather than an invention: the card list reads a screen's worth of
+ * records and only then applies its filter at `app/cbl/COCRDLIC.cbl` L1382, so a read whose every
+ * record fails the filter displays nothing while the browse continues in both directions.
+ * `PageResponse.ofFilteredEmpty` in
+ * `services/common-lib/src/main/java/com/carddemo/common/web/PageResponse.java` L500 produces exactly
+ * that envelope -- no rows, both boundary members carrying the keys at which scanning stopped, and a
+ * further page reported. Calling it `EMPTY` would tell a screen to show "there are no records" over a
+ * browse it can page straight out of, which is why the two availability values are tested and not just
+ * the row count.
+ *
+ * Assumptions: so `EMPTY` is the DEAD END -- nothing on display and nowhere to go -- and it is the one
+ * state where both paging keys have nothing to answer with but the boundary sentence. A filtered-away
+ * page reports whichever of the four positional states its cursors support, and a screen tells that
+ * apart from a populated page by the row count it already renders from.
+ *
+ * Trade-offs: `ONLY` therefore never describes a page with no rows, because no rows and no steps is
+ * `EMPTY` by the test above. That is stated rather than left to be inferred, so nobody adds a row-count
+ * test to a screen's `ONLY` arm to cover a case that cannot reach it.
+ * @param {number} rowCount - How many rows the delivered page holds.
+ * @param {boolean} hasNext - Whether the envelope reported a further page.
+ * @param {boolean} hasPrev - Whether a backward step is expressible, as derived from the ordinal and
+ *   the leading cursor.
+ * @returns {PageBoundary} The one named state describing this page's position.
+ */
+function pageBoundaryOf(rowCount: number, hasNext: boolean, hasPrev: boolean): PageBoundary {
+  if (rowCount === 0 && !hasNext && !hasPrev) {
+    return 'EMPTY';
+  }
+  if (hasPrev) {
+    return hasNext ? 'INTERIOR' : 'LAST';
+  }
+  return hasNext ? 'FIRST' : 'ONLY';
 }
 
 /**
@@ -549,6 +857,51 @@ function problemDocumentOf(reason: unknown): ApiError | null {
 }
 
 /**
+ * Finds the shared client's classified failure a rejected read carried, if it carried one.
+ *
+ * Purpose: this is the half of a rejection {@link problemDocumentOf} deliberately discards. That
+ * function flattens a rejection to the problem document a screen renders a sentence from, which loses
+ * the classification -- the kind, and whether the condition may clear or the request may be repeated --
+ * because a document synthesised for a timeout and a document a service sent for a refusal are the same
+ * shape. A browse that can only see the document therefore cannot tell "not available at the moment"
+ * from "that did not work", which is what two reviews measured across every route.
+ *
+ * Assumptions: the ONE recognised route is the shared client's own failure type, tested with the
+ * predicate that module exports rather than by probing for members. That predicate is an `instanceof`
+ * check and this is the only producer of the type, so a value that merely looks like one did not come
+ * from the transport and must not be presented as though its classification were the transport's.
+ *
+ * Assumptions: no fallback is offered and none is possible. `problemDocumentOf` can fall back to a bare
+ * document because a document is data a caller may legitimately supply; a classification is a JUDGEMENT
+ * the transport made, so there is nothing to read it out of when the transport was not involved. A
+ * reader that rejects with its own `Error` therefore yields `null` here, and
+ * {@link UsePagedQueryResult.isFailed} remains what reports that the read failed.
+ * @param {unknown} reason - Whatever the read rejected with; not necessarily an `Error`.
+ * @returns {ApiRequestError | null} The classified failure, or `null` when the rejection was not one.
+ */
+function requestFailureOf(reason: unknown): ApiRequestError | null {
+  return isApiRequestError(reason) ? reason : null;
+}
+
+/**
+ * Discards a settled turn's outcome, for the one call site that cannot observe it.
+ *
+ * Purpose: the opening read is issued from an effect, and an effect may return only a teardown -- so
+ * the promise the engine returns cannot be returned from there, and `ui/eslint.config.js` configures
+ * `no-floating-promises` with `ignoreVoid: false`, which withdraws the `void` discard as well. This
+ * names what is happening instead of leaving an empty arrow at the call site.
+ *
+ * Assumptions: discarding is CORRECT there rather than merely permitted. Every outcome of a read is
+ * already applied through the reducer, so a screen observes the opening read exactly as it observes
+ * every other read -- through this hook's result on a later render. There is nothing here to act on.
+ * @returns {void} Nothing; the outcome has already been recorded by the reducer.
+ */
+function ignoreSettledTurn(): void {
+  // Assumptions: an empty body is the whole implementation, and it is deliberate rather than
+  //   unfinished. Logging here would emit a line for every ordinary page turn on every browse.
+}
+
+/**
  * Builds the state a browse starts in.
  *
  * Assumptions: the outstanding-read flag starts raised exactly when the browse is allowed to read, so
@@ -570,6 +923,7 @@ function openingState<T>(reading: boolean): PagedQueryState<T> {
     isLoading: reading,
     isFailed: false,
     error: null,
+    failure: null,
     startedSequence: 0,
   };
 }
@@ -603,11 +957,15 @@ function pagedQueryReducer<T>(
       //   read fails, remains the page the ordinal describes. That retention is correct ONLY while the
       //   rows belong to the query still being read; when the query itself changes, the sibling
       //   transition below is the one that runs.
+      // Assumptions: the classification is cleared alongside the document, because the two describe
+      //   ONE outcome and a screen branching on the classification while the document had been cleared
+      //   would offer a repeat control for a failure that is no longer being reported.
       return {
         ...state,
         isLoading: true,
         isFailed: false,
         error: null,
+        failure: null,
         startedSequence: action.sequence,
       };
     case 'query-restarted':
@@ -649,6 +1007,7 @@ function pagedQueryReducer<T>(
         isLoading: false,
         isFailed: false,
         error: null,
+        failure: null,
         startedSequence: state.startedSequence,
       };
     case 'browse-failed':
@@ -658,7 +1017,18 @@ function pagedQueryReducer<T>(
       // Assumptions: a failed read leaves the rows, both cursors and the ordinal exactly as they
       //   were, so the operator keeps the page in front of them and can take the same step again.
       //   The reference does the same, re-sending the screen it already composed.
-      return { ...state, isLoading: false, isFailed: true, error: action.error };
+      // Assumptions: both halves of the outcome are carried through together -- the document a screen
+      //   renders its sentence from and the classification it chooses BETWEEN sentences on. They were
+      //   narrowed from one rejection at the dispatch site, so publishing one without the other would
+      //   put a screen in the position the reviews measured: able to show what went wrong and unable
+      //   to say whether trying again could help.
+      return {
+        ...state,
+        isLoading: false,
+        isFailed: true,
+        error: action.error,
+        failure: action.failure,
+      };
     case 'browse-idled':
       // Assumptions: this returns the browse to the state it would have had if the screen had mounted
       //   with its switch down, and it is applied UNCONDITIONALLY rather than under the sequence guard
@@ -781,6 +1151,25 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
   //   top of this hook, so what the ref holds is always a usable count.
   const pageSizeRef = useRef(pageSize);
 
+  // Assumptions: this browse's identity in the shared single-flight guard, claimed lazily on the first
+  //   render and never reclaimed. A ref rather than state because nothing renders from it and changing
+  //   it would be a defect; lazily rather than as an initialiser argument because `useRef` evaluates
+  //   its argument on every render, so claiming there would burn an identity per render.
+  // Assumptions: a remount claims a NEW identity, which is correct rather than wasteful -- a remounted
+  //   browse must not join a read the previous mount left in flight, since that read settles into a
+  //   reducer the previous mount owned.
+  const identityRef = useRef<number | null>(null);
+  identityRef.current ??= claimBrowseIdentity();
+
+  // Assumptions: which generation of the browsed set the next turn belongs to, advanced whenever the
+  //   set the browse is walking stops being the set it was walking -- an idling, and a restart under
+  //   changed criteria. It exists so those two events cannot be joined ACROSS: without it, a restart
+  //   whose key matched a read still in flight from before the restart would be handed that read's
+  //   promise, no read of the new criteria would be issued, and the joined read's settlement would then
+  //   be dropped by the reducer's own sequence guard as stale -- leaving the browse empty and idle with
+  //   nothing outstanding and no failure to report.
+  const epochRef = useRef(0);
+
   useEffect(
     /**
      * Tracks whether this browse is still mounted, so no settlement is applied after it is gone.
@@ -851,19 +1240,30 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
      * here, because this function cannot tell the two cases apart -- a change of query and a caller
      * asking to return to the start of the set both issue an opening read with no cursor. The caller
      * knows which it is, so the caller says, and the two entry points below are the two answers.
+     *
+     * Assumptions: ⚠️ the returned promise resolves once the read has SETTLED into the reducer, and it
+     * never rejects. Both outcomes are handled inside the settlement below, so what a caller awaits is
+     * "this turn is over", not "this turn succeeded" -- which is what a busy affordance needs and all it
+     * needs. A caller that discards the promise is in exactly the position every caller was in when this
+     * returned nothing: the outcome still arrives through the reducer, and nothing is left unhandled.
      * @param {string | null} cursor - Position to read from, or `null` for an opening read.
      * @param {PageDirection} direction - Direction to replay the cursor in.
      * @param {boolean} clearing - Whether this read belongs to a DIFFERENT query, in which case the
      *   rows, both cursors and the ordinal of the previous one are dropped before it is issued.
-     * @returns {void} Nothing; both outcomes are applied through the two handlers.
+     * @returns {Promise<void>} Resolves once this turn has settled into the browse, or immediately when
+     *   the browse is held back. Both outcomes are applied through the two handlers.
      */
-    (cursor: string | null, direction: PageDirection, clearing = false): void => {
+    (cursor: string | null, direction: PageDirection, clearing = false): Promise<void> => {
       if (!enabledRef.current) {
-        return;
+        return Promise.resolve();
       }
-      const sequence = sequenceRef.current + 1;
-      sequenceRef.current = sequence;
-      dispatch({ kind: clearing ? 'query-restarted' : 'browse-started', sequence });
+      // Assumptions: a clearing read is a read of a DIFFERENT set, so it opens a new generation before
+      //   its key is composed. That is what stops it joining -- and being answered by -- a read of the
+      //   set it is replacing, which is still in flight at exactly the moment a screen's criteria change.
+      if (clearing) {
+        epochRef.current += 1;
+      }
+      const turn = coalescingKeyOf(identityRef.current ?? 0, epochRef.current, direction, cursor);
 
       // Alternatives Considered: two other ways to stop an earlier read overwriting a later one. An
       //   AbortController cancelling the outstanding request was rejected because the reader is
@@ -872,77 +1272,125 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
       //   while a read is outstanding was rejected because it makes one slow page freeze both paging
       //   controls, and an operator holding the forward key would be answered by nothing at all. A
       //   sequence number needs no cooperation from the reader and leaves both controls live.
-      // Assumptions: `then` with BOTH handlers rather than a trailing `catch`, so the rejection is
-      //   handled in the same expression that handles success and neither can be added without the
-      //   other being visible beside it.
-      fetchPageRef.current({ cursor, direction }).then(
+      // Assumptions: the sequence guard and the single-flight guard below answer two DIFFERENT
+      //   questions and neither replaces the other. The sequence guard decides which of two settlements
+      //   is allowed to land, so two genuinely different turns taken together end on the later one; the
+      //   single-flight guard decides whether a second REQUEST is issued at all when the turn is the
+      //   same one. Without the second, a review measured three presses of one forward key producing
+      //   three identical requests and a browse whose ordinal read one page beyond its rows.
+      // ⚠️ WHY : Refactoring Rationale: the sequence allocation and the started transition moved INSIDE
+      //   the attempt, where they used to stand above it. They have to: a joined caller must not
+      //   allocate a number, because adopting a number the in-flight read does not hold is precisely
+      //   what makes that read's settlement stale -- the reducer would drop the only answer coming, and
+      //   the browse would report a read outstanding for ever.
+      return withoutConcurrentDuplicate(
+        turn,
         /**
-         * Publishes a delivered page, if it is still the page that was asked for.
-         * @param {PageResponse<T>} page - The page the reader returned.
-         * @returns {void} Nothing; the page is published through the reducer.
+         * Issues this turn's read and settles it, having established that no identical turn is running.
+         * @returns {Promise<void>} Resolves once the settlement has been dispatched.
          */
-        (page) => {
-          // Assumptions: the mounted flag is consulted here, inside the settlement, rather than
-          //   before the read is issued. A read that was legitimate when it started can still be
-          //   answered after the screen has gone, and it is the delivery that would touch a state
-          //   container nobody is reading any more. The sequence this closure captured is the one
-          //   allocated for this read, so a later read's settlement cannot be mistaken for this one.
-          if (!mountedRef.current) {
-            return;
-          }
+        () => {
+          const sequence = sequenceRef.current + 1;
+          sequenceRef.current = sequence;
+          dispatch({ kind: clearing ? 'query-restarted' : 'browse-started', sequence });
 
-          // Assumptions: the delivered row count is checked against the arity the screen declared, and
-          //   an over-long page is refused rather than published. The arity is the number of row
-          //   positions the screen's mapset paints -- seven, ten, ten, seven and five across the five
-          //   browses -- so a page carrying more rows than that has rows the screen cannot show, and
-          //   publishing it would silently drop the surplus. What makes that a correctness matter
-          //   rather than a cosmetic one is which rows go missing: the service establishes the further
-          //   page from a probe read one row beyond the page, so a surplus row reaching the array means
-          //   the probe row was published, and the row a screen dropped is the row the next forward
-          //   step would have read from. The operator would then step past a row that was never shown.
-          // Alternatives Considered: truncating the array to the arity and publishing the rest.
-          //   Rejected because it makes this module a participant in paging arithmetic it does not own
-          //   -- the cursors delivered alongside would name rows outside the page as published, so the
-          //   next step would read from a position inconsistent with what is on screen. Refusing keeps
-          //   the browse on the page the operator can see and reports that something is wrong.
-          // Assumptions: the refusal carries NO problem document. No service sent one, and
-          //   `UsePagedQueryResult.error` may not hold a document this module invented -- a fabricated
-          //   code or correlation identifier would be indistinguishable from one a service produced.
-          //   The sentence a screen shows comes from `ui/src/messages/messages.ts` under rule T8, which
-          //   is why none is composed here either.
-          // Assumptions: ⚠️ Refactoring Rationale: the delivered value is checked for BEING a page before
-          //   its rows are counted, and it was not. `page.items.length` on an answer that carries no
-          //   `items` throws a `TypeError` inside a `then` handler, which becomes an UNHANDLED REJECTION
-          //   -- nothing awaits this settlement, by design, because the reducer is how an outcome
-          //   arrives -- so a screen reached with a stubbed or proxied transport reported a browse still
-          //   loading while the runner reported an unhandled error against whichever test happened to be
-          //   running. A malformed answer is a failed read, which is a state this hook already has and
-          //   already reports; it is not a reason to throw out of a settlement.
-          // Assumptions: the refusal carries NO problem document, for the reason recorded below: no
-          //   service sent one, and a fabricated code would be indistinguishable from one that did.
-          if (!Array.isArray(page?.items)) {
-            dispatch({ kind: 'browse-failed', sequence, error: null });
-            return;
-          }
-          if (page.items.length > pageSizeRef.current) {
-            dispatch({ kind: 'browse-failed', sequence, error: null });
-            return;
-          }
-          dispatch({ kind: 'page-settled', sequence, cursor, direction, page });
-        },
-        /**
-         * Records a refusal or failure, keeping the page on display.
-         * @param {unknown} reason - Whatever the reader rejected with.
-         * @returns {void} Nothing; the outcome is recorded through the reducer.
-         */
-        (reason: unknown) => {
-          // Assumptions: the same mounted flag and the same captured sequence guard the refusal path,
-          //   because a refusal is as capable of arriving late as a delivery is. The refusal is
-          //   narrowed to a problem document before it reaches the reducer, so the reducer never has
-          //   to know what shape a rejected reader threw.
-          if (mountedRef.current) {
-            dispatch({ kind: 'browse-failed', sequence, error: problemDocumentOf(reason) });
-          }
+          // Assumptions: `then` with BOTH handlers rather than a trailing `catch`, so the rejection is
+          //   handled in the same expression that handles success and neither can be added without the
+          //   other being visible beside it. It is also what keeps the promise this returns from ever
+          //   rejecting, which is the property the shared guard needs: a rejection would be handed to
+          //   every joined caller as well, and a joined caller that discarded it would report an
+          //   unhandled rejection for a failure this module has already recorded.
+          return fetchPageRef.current({ cursor, direction }).then(
+            /**
+             * Publishes a delivered page, if it is still the page that was asked for.
+             * @param {PageResponse<T>} page - The page the reader returned.
+             * @returns {void} Nothing; the page is published through the reducer.
+             */
+            (page) => {
+              // Assumptions: the mounted flag is consulted here, inside the settlement, rather than
+              //   before the read is issued. A read that was legitimate when it started can still be
+              //   answered after the screen has gone, and it is the delivery that would touch a state
+              //   container nobody is reading any more. The sequence this closure captured is the one
+              //   allocated for this read, so a later read's settlement cannot be mistaken for this one.
+              if (!mountedRef.current) {
+                return;
+              }
+
+              // Assumptions: the delivered row count is checked against the arity the screen declared, and
+              //   an over-long page is refused rather than published. The arity is the number of row
+              //   positions the screen's mapset paints -- seven, ten, ten, seven and five across the five
+              //   browses -- so a page carrying more rows than that has rows the screen cannot show, and
+              //   publishing it would silently drop the surplus. What makes that a correctness matter
+              //   rather than a cosmetic one is which rows go missing: the service establishes the further
+              //   page from a probe read one row beyond the page, so a surplus row reaching the array means
+              //   the probe row was published, and the row a screen dropped is the row the next forward
+              //   step would have read from. The operator would then step past a row that was never shown.
+              // Alternatives Considered: truncating the array to the arity and publishing the rest.
+              //   Rejected because it makes this module a participant in paging arithmetic it does not own
+              //   -- the cursors delivered alongside would name rows outside the page as published, so the
+              //   next step would read from a position inconsistent with what is on screen. Refusing keeps
+              //   the browse on the page the operator can see and reports that something is wrong.
+              // Assumptions: the refusal carries NO problem document. No service sent one, and
+              //   `UsePagedQueryResult.error` may not hold a document this module invented -- a fabricated
+              //   code or correlation identifier would be indistinguishable from one a service produced.
+              //   The sentence a screen shows comes from `ui/src/messages/messages.ts` under rule T8, which
+              //   is why none is composed here either.
+              // Assumptions: ⚠️ Refactoring Rationale: the delivered value is checked for BEING a page before
+              //   its rows are counted, and it was not. `page.items.length` on an answer that carries no
+              //   `items` throws a `TypeError` inside a `then` handler, which becomes an UNHANDLED REJECTION
+              //   for every caller that does not await the turn -- and a caller is free not to, because the
+              //   reducer is how an outcome arrives and the returned promise is an affordance rather than an
+              //   obligation -- so a screen reached with a stubbed or proxied transport reported a browse
+              //   still loading while the runner reported an unhandled error against whichever test happened
+              //   to be running. A malformed answer is a failed read, which is a state this hook already has
+              //   and already reports; it is not a reason to throw out of a settlement.
+              // Assumptions: this guard is also what makes the promise this function returns unable to
+              //   reject, which the public contract on the three steps states. Both handlers dispatch and
+              //   return; neither can throw past this check, so a joined caller handed the same promise
+              //   cannot be given a rejection either.
+              // Assumptions: the refusal carries NO problem document, for the reason recorded below: no
+              //   service sent one, and a fabricated code would be indistinguishable from one that did.
+              // Assumptions: it carries no classified failure either, and for the stronger reason. No
+              //   request failed at all here -- the read was ANSWERED, and this module is refusing the
+              //   answer -- so there is no transport judgement to report, and labelling it transient or
+              //   repeatable would tell a screen that pressing the key again might help when the service
+              //   would answer identically.
+              if (!Array.isArray(page?.items)) {
+                dispatch({ kind: 'browse-failed', sequence, error: null, failure: null });
+                return;
+              }
+              if (page.items.length > pageSizeRef.current) {
+                dispatch({ kind: 'browse-failed', sequence, error: null, failure: null });
+                return;
+              }
+              dispatch({ kind: 'page-settled', sequence, cursor, direction, page });
+            },
+            /**
+             * Records a refusal or failure, keeping the page on display.
+             * @param {unknown} reason - Whatever the reader rejected with.
+             * @returns {void} Nothing; the outcome is recorded through the reducer.
+             */
+            (reason: unknown) => {
+              // Assumptions: the same mounted flag and the same captured sequence guard the refusal path,
+              //   because a refusal is as capable of arriving late as a delivery is. The refusal is
+              //   narrowed to a problem document before it reaches the reducer, so the reducer never has
+              //   to know what shape a rejected reader threw.
+              // Assumptions: the rejection is narrowed TWICE, by two functions, at this one point. One
+              //   yields the document a screen renders its sentence and its field marks from; the other
+              //   yields the transport's classification of the same failure. Narrowing once and deriving
+              //   the second from the first is not available -- a document synthesised for a timeout and
+              //   a document a service sent for a refusal are the same shape -- and doing it here rather
+              //   than in the reducer keeps the reducer ignorant of rejection shapes, exactly as before.
+              if (mountedRef.current) {
+                dispatch({
+                  kind: 'browse-failed',
+                  sequence,
+                  error: problemDocumentOf(reason),
+                  failure: requestFailureOf(reason),
+                });
+              }
+            },
+          );
         },
       );
     },
@@ -957,14 +1405,18 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
      * refresh of the query already being browsed -- a caller reaches for it after a mutation, and the
      * page it is refreshing is still an answer to the same question. A change of QUERY is the other
      * case and does not come through here; the effect below dispatches the clearing transition for it.
-     * @returns {void} Nothing; the new page arrives through this hook's result.
+     * @returns {Promise<void>} Resolves once the refreshed opening page has settled, or immediately
+     *   when the browse is held back. The page itself arrives through this hook's result.
      */
-    (): void => {
+    (): Promise<void> => {
       // Alternatives Considered: giving an opening read a direction of its own, or a distinct action
       //   the reducer would recognise. Rejected because an opening read IS a forward read that starts
       //   from nowhere, and the absent cursor already says so; a third direction would have to be
       //   accepted by every reader and refused by the edge, which seals a direction into each token.
-      runRequest(null, 'next');
+      // Assumptions: the engine's promise is RETURNED rather than discarded, which is what makes a
+      //   refresh awaitable. A screen that refreshes after a mutation can then write its sentence over
+      //   the refreshed page instead of over the page the mutation replaced.
+      return runRequest(null, 'next');
     },
     [runRequest],
   );
@@ -977,10 +1429,11 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
      * that watches the restart value. Exposing it to callers would let a screen clear the rows of the
      * query it is still browsing, which is the failure the clearing transition exists to prevent
      * rather than to enable.
-     * @returns {void} Nothing; the new page arrives through this hook's result.
+     * @returns {Promise<void>} Resolves once the new query's opening page has settled. The page itself
+     *   arrives through this hook's result.
      */
-    (): void => {
-      runRequest(null, 'next', true);
+    (): Promise<void> => {
+      return runRequest(null, 'next', true);
     },
     [runRequest],
   );
@@ -1014,7 +1467,16 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
      */
     () => {
       if (enabled) {
-        restartQuery();
+        // Assumptions: the opening read's promise is settled with BOTH handlers here rather than
+        //   discarded. An effect may return only a teardown, so the promise cannot be returned; and
+        //   `ui/eslint.config.js` sets `no-floating-promises` with `ignoreVoid: false`, so a `void`
+        //   discard is not available either. Supplying the pair states the same thing the engine's own
+        //   dispatch site states: this outcome is observed through the reducer and nowhere else.
+        // Assumptions: the rejection handler is unreachable by construction -- the engine handles both
+        //   outcomes internally and resolves either way -- and it is written anyway, because a handler
+        //   that exists cannot become the unhandled rejection a later edit to the engine would
+        //   otherwise introduce here silently.
+        restartQuery().then(ignoreSettledTurn, ignoreSettledTurn);
         return;
       }
       // Assumptions: the sequence is advanced here, in the effect, rather than inside the reducer.
@@ -1023,6 +1485,11 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
       //   started before it stale. A reducer cannot claim one, because it may be invoked more than once
       //   for a single dispatch and would then allocate twice.
       sequenceRef.current += 1;
+      // Assumptions: the generation is advanced alongside the sequence, and for the mirror-image
+      //   reason. The sequence stops an outstanding read's answer LANDING in an idled browse; the
+      //   generation stops the next turn JOINING that outstanding read, which would leave the browse
+      //   waiting on an answer the reducer has already been told to drop.
+      epochRef.current += 1;
       dispatch({ kind: 'browse-idled', sequence: sequenceRef.current });
     },
     [enabled, resetKey, restartQuery],
@@ -1037,13 +1504,20 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
      * no member of the browse moves. A browse held back by its switch is refused too, one level down in
      * `runRequest`, which is where that gate belongs because all three steps pass through it. Telling
      * the operator why is the screen's part, and it chooses its sentence from `hasNext`.
-     * @returns {void} Nothing; the page arrives through this hook's result.
+     *
+     * Assumptions: a refused step resolves an already-settled promise rather than returning nothing, so
+     * a caller awaiting the turn is released immediately and a caller ignoring it sees exactly what it
+     * saw before. `Promise.resolve()` and not a rejection, because a step at a boundary is a documented
+     * no-op and not an error -- the reference answers the same key by re-sending the screen with a
+     * sentence attached.
+     * @returns {Promise<void>} Resolves once the page has settled, or immediately when the step is
+     *   refused. The page itself arrives through this hook's result.
      */
-    (): void => {
+    (): Promise<void> => {
       if (!state.hasNext || state.lastKey === null) {
-        return;
+        return Promise.resolve();
       }
-      runRequest(state.lastKey, 'next');
+      return runRequest(state.lastKey, 'next');
     },
     [runRequest, state.hasNext, state.lastKey],
   );
@@ -1054,31 +1528,38 @@ export function usePagedQuery<T>(options: UsePagedQueryOptions<T>): UsePagedQuer
      *
      * Assumptions: refused on the opening page, decided from the ordinal exactly as the reference
      * decides it at `app/cbl/COCRDLIC.cbl` L901 to L903, and refused when there is no leading cursor
-     * to read from. A refusal here does nothing at all.
-     * @returns {void} Nothing; the page arrives through this hook's result.
+     * to read from. A refusal here does nothing at all, and resolves immediately on the same terms as
+     * `nextPage`'s refusal.
+     * @returns {Promise<void>} Resolves once the page has settled, or immediately when the step is
+     *   refused. The page itself arrives through this hook's result.
      */
-    (): void => {
+    (): Promise<void> => {
       if (state.pageNumber <= FIRST_PAGE_NUMBER || state.firstKey === null) {
-        return;
+        return Promise.resolve();
       }
-      runRequest(state.firstKey, 'previous');
+      return runRequest(state.firstKey, 'previous');
     },
     [runRequest, state.firstKey, state.pageNumber],
   );
 
+  // Assumptions: composed from the ordinal and the presence of a leading cursor, which are the two
+  //   things a backward step needs -- a page to go back to, and a position to go back from. No member
+  //   of the envelope answers the first, by design, and the reference answers it from its own ordinal
+  //   too. It is bound to a local here rather than written inline in the result so that the boundary
+  //   below is derived from the SAME value a screen reads, and the two cannot come to disagree.
+  const hasPrev = state.pageNumber > FIRST_PAGE_NUMBER && state.firstKey !== null;
+
   return {
     items: state.items,
     hasNext: state.hasNext,
-    // Assumptions: composed from the ordinal and the presence of a leading cursor, which are the two
-    //   things a backward step needs -- a page to go back to, and a position to go back from. No
-    //   member of the envelope answers the first, by design, and the reference answers it from its
-    //   own ordinal too.
-    hasPrev: state.pageNumber > FIRST_PAGE_NUMBER && state.firstKey !== null,
+    hasPrev,
     pageNumber: state.pageNumber,
+    boundary: pageBoundaryOf(state.items.length, state.hasNext, hasPrev),
     pageSize,
     isLoading: state.isLoading,
     isFailed: state.isFailed,
     error: state.error,
+    failure: state.failure,
     nextPage,
     prevPage,
     reset,

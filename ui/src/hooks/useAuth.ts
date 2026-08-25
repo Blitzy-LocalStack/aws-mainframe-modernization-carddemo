@@ -77,6 +77,7 @@ import {
 } from '../api/auth';
 import type { SignOnChallenge, SignOnResult, SignOnTokens } from '../api/auth';
 import {
+  discardRetainedOutcomes,
   isApiRequestError,
   setAccessToken,
   subscribeToAuthenticationRequired,
@@ -772,6 +773,13 @@ function discardSession(): void {
   cachedIdToken = null;
   groupsCacheToken = null;
   groupsCacheValue = NO_GROUPS;
+  // Assumptions: ⚠️ an outcome retained for a screen that never collected it is discarded here too, and
+  //   it belongs under the totality argued above rather than beside it. Such an outcome describes work
+  //   done under THIS session -- it can carry a newly minted one-time credential, an account balance or
+  //   a posted amount -- so leaving it held would let the next operator to sign on at the same terminal
+  //   collect it. `discardSession` is the one function every session ending passes through, which is why
+  //   the call is here and not at each of the three call sites that end one.
+  discardRetainedOutcomes();
 }
 
 /**

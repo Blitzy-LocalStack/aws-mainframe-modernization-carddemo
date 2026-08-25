@@ -30,7 +30,7 @@ import { AxiosError } from 'axios';
 import type { AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import type { ReactElement } from 'react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useAuth } from './useAuth';
 import { WITHOUT_STORED_SESSION, getApiClient } from '../api/client';
@@ -171,6 +171,22 @@ async function establishAnOrdinarySession(): Promise<void> {
 }
 
 /**
+ * Holds the installed console spy so each case can put the real writer back.
+ *
+ * Assumptions: the type is the one member this file calls rather than the runner's mock type, so nothing
+ * here reads a value the runner types as `any` -- which `ui/eslint.config.js` refuses.
+ */
+let announcementSpy: { mockRestore: () => void } | undefined;
+
+/**
+ * Stands in for the console writer while these cases run.
+ * @returns {void} Nothing; the announcement is discarded rather than written.
+ */
+function swallowTheAnnouncement(): void {
+  return undefined;
+}
+
+/**
  * Installs the shared request harness, which supplies the client's configuration and answers the
  * arrangement's own exchange.
  *
@@ -183,6 +199,13 @@ async function establishAnOrdinarySession(): Promise<void> {
 function installTheHarness(): void {
   endAnySession();
   installApiHarness();
+  // Assumptions: the console writer is stood in for, and what it suppresses is EXPECTED output rather
+  //   than a defect. The 401 these cases drive carries no problem document -- deliberately, because that
+  //   is the shape an API Gateway authorizer's refusal has -- so `ui/src/api/client.ts` classifies it as
+  //   an unusable answer and announces one structured record per case. That announcement is asserted
+  //   where it belongs, in `ui/src/api/client.test.ts`; here it is noise that would sit between a reader
+  //   and a real warning. The spy is restored in `removeTheHarness`, so nothing outlasts this file.
+  announcementSpy = vi.spyOn(console, 'error').mockImplementation(swallowTheAnnouncement);
 }
 
 /**
@@ -190,6 +213,8 @@ function installTheHarness(): void {
  * @returns {void} Nothing; the harness is removed and no session is held.
  */
 function removeTheHarness(): void {
+  announcementSpy?.mockRestore();
+  announcementSpy = undefined;
   removeApiHarness();
   endAnySession();
 }

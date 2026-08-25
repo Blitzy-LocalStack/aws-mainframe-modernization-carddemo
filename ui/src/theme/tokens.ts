@@ -173,8 +173,17 @@ export interface DesignGap {
    * screen instead of in this bridge, and left the register claiming to be
    * complete while two entries lived elsewhere. They are admitted here as `G7`
    * and `G8` so the register is the whole answer again.
+   *
+   * ⚠️ Refactoring Rationale: two further mismatches are admitted as `G9` and `G10`
+   * on the same terms. Both were measured in a browser against the delivered
+   * screens, both are properties of the design system rather than of the mapsets,
+   * and both had no home at all — `G9` is a token the library does not publish, so
+   * an interaction state this tree needs cannot be themed, and `G10` is a library
+   * component that ships literal artwork no token can reach. Recording an absent
+   * token as a gap is the point of the register: the alternative is a screen
+   * carrying a literal with a comment, which is what the register exists to stop.
    */
-  readonly id: 'G1' | 'G2' | 'G3' | 'G4' | 'G5' | 'G6' | 'G7' | 'G8';
+  readonly id: 'G1' | 'G2' | 'G3' | 'G4' | 'G5' | 'G6' | 'G7' | 'G8' | 'G9' | 'G10';
   /** Short statement of the capability mismatch. */
   readonly description: string;
   /** Original BMS value or the recorded absence of a source analogue. */
@@ -375,8 +384,44 @@ export const BMS_TEXT_COLOR_TOKENS = {
   YELLOW: 'colorText',
   /** 16.56:1 — the base text role, unchanged. */
   DEFAULT: 'colorText',
-  /** 4.62:1 — the error ramp's own text-grade shade, so a refusal keeps its red. */
-  RED: 'colorErrorTextActive',
+  /*
+   * 5.57:1 on the screen surface and 5.10:1 on the error tint — the preset red palette's step 7.
+   *
+   * ⚠️ Refactoring Rationale: this was `colorErrorTextActive`, the error ramp's own text-grade
+   * alias, and it is moved one step darker into the SAME hue family. The alias measures 4.618:1
+   * against {@link TEXT_CONTRAST_SURFACE}, which clears the threshold, but this role is the only
+   * one of the eight that is also painted on a TINTED background: `ui/src/layout/MessageBand.tsx`
+   * renders the design system's alert, whose error surface is `colorErrorBg`, and against that
+   * surface the alias measures 4.224:1 — below AA. A role cannot be declared compliant on one
+   * surface while failing on another it is actually painted on, so the shade is chosen to clear
+   * {@link TEXT_CONTRAST_THRESHOLD} on BOTH: 5.571:1 on the screen surface and 5.097:1 on the
+   * error tint. {@link ALERT_TINT_TEXT_CONTRAST_AUDIT} carries the per-surface numbers.
+   *
+   * Alternatives Considered: three, and each is rejected with the measurement that rejects it.
+   * (1) Snapping RED to `colorText` for the band only, which is what two comments in this tree
+   * previously CLAIMED had happened while the code still resolved the error alias — rejected
+   * because it erases the red from every OTHER consumer of this role as well: the `CSSETATY`
+   * field-error contract in {@link FIELD_ERROR_TOKENS}, the refusal sentences beside a field, and
+   * the fraud and match-status values on the authorization screens. Red meaning refused is a
+   * measured source value (`COLOR=RED` on 23 field definitions, all but two of them BRT, plus 32
+   * executable `DFHRED` moves), and a neutral snap discards it to defend one background.
+   * (2) A SECOND map resolving RED differently on the tint than on the screen surface — rejected
+   * because it reintroduces the per-surface text resolution that {@link SURFACE_TOKENS} exists to
+   * remove, and it would need every consumer to know which surface it is painted on.
+   * (3) Darkening the error SEED so the ramp derives an AA text shade — rejected on the same
+   * ground the informational seed's own entry records: it moves every fill, border and alert tint
+   * derived from that seed, including `colorErrorBg` itself, to defend a text case.
+   *
+   * Trade-offs: this leaves the role's own semantic ramp for the preset palette, which is a step
+   * the other seven roles do not take. The preset step is a settable token of the same layer and
+   * the same hue family, and `ui/src/theme/antdTheme.ts` already resolves three primary-ramp steps
+   * by name for the solid-control correction, so the mechanism is established rather than new. What
+   * is given up is that the shade no longer tracks the error seed: a future seed change would move
+   * `colorErrorBg` while this stays put. That is why the pairing is asserted rather than recorded —
+   * `ui/src/theme/textContrast.test.ts` measures this token against all three alert tints on every
+   * run, so a seed change that broke the pairing fails a test instead of shipping.
+   */
+  RED: 'red7',
   /** 16.56:1 — a heading text token already, so record-identity emphasis is unchanged. */
   PINK: 'colorTextHeading',
 } as const satisfies Record<keyof typeof BMS_COLOR_TOKENS, AntdTokenName>;
@@ -448,9 +493,9 @@ export const BMS_TEXT_CONTRAST_AUDIT = [
     role: 'RED',
     inFamilyToken: 'colorErrorTextActive',
     inFamilyRatio: 4.618,
-    token: 'colorErrorTextActive',
-    ratio: 4.618,
-    resolution: 'exact',
+    token: 'red7',
+    ratio: 5.571,
+    resolution: 'snap',
   },
   {
     role: 'PINK',
@@ -461,6 +506,150 @@ export const BMS_TEXT_CONTRAST_AUDIT = [
     resolution: 'exact',
   },
 ] as const satisfies readonly TextGradeResolution[];
+
+/**
+ * Background tokens the design system's alert tints its own surface with, per severity.
+ *
+ * Purpose: {@link TEXT_CONTRAST_SURFACE} is the whole answer for screen text because the shell
+ * paints one surface, and the message band is the one place that stops being true — it renders the
+ * design system's alert, which supplies its own tinted background per severity. Naming those three
+ * surfaces here is what lets {@link ALERT_TINT_TEXT_CONTRAST_AUDIT} measure the band's pairings
+ * without a component restating a background it did not choose.
+ *
+ * Assumptions: three tints and not four. `ui/src/layout/MessageBand.tsx` renders the alert's
+ * `info` type for BOTH its informational and its neutral severity, so the neutral severity pairs
+ * against the informational tint rather than against a fourth surface of its own.
+ */
+export const ALERT_TINT_SURFACES = {
+  /** Surface behind an error-severity message-band sentence. */
+  error: 'colorErrorBg',
+  /** Surface behind a success-severity message-band sentence. */
+  success: 'colorSuccessBg',
+  /** Surface behind an informational or neutral message-band sentence. */
+  info: 'colorInfoBg',
+} as const satisfies Record<'error' | 'success' | 'info', AntdTokenName>;
+
+/**
+ * One measured pairing of a band severity's text role against the alert tint it is painted on.
+ *
+ * Assumptions: the row names the ROLE rather than the token, so it stays correct if
+ * {@link BMS_TEXT_COLOR_TOKENS} moves a role to a different shade — the assertion then re-measures
+ * the new shade against the same surface instead of silently describing the old one.
+ */
+export interface AlertTintContrastPairing {
+  /** Severity the band renders, spelled as `ui/src/layout/MessageBand.tsx` spells it. */
+  readonly severity: 'error' | 'success' | 'info' | 'neutral';
+  /** BMS colour role {@link BMS_TEXT_COLOR_TOKENS} resolves the sentence's colour through. */
+  readonly role: keyof typeof BMS_COLOR_TOKENS;
+  /** Alert surface the sentence is painted on. */
+  readonly surface: AntdTokenName;
+  /** Contrast the role's text token measures against that surface. */
+  readonly ratio: number;
+}
+
+/**
+ * Measured contrast for every severity the message band can paint, on its own tint.
+ *
+ * ⚠️ Refactoring Rationale: this record did not exist, and its absence is how a documented fix came
+ * to be believed rather than verified. Both `ui/src/theme/antdTheme.ts` and
+ * `ui/src/layout/MessageBand.tsx` carried prose stating that every severity had been moved to the
+ * base text grade because no matching hue reaches the threshold on a tint — while the band in fact
+ * resolves each severity through {@link BMS_TEXT_COLOR_TOKENS}, and that map's RED entry resolved
+ * to a shade measuring 4.224:1 on the error tint. Two comments and one map disagreed, the only
+ * assertion covering the band measured the DEFAULT role rather than the roles the band actually
+ * paints, so nothing failed. The pairings are recorded here AS DATA and asserted per row in
+ * `ui/src/theme/textContrast.test.ts`, which is what makes the claim checkable instead of stated.
+ *
+ * Assumptions: ratios were computed from the pinned package's own `theme.getDesignToken` accessor
+ * under this application's theme. The neutral severity is listed separately from the informational
+ * one even though both pair against the same surface, because they resolve through different roles
+ * and a future change to either must be measured on its own.
+ */
+export const ALERT_TINT_TEXT_CONTRAST_AUDIT = [
+  { severity: 'error', role: 'RED', surface: ALERT_TINT_SURFACES.error, ratio: 5.097 },
+  { severity: 'success', role: 'GREEN', surface: ALERT_TINT_SURFACES.success, ratio: 16.191 },
+  { severity: 'info', role: 'TURQUOISE', surface: ALERT_TINT_SURFACES.info, ratio: 6.863 },
+  { severity: 'neutral', role: 'NEUTRAL', surface: ALERT_TINT_SURFACES.info, ratio: 6.863 },
+] as const satisfies readonly AlertTintContrastPairing[];
+
+/**
+ * Text-grade token each measured hint role resolves to.
+ *
+ * Purpose: a hint is the parenthesised width or format note the mapsets paint beside an input —
+ * `(8 Char)`, `(YYYY-MM-DD)`, `(-99999999.99)`, `(Y/N)`, `(A=Admin, U=User)`. Screens paint those
+ * strings and need to know which SHADE to paint them in; this map is that answer, so a screen never
+ * reaches for a hue-grade token or for the design system's own de-emphasis default.
+ *
+ * ⚠️ Assumptions: there are TWO hint roles and not one, and this is a measured property of the
+ * baseline rather than a preference. `app/bms/COTRN02.bms` paints `(-99999999.99)` at L208 and
+ * `(YYYY-MM-DD)` at L213 and L218 with `COLOR=BLUE`, and `(Y/N)` at L289 with `COLOR=NEUTRAL` — two
+ * different operands on hints WITHIN ONE MAPSET. The same split holds across the tree:
+ * `COLOR=BLUE` on `(8 Char)` at `app/bms/COSGN00.bms` L166 and L186, `app/bms/COUSR01.bms` L117 and
+ * L135 and `app/bms/COUSR02.bms` L139; `COLOR=NEUTRAL` on `(Y/N)` at `app/bms/COBIL00.bms` L124 and
+ * `app/bms/CORPT00.bms` L214. Collapsing the two into one role would make the SPA more internally
+ * consistent than the design source it transcribes, which Rule T9 forbids: structure may change,
+ * observable behaviour may not.
+ *
+ * Alternatives Considered: one unified hint role, which is the tidier answer and the one an
+ * accessibility review naturally asks for. It is rejected on the authority order this tree works
+ * to — the measured BMS attributes are the design source, and a consistency preference does not
+ * outrank them. What the two roles are NOT allowed to be is unreadable, and that is the part this
+ * map fixes: both entries resolve through {@link BMS_TEXT_COLOR_TOKENS}, so the blue hint is the
+ * primary ramp's text-grade shade at 6.159:1 rather than its mid-ramp anchor at 4.104:1, and the
+ * neutral hint is `colorTextSecondary` at 6.978:1 rather than the design system's own
+ * `colorTextDescription` de-emphasis default at 3.352:1.
+ *
+ * Trade-offs: publishing the roles here does not by itself repaint a hint — a screen has to import
+ * this map instead of styling the string itself. The alternative was to leave each screen to
+ * resolve the shade from {@link BMS_TEXT_COLOR_TOKENS} directly, which is what several already do;
+ * naming the two roles once means a screen decides only WHICH operand its mapset carries, which is
+ * a fact it can read out of the source, rather than which shade is readable, which it cannot.
+ */
+export const HINT_TEXT_TOKENS = {
+  /** 6.16:1 — hints the mapsets mark `COLOR=BLUE`, the majority. */
+  BLUE: BMS_TEXT_COLOR_TOKENS.BLUE,
+  /** 6.98:1 — hints the mapsets mark `COLOR=NEUTRAL`, every one of them a `(Y/N)` prompt. */
+  NEUTRAL: BMS_TEXT_COLOR_TOKENS.NEUTRAL,
+} as const satisfies Record<'BLUE' | 'NEUTRAL', AntdTokenName>;
+
+/**
+ * Text-grade token a money value's SIGN resolves to, so the three cases are distinguishable.
+ *
+ * Purpose: `ui/src/format/money.ts` renders a money string through one of the measured edit masks
+ * and returns the token from this map beside it, so every screen paints a balance, a limit and a
+ * transaction amount the same way and the positive, negative and zero cases are told apart by
+ * something other than reading the leading character.
+ *
+ * Assumptions: the sign is ALREADY carried by a non-colour channel and this map only reinforces it.
+ * Every measured picture is signed — `+ZZZ,ZZZ,ZZZ.99` on the five `app/bms/COACTVW.bms` money
+ * fields, `+9999999999.99` at `app/cbl/COBIL00C.cbl` L56 and `+99999999.99` at L55 — so the leading
+ * `+` or `-` is present in the rendered text whatever colour it takes. That is what keeps this map
+ * on the right side of WCAG 1.4.1: colour is redundant here, never the only carrier.
+ *
+ * Assumptions: the positive case is the baseline's own resolution and is therefore NOT tinted. None
+ * of the five `COACTVW` money fields carries a `COLOR=` operand at all, so
+ * {@link BMS_SOURCE_HISTOGRAM}'s absent-operand row governs them and they resolve to `colorText`.
+ * Only the two exceptional cases move, which keeps the ordinary rendering identical to the source.
+ *
+ * Alternatives Considered: three. Tinting the positive case green — rejected because the measured
+ * role of `COLOR=GREEN` in this baseline is an editable-input affordance rather than a favourable
+ * value (65 of 76 base green fields are `UNPROT`), so green on a read-only balance would assert an
+ * affordance that is not there. Leaving all three on `colorText`, which is the literally faithful
+ * option — rejected because the AAP requires the three renderings to be distinguishable and the
+ * screens beside them already paint semantic status values, so withholding it from money alone is
+ * the inconsistency. Bold weight for the negative case instead of colour — rejected because
+ * `fontWeightStrong` is already committed to the `ATTRB=BRT` brightness axis in
+ * {@link TYPOGRAPHY_TOKENS}, and 21 of the 23 red field definitions are themselves BRT, so weight
+ * would collide with an operand the source does use.
+ */
+export const MONEY_SIGN_TEXT_TOKENS = {
+  /** 16.56:1 — the baseline's own resolution for an unmarked money field, so the ordinary case is unchanged. */
+  positive: BMS_TEXT_COLOR_TOKENS.DEFAULT,
+  /** 5.57:1 — the refusal/adverse role, the only attention hue the baseline moves at run time. */
+  negative: BMS_TEXT_COLOR_TOKENS.RED,
+  /** 6.98:1 — the de-emphasis role, because a zero balance is the least consequential of the three. */
+  zero: BMS_TEXT_COLOR_TOKENS.NEUTRAL,
+} as const satisfies Record<'positive' | 'negative' | 'zero', AntdTokenName>;
 
 /**
  * Preset palette anchor whose hue each separated semantic colour seed is taken
@@ -832,11 +1021,17 @@ export const BREAKPOINT_TOKENS = {
 export const FIELD_ERROR_TOKENS = {
   /*
    * Refactoring Rationale: this was `colorError`, the mid-ramp error anchor, and it is now the
-   * ramp's text-grade shade through {@link BMS_TEXT_COLOR_TOKENS}. The value this token paints is
-   * always TEXT — the `'*'` marker and the refusal sentences beside a field — and the anchor
-   * measures 3.27:1 against {@link TEXT_CONTRAST_SURFACE} where AA asks 4.5:1, while the
-   * text-grade shade measures 4.62:1. The role is unchanged: red still means refused, and the hue
+   * red role's text-grade shade through {@link BMS_TEXT_COLOR_TOKENS}. The value this token paints
+   * is always TEXT — the `'*'` marker and the refusal sentences beside a field — and the anchor
+   * measures 3.27:1 against {@link TEXT_CONTRAST_SURFACE} where AA asks 4.5:1, while the shade the
+   * map now resolves measures 5.57:1. The role is unchanged: red still means refused, and the hue
    * family survives, so nothing the `CSSETATY` contract asserts is given up.
+   *
+   * Assumptions: this entry names the RED ROLE rather than a shade, so the shade the role resolves
+   * to is free to move without an edit here. It has moved once already — from the error ramp's own
+   * `…TextActive` alias at 4.618:1 to the preset red step at 5.571:1, because the same role is
+   * painted on the alert tint in the message band and measured 4.224:1 there. Reading the role is
+   * what let that correction reach the field-error contract for free.
    */
   errorColor: BMS_TEXT_COLOR_TOKENS.RED,
   blankMarker: '*',
@@ -1088,6 +1283,61 @@ export function characterCellWidthShare(cells: number, spanCells: number): strin
 }
 
 /**
+ * Turns a measured span of source character cells into an ABSOLUTE column width that reserves the
+ * design system's own cell padding on top of it.
+ *
+ * Purpose: the same G1 job as {@link characterCellWidthShare}, for the case that helper cannot
+ * serve - a grid whose narrowest column is only a few cells wide. A proportional share divides the
+ * cells by the row and applies the result to a total that INCLUDES padding, so every column is
+ * handed a slice of the padding in proportion to its characters rather than the two edges it
+ * actually has. Wide columns are over-served by that and narrow ones are starved, and the
+ * starvation is absolute rather than proportional: a column has two paddings whatever its width,
+ * so the fewer characters it spans the larger the fraction of its allocation the padding eats.
+ *
+ * Refactoring Rationale: this exists because a browser pass measured the starvation on a delivered
+ * screen. The user browse's type column spans four cells of a seventy-one cell row, so its share
+ * was 5.63% of a table laid out at 718.63 pixels - 40.48 pixels - out of which the design system's
+ * 16 pixels of padding on each edge left a content box of about 8 pixels. Its own heading is four
+ * characters, so at every viewport width from 375 to 1920 the heading laid out ONE CHARACTER PER
+ * LINE and the header row stood 120 pixels tall. Reserving the padding per column instead makes a
+ * column's allocation what its content actually needs, and the sum over the columns is unchanged:
+ * summing `cells * ch + 2 * padding` over a row gives `rowCells * ch + 2 * columnCount * padding`,
+ * which is exactly the total a caller declares as the grid's least measure. The two therefore agree
+ * by construction rather than by a caller keeping them in step.
+ *
+ * Alternatives Considered: (1) raising the column's cell count until the heading fitted. Rejected
+ * outright - the count is a MEASUREMENT of the mapset, so inflating it makes the derivation
+ * unfalsifiable and leaves the next reader unable to check it. (2) `white-space: nowrap` on the
+ * heading. Rejected as a treatment of the symptom: an allocation too small for its content is a
+ * wrong allocation, and forbidding the wrap converts a tall header into a clipped or overflowing
+ * one. (3) Leaving the proportional helper and accepting the tall header. Rejected because it is a
+ * defect visible at every width, including the widths where the grid has room to spare.
+ *
+ * Trade-offs: the returned value is a `calc()` length rather than a percentage, so a column no
+ * longer grows in proportion when the grid is laid out wider than its least measure - the browser
+ * distributes the surplus instead. That is the better behaviour here for the same reason the
+ * padding is reserved: a column's need for space is not proportional to its character count.
+ * @param {number} cells - Character cells the column occupies in the source mapset.
+ * @param {number | string} cellPadding - The design system's per-edge cell padding, either resolved
+ *   as a number of pixels or as the CSS-variable reference the theme's variable map carries.
+ * @returns {string} The column's width as a CSS `calc()` expression in character cells plus padding.
+ * @throws {RangeError} If the cell count is not a positive integer, which would mean the caller
+ *   mis-read the mapset.
+ */
+export function characterCellColumnMeasure(cells: number, cellPadding: number | string): string {
+  if (!Number.isInteger(cells) || cells < 1) {
+    throw new RangeError('A character-cell span must be a positive whole number of cells.');
+  }
+  /*
+   * Assumptions: the padding is stringified rather than arithmetic-ed, because the theme's variable
+   * map holds `var(--ant-padding)` references at runtime while carrying the resolved token's
+   * compile-time `number` type. `calc()` resolves either form, so one expression serves both a test
+   * that states a literal length and the application that resolves a variable.
+   */
+  return `calc(${String(cells)}ch + 2 * ${String(cellPadding)})`;
+}
+
+/**
  * Complete G1–G8 register for mismatches between BMS and Ant Design.
  *
  * Purpose: each gap retains the measured source, the population and unit of its
@@ -1218,9 +1468,9 @@ export const DESIGN_GAPS = [
     sourceValue:
       'COLOR=BLUE, COLOR=TURQUOISE, COLOR=GREEN, COLOR=YELLOW and COLOR=RED painted as prose text, plus COLOR=BLUE on the design system Layout.Header default fill.',
     measuredCount:
-      'On the painted surface colorBgContainer: blue operand 4.104:1, turquoise 2.205:1, green 2.265:1, yellow 1.900:1 and red 3.268:1, every one below 4.5:1, while neutral 6.978:1, default 16.558:1 and pink 16.558:1 clear it; three whole families measured member by member, cyan best 3.549:1, success best 3.463:1 and warning best 2.867:1, against primary best 6.159:1 and error best 4.618:1 which do clear it. On the abandoned dark chrome #001529: blue operand 4.491:1 across the skip link and both header rows, against a 4.5:1 requirement, while the yellow operand reached 9.701:1 there and the text-grade blue reaches only 2.993:1.',
+      'On the painted surface colorBgContainer: blue operand 4.104:1, turquoise 2.205:1, green 2.265:1, yellow 1.900:1 and red 3.268:1, every one below 4.5:1, while neutral 6.978:1, default 16.558:1 and pink 16.558:1 clear it; three whole families measured member by member, cyan best 3.549:1, success best 3.463:1 and warning best 2.867:1, against primary best 6.159:1 and error best 4.618:1 which do clear it. On the abandoned dark chrome #001529: blue operand 4.491:1 across the skip link and both header rows, against a 4.5:1 requirement, while the yellow operand reached 9.701:1 there and the text-grade blue reaches only 2.993:1. On the alert tints the message band paints on, the error ramp text-grade alias reaches only 4.224:1 against colorErrorBg, so the red role clears the threshold on the screen surface and fails on the one surface it is actually painted on; the preset red step 7 measures 5.571:1 and 5.097:1 on those two surfaces respectively. The design system own de-emphasis default colorTextDescription, which its Typography secondary variant and its Form extra text both resolve to, measures 3.352:1, and its link alias measures 4.104:1 at rest and 2.250:1 under the pointer.',
     resolution:
-      'Resolve text through BMS_TEXT_COLOR_TOKENS against the one surface SURFACE_TOKENS.screen paints, with the per-role ratio and the in-family shade it beat recorded in BMS_TEXT_CONTRAST_AUDIT: blue keeps its hue at colorPrimaryTextActive 6.159:1 and red at colorErrorTextActive 4.618:1, turquoise snaps to colorTextLabel 6.978:1, and green and yellow snap to colorText 16.558:1. Retain every operand in BMS_SOURCE_HISTOGRAM, leave the message band alone because each severity pairs against its own alert tint with an icon and an ARIA role, and assert the ratios in ui/src/theme/textContrast.test.ts per role plus the three exhaustive family censuses and the retired dark-chrome pairing in ui/src/theme/contrast.test.ts.',
+      'Resolve text through BMS_TEXT_COLOR_TOKENS against the one surface SURFACE_TOKENS.screen paints, with the per-role ratio and the in-family shade it beat recorded in BMS_TEXT_CONTRAST_AUDIT: blue keeps its hue at colorPrimaryTextActive 6.159:1, red keeps its hue at the preset step red7 5.571:1, turquoise snaps to colorTextLabel 6.978:1, and green and yellow snap to colorText 16.558:1. Retain every operand in BMS_SOURCE_HISTOGRAM. The message band is NOT left alone: each severity resolves through the same role map and is measured against its own alert tint in ALERT_TINT_TEXT_CONTRAST_AUDIT, which is why the red role had to leave its semantic alias for a preset step of the same hue. Raise the two design system defaults that no role map can reach in ui/src/theme/antdTheme.ts, colorTextDescription to the secondary text value at 6.978:1 and the three link aliases to the primary ramp steps 7, 8 and 9 at 6.159:1, 8.974:1 and 12.076:1 so a link darkens rather than lightens under the pointer. Assert the ratios in ui/src/theme/textContrast.test.ts per role, per band severity and per link state, plus the three exhaustive family censuses and the retired dark-chrome pairing in ui/src/theme/contrast.test.ts.',
   },
   /*
    * Trade-offs: the display has to be one viewport tall so the key legend sits at its
@@ -1246,4 +1496,183 @@ export const DESIGN_GAPS = [
     resolution:
       'Declare it in ui/index.html on the mount point, beside the body margin reset the same measurement required, and let the design system stretch the frame to fill that height; register the value once in ADDITIVE_LAYOUT_VALUES with its evidence, and hold the register to the document in ui/src/layout/appShell.test.tsx. Use dvh rather than vh so a collapsing mobile toolbar cannot push the legend out of view.',
   },
+  /*
+   * Trade-offs: the focus indicator is one decision for every button in the application and
+   * cannot be two, because the design system derives it from a single token. At the pinned
+   * version the button style calls the shared focus helper once, at
+   * ui/node_modules/antd/es/button/style/index.js L63, and that helper composes the outline from
+   * lineWidthFocus and colorPrimaryBorder — see ui/node_modules/antd/es/style/index.js. Neither
+   * name is per-variant, and the per-variant colour block in
+   * ui/node_modules/antd/es/button/style/variant.js sets only the base, hover and active
+   * foregrounds. So a destructive control cannot be given a red focus ring from the ROOT theme at
+   * all — one ring is one decision for all 75 buttons.
+   *
+   * Alternatives Considered: three. Ringing every button in the primary ramp step 9, which is the
+   * strongest blue available at 12.076:1 — rejected because it leaves a blue ring around a red
+   * control, which is the half of the finding that is about semantics rather than about strength.
+   * A CSS rule targeting the dangerous class from a stylesheet — rejected because this tree
+   * imports no stylesheet at all and the theme is the single styling layer, a decision
+   * ui/vite.config.ts records from the other side. Overriding the helper by patching the package —
+   * rejected outright. Two measures are used instead. The global ring takes the base text value, so
+   * it asserts no hue and therefore contradicts no control's own semantic, and at 16.558:1 it is
+   * stronger than every hover state any variant can reach. The per-variant hue is then reached
+   * WITHOUT a per-variant token, by scope rather than by name: `destructiveFocusTheme` in
+   * `ui/src/theme/antdTheme.ts` is a nested provider theme carrying that one component token, and
+   * the provider merges per component name over its parent rather than replacing it — verified at
+   * `ui/node_modules/antd/es/config-provider/hooks/useTheme.js` — so a wrapped destructive control
+   * gets a red ring while every other button keeps the neutral one.
+   *
+   * Trade-offs: what survives as a gap is that adoption is per call site. A destructive control
+   * added later without the wrapper takes the neutral ring, and no assertion here can see that. It
+   * fails safe, because the neutral ring is the STRONGER of the two — an unwrapped control is
+   * under-labelled rather than unfocusable — and the two current sites are named in the resolution.
+   */
+  {
+    id: 'G9',
+    description:
+      'The design system derives one focus outline for every button variant, so no token gives a destructive control the error hue in its focus ring; only a nested provider scope can.',
+    sourceValue:
+      'No source analogue: the 3270 display has no pointer and no focus ring, and the mapsets express the input cursor with a single ATTRB=IC operand per screen rather than with a visual state.',
+    measuredCount:
+      'One shared helper, reached by all button variants. Measured against white, the default ring colour colorPrimaryBorder reaches 1.736:1 while the default outlined variant hover recolours label and border to 8.974:1, so the resting focus indicator was weaker than hover for every button in the application; the dangerous outlined variant additionally rested at 3.268:1 and LOST contrast under the pointer, falling to 2.562:1.',
+    resolution:
+      'Scope colorPrimaryBorder to the Button component in ui/src/theme/antdTheme.ts and set it to the base text value, giving a hue-neutral 3px ring at 16.558:1 that exceeds every hover state and contradicts no variant semantic; scope colorError, colorErrorHover and colorErrorActive to the same component and set them to the preset red steps 7, 8 and 9, so a destructive control rests at 5.571:1 and DARKENS to 7.748:1 and 10.718:1 rather than fading. For the per-variant HUE, which no token supplies, export destructiveFocusTheme from the same module and wrap each destructive control in a nested ConfigProvider carrying it: the provider merges per component name rather than replacing, verified at ui/node_modules/antd/es/config-provider/hooks/useTheme.js, so the wrapped control keeps every other decision and changes only its ring to the error ramp step 9 at 10.718:1. Assert focus at least as strong as hover and hover at least as strong as rest per variant family, and the destructive ring in the error family, in ui/src/theme/textContrast.test.ts. Adoption is per call site, which is the residual cost of one derived ring for all variants; it fails safe because the neutral ring is the stronger of the two.',
+  },
+  /*
+   * Assumptions: this is a gap in the LIBRARY and not in the bridge, which is why it is recorded
+   * here rather than fixed by adding a token. The design system's result component ships one
+   * illustration per HTTP-shaped status, and the unauthorized illustration at
+   * ui/node_modules/antd/es/result/unauthorized.js is an inline SVG carrying 52 literal hex
+   * occurrences over 17 distinct values — among them a violet padlock at #A26EF4 that belongs to no
+   * hue this bridge measures. No token reaches inside it, so the zero-hardcoded-values rule cannot
+   * be satisfied by theming: an illustrated status either renders off-palette or is not used.
+   *
+   * Alternatives Considered: two. Supplying a replacement illustration built from bridge tokens,
+   * which the component accepts through its icon property — rejected because the measured source
+   * has no illustration vocabulary at all, so an SVG of our own would be a larger addition than
+   * the one being removed, and it would need its own artwork decisions with no source to check
+   * them against. Keeping the illustration and recording the deviation — rejected because that is
+   * what was already in place, and a recorded deviation does not bring a rendered value onto a
+   * token. What is used instead is the status the other seven result surfaces in this tree already
+   * use, which renders a single glyph tinted from colorError and therefore resolves entirely
+   * through the bridge.
+   *
+   * ⚠️ Refactoring Rationale: the resolution below records this as CLOSED, and the measured figures
+   * were corrected while closing it. Two things changed. The hex count was recorded as sixteen and
+   * is 52 occurrences over 17 distinct values when counted from the package rather than from a
+   * rendered screenshot, which is the difference between counting what ships and counting what an
+   * eye can pick out. And the surface named as the one offender no longer renders the component at
+   * all — `ui/src/routes/guards.tsx` composes its refusal in the application frame from catalogue
+   * text with no imagery — so the gap is closed by removal and this entry's job is now preventive:
+   * it keeps the reason the illustrated statuses are unused attached to the decision.
+   */
+  {
+    id: 'G10',
+    description:
+      'The design system result component ships literal illustration artwork for its HTTP-shaped statuses, which no token can reach.',
+    sourceValue:
+      'No source analogue: the baseline refuses an unauthorised operator with a message-band sentence on the ordinary screen, never with a dedicated illustrated surface.',
+    measuredCount:
+      'The unauthorized illustration at ui/node_modules/antd/es/result/unauthorized.js carries 52 literal hex occurrences over 17 distinct values -- #192064, #2B0849, #552950, #5BA02E, #5C2552, #648BD8, #7BB2F9, #92C110, #A26EF4, #A4AABA, #CBD1D1, #DB836E, #E4EBF7, #F2D7AD, #FFB594, #FFC6A0 and #FFF -- of which the violet padlock #A26EF4 is the one an audit of the rendered surface reported. None resolves to a bridge token. Counted from the installed package rather than from the rendered SVG, which is why the figure is 17 distinct rather than the 16 a screenshot-side count produced.',
+    resolution:
+      'CLOSED in this delivery, and by removal rather than by theming. No HTTP-shaped status is rendered anywhere in ui/src: the access-denial surface in ui/src/routes/guards.tsx composes the refusal inside the application frame from catalogue text with no imagery at all, and the seven surfaces that do use the result component -- ui/src/layout/ShellContentBoundary.tsx and the accountUpdate, accountView, authDetail, cardList, cardUpdate and refTypeEdit screens -- all use status="error", whose glyph the component tints from colorError at ui/node_modules/antd/es/result/style/index.js L105. DENIAL_SURFACE_CONTRACT therefore stands as the preventive record: it names the variant any future refusal surface must select, so the illustrated statuses stay unreachable and no rendered value on such a surface can be literal. Asserted in ui/src/theme/textContrast.test.ts.',
+  },
 ] as const satisfies readonly DesignGap[];
+
+/**
+ * Design-system contract a refusal surface renders through, so no value on it is literal.
+ *
+ * Purpose: the design system offers two ways to render a refusal. One ships an illustration this
+ * bridge cannot reach — see the `G10` entry of {@link DESIGN_GAPS} — and one renders a single glyph
+ * tinted from a token. This constant names the second so the choice is a recorded design decision
+ * rather than a prop a screen happens to have typed.
+ *
+ * Assumptions: it is PREVENTIVE rather than corrective as delivered. The access-denial surface in
+ * `ui/src/routes/guards.tsx` composes its refusal inside the application frame from catalogue text
+ * with no imagery at all, which is a better answer than either variant of the component, and no
+ * HTTP-shaped status is rendered anywhere in `ui/src`. What this constant does is keep the reason
+ * attached to the decision: a later surface reaching for `status="403"` has somewhere to read why
+ * that status is unused, and the assertion in `ui/src/theme/textContrast.test.ts` keeps the variant
+ * it names on the bridge.
+ *
+ * Assumptions: `status` is a design-system VARIANT SELECTOR and not a colour, a string or a
+ * measured design value, which is why naming it here does not breach the names-not-values rule the
+ * module header sets. It selects which of the component's own treatments renders, and the treatment
+ * it selects is the one whose every value the theme supplies.
+ *
+ * Assumptions: the glyph token is recorded alongside it because the variant alone does not say what
+ * colour the refusal takes, and a reader checking the bridge needs the answer without opening the
+ * package. The component tints the error glyph from `colorError`, the same hue role
+ * {@link BMS_COLOR_TOKENS} assigns to the 23 `COLOR=RED` field definitions.
+ */
+export const DENIAL_SURFACE_CONTRACT = {
+  /** Result variant to render: a token-tinted glyph rather than the off-palette illustration. */
+  status: 'error',
+  /** Token the selected variant tints its glyph from, recorded so the bridge covers the surface. */
+  glyphColor: BMS_COLOR_TOKENS.RED,
+} as const satisfies { readonly status: 'error'; readonly glyphColor: AntdTokenName };
+
+/**
+ * Smallest pointer target WCAG 2.1 asks of a control at the AA conformance level.
+ *
+ * Assumptions: 24 CSS pixels is the figure from success criterion 2.5.8 Target Size (Minimum),
+ * which is the AA criterion. The 44-pixel figure that a touch-target audit usually quotes is from
+ * 2.5.5 Target Size (Enhanced), which is AAA. The distinction decides what this tree is held to:
+ * the AAP mandates the design system's own control scale, that scale sets a 32-pixel control
+ * height, and a AAA criterion does not outrank a frozen plan. So 24 is the floor asserted and 44 is
+ * recorded as the enhanced figure it is.
+ */
+export const TARGET_SIZE_AA_MINIMUM = 24;
+
+/**
+ * Pointer target size WCAG 2.1 asks at the enhanced conformance level, recorded and not adopted.
+ *
+ * Assumptions: this exists so the 44-pixel figure has a home with its criterion attached. A reader
+ * who finds only {@link TARGET_SIZE_AA_MINIMUM} might reasonably think the larger figure was never
+ * considered; it was, and {@link CONTROL_SCALE_DECISION} records why it is not the bar.
+ */
+export const TARGET_SIZE_AAA_ENHANCED = 44;
+
+/**
+ * The control-scale decision, recorded so it cannot be silently reopened.
+ *
+ * Purpose: an accessibility audit of the delivered screens measured every interactive control
+ * against 44 CSS pixels and reported that none of 75 met it. That is a true measurement of the
+ * wrong criterion for this tree, and the decision it prompts — whether to inflate the global
+ * control height — is exactly the kind of decision that gets taken twice in opposite directions if
+ * it is not written down. It is written down here, with the figures, and asserted in
+ * `ui/src/theme/textContrast.test.ts`.
+ *
+ * Assumptions: the design system's control scale is mandated rather than chosen. The AAP's design
+ * system section requires that every rendered value resolve to a named token of this exact package
+ * version and that layout go through the system's own primitives; the control height is one of
+ * those tokens, and moving it moves the height of every button, input, picker and select on all 21
+ * screens. So the scale is kept, and what is fixed instead is every control that falls below the AA
+ * floor for a reason the scale does not cause.
+ *
+ * Alternatives Considered: raising `controlHeight` from 32 to 44. Rejected on two independent
+ * grounds. It is not required — 32 already clears the AA criterion at
+ * {@link TARGET_SIZE_AA_MINIMUM} with eight pixels to spare — and it would work against the one
+ * source property this migration is most careful about: the mapsets lay 128 field definitions onto
+ * a 24-row display, and a 37 percent taller control on every one of them adds scroll height to the
+ * densest screens, which is the same objection that rejected the compact algorithm from the other
+ * direction in `ui/src/theme/antdTheme.ts`.
+ *
+ * Trade-offs: keeping the scale means the application conforms at AA and not at AAA for target
+ * size, and that is stated rather than left to be inferred from a passing test.
+ */
+export const CONTROL_SCALE_DECISION = {
+  /** Token whose value the whole control scale derives from; deliberately not overridden. */
+  scaleToken: 'controlHeight',
+  /** Token the smallest themed control derives from, raised to the AA floor rather than left at the design system default. */
+  smallestControlToken: 'controlHeightSM',
+  /** Criterion the floor asserted in this tree comes from. */
+  criterion: '2.5.8 Target Size (Minimum), AA',
+  /** Criterion the larger figure comes from, recorded as considered and not adopted. */
+  enhancedCriterion: '2.5.5 Target Size (Enhanced), AAA',
+} as const satisfies {
+  readonly scaleToken: AntdTokenName;
+  readonly smallestControlToken: AntdTokenName;
+  readonly criterion: string;
+  readonly enhancedCriterion: string;
+};

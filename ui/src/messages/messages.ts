@@ -4296,6 +4296,16 @@ export function formatDb2Message(
  * needs the exact runtime field value - a fixed-width export, or a test comparing
  * against mainframe output - can obtain it without the catalog storing fabricated
  * bytes.
+ * Assumptions: the input is a CATALOGUED literal, which is why measuring it with
+ * `String.prototype.length` is correct here. Every string this catalog holds is
+ * transcribed from `app/**`, where the source character set has no character outside
+ * US-ASCII, so for these inputs code units, code points and UTF-8 bytes are all the
+ * same number and the three possible readings of "width" cannot disagree. That is NOT
+ * true of operator-supplied text, where an accented letter or an emoji makes them
+ * differ; text arriving from a form is measured with {@link codePointLength} and
+ * {@link utf8ByteLength} and checked with {@link fitsDeclaredWidth} instead, and the
+ * two concerns are kept in separate functions precisely so that neither borrows the
+ * other's assumption.
  * @param {string} text - The literal exactly as transcribed from the copybook.
  * @param {number} declaredWidth - Field width from the `PIC X(n)` clause; must be a
  *   non-negative integer.
@@ -4317,6 +4327,124 @@ export function padToDeclaredWidth(text: string, declaredWidth: number): string 
   return text.length >= declaredWidth
     ? text.slice(0, declaredWidth)
     : text + ' '.repeat(declaredWidth - text.length);
+}
+
+/**
+ * Counts the CODE POINTS in a string, which is what a declared field width limits.
+ *
+ * Purpose: JavaScript's `String.prototype.length` counts UTF-16 code units, and every character
+ * outside the Basic Multilingual Plane costs two of them. A control carrying `maxLength={20}` on a
+ * `PIC X(20)` field therefore stops accepting input after 18 characters if two of them are emoji,
+ * and after 10 if all of them are — the operator sees a field that silently holds half of what its
+ * hint says. Measured: `Ünïcödé Émoji 🎉🏦` is **16 characters and 18 code units**, so it consumes
+ * 18 of a 20-position field.
+ *
+ * Assumptions: code points and not grapheme clusters. A grapheme count is what a person would call
+ * "characters" — a flag emoji or a family emoji is one grapheme and several code points — but the
+ * limit being measured against is a database column and a fixed-width record, and both count code
+ * points. Measuring graphemes would produce a friendlier number that permits a value the storage
+ * layer then refuses, which is the worse of the two failures.
+ *
+ * Alternatives Considered: `Intl.Segmenter` with granularity `grapheme`. Rejected for the reason
+ * above and one more: it would make the measurement locale-sensitive, and a field width is not.
+ * @param {string} text - Any string, including one carrying astral characters.
+ * @returns {number} The number of Unicode code points in `text`.
+ */
+export function codePointLength(text: string): number {
+  /*
+   * WHY : Assumptions: spread iteration is used rather than a loop over indices because the string
+   *       iterator yields whole code points, pairing surrogates automatically. Counting with
+   *       `text.length` is the defect this function exists to correct, so it cannot appear here.
+   */
+  return [...text].length;
+}
+
+/**
+ * Counts the bytes a string occupies once encoded for the wire.
+ *
+ * Purpose: the storage this application feeds is fixed-width at the record level — the copybooks
+ * declare `PIC X(n)` and the ETL reads at byte offsets — and a code-point count does not answer how
+ * many BYTES a value takes. The two diverge for every non-ASCII character, and they diverge
+ * differently for the two Unicode forms of the same accented letter: `é` composed is one code point
+ * and two bytes, while `é` decomposed is two code points and three bytes. A name field that accepts
+ * either therefore has two different capacities depending on how the operator's keyboard produced
+ * the accent.
+ *
+ * Assumptions: UTF-8, because that is what a JSON request body is encoded as. `TextEncoder` is used
+ * rather than a hand-rolled counter: it is a platform API, it is exact, and a manual count over
+ * code-point ranges is a thing to get wrong with no upside.
+ * @param {string} text - Any string.
+ * @returns {number} The number of UTF-8 bytes `text` encodes to.
+ */
+export function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
+ * Normalises operator-supplied text to the one Unicode form the wire should carry.
+ *
+ * Purpose: two strings that look identical on screen can differ byte for byte — `é` as one code
+ * point, or `e` followed by a combining acute — and both round-trip through this application
+ * unchanged today. On a system whose storage is fixed-width and whose keys are compared as
+ * characters, that means two records an operator cannot tell apart, a search that finds one of them,
+ * and a field width that holds a different number of letters depending on which form was typed.
+ * Composing on the way out removes the ambiguity at the one boundary where it can still be removed.
+ *
+ * Assumptions: NFC and not NFD. Both are canonical, so neither loses information, and either would
+ * make the two forms converge; NFC is chosen because it is the shorter of the two for Latin text —
+ * one code point per accented letter rather than two — so it is the form that fits the most letters
+ * into a declared width, and it is the form the web platform recommends for interchange.
+ *
+ * Alternatives Considered: NFKC, which additionally folds compatibility characters — a full-width
+ * digit to an ASCII digit, a ligature to its letters. Rejected because it is LOSSY with respect to
+ * the operator's input: it would silently rewrite what was typed, and the baseline's own validation
+ * refuses characters it does not want rather than rewriting them. Also considered: normalising at
+ * the transport layer instead, which would catch every field with no per-screen adoption. Rejected
+ * because the transport layer must send what it was given for the request signature and correlation
+ * to mean anything; normalisation belongs where the value is composed, not where it is posted.
+ *
+ * Trade-offs: normalising OUT and not IN means a value already stored in a decomposed form keeps
+ * that form until it is next edited. Rewriting values on the way in was considered and rejected as
+ * out of scope for a presentation layer — it would change what the operator is shown relative to
+ * what the record holds, and the reconciliation belongs to the data-migration verification step.
+ * @param {string} text - Text as the operator typed it, in either canonical form.
+ * @returns {string} The same text in Normalization Form C.
+ */
+export function normaliseForWire(text: string): string {
+  return text.normalize('NFC');
+}
+
+/**
+ * Reports whether operator-supplied text fits a declared field width once normalised.
+ *
+ * Purpose: this is the check a form control's own `maxLength` cannot perform, and it is meant to be
+ * used ALONGSIDE it rather than instead of it. `maxLength` stops the keystroke, which is the right
+ * interaction, but it counts the wrong unit; this counts the right ones and is what a validator
+ * should refuse on.
+ *
+ * Assumptions: BOTH measures are required to fit, and the byte measure is the one that usually
+ * binds. A `PIC X(20)` field is twenty bytes on the record, so twenty accented letters are twenty
+ * code points and forty bytes — a value that satisfies a character count and overflows the field.
+ * Checking only code points would let it through to a service that refuses it with a message the
+ * operator cannot act on; checking only bytes would reject a value the database column would have
+ * accepted. Requiring both is the conservative reading, and it is the one that matches a
+ * fixed-width record.
+ * @param {string} text - Text as the operator typed it.
+ * @param {number} declaredWidth - Field width from the `PIC X(n)` clause; a non-negative integer.
+ * @returns {boolean} True when the normalised text fits the width in both code points and bytes.
+ * @throws {RangeError} If `declaredWidth` is negative or not an integer, which would mean the caller
+ *   passed something that is not a COBOL field width.
+ */
+export function fitsDeclaredWidth(text: string, declaredWidth: number): boolean {
+  if (!Number.isInteger(declaredWidth) || declaredWidth < 0) {
+    throw new RangeError(
+      `declaredWidth must be a non-negative integer, received ${String(declaredWidth)}`,
+    );
+  }
+  const normalised = normaliseForWire(text);
+  return (
+    codePointLength(normalised) <= declaredWidth && utf8ByteLength(normalised) <= declaredWidth
+  );
 }
 
 /**
@@ -4633,9 +4761,19 @@ export const SCREEN_NOT_AVAILABLE_TITLE = 'Screen not available';
  * reference application has and this delivery has not. An operator who reads "not
  * available" as "broken" raises a defect; one who reads it as "not in this build" does
  * not.
+ *
+ * ⚠️ Refactoring Rationale: shortened from 86 characters to 68. A sentence this length
+ * overruns the {@link MESSAGE_BAND.workAreaWidth}-character field a service publishes an
+ * operator-facing message through, and the band renders a box that wide, so the tail was
+ * lost with nothing on screen to indicate that anything had been. "The requested CardDemo
+ * screen" became "This screen": the surface already names the product in its shell title,
+ * and "requested" restated what an operator had just done. Both halves of the meaning the
+ * assumption above argues for -- the delivery boundary, and the one action available --
+ * survive intact, which is the test any shortening here has to pass. Bounded by
+ * {@link AUTHORED_OPERATOR_SENTENCES} so it cannot creep back.
  */
 export const SCREEN_NOT_AVAILABLE_DETAIL =
-  'The requested CardDemo screen is not part of this delivery. Use a listed screen below.';
+  'This screen is not part of this delivery. Use a listed screen below.';
 
 /**
  * Explanation shown when a service refuses an ORDINARY operation on authority grounds.
@@ -4666,9 +4804,15 @@ export const SCREEN_NOT_AVAILABLE_DETAIL =
  * refused caller must not be told which authority would have succeeded -- the contract's own `Forbidden`
  * response withholds even whether the row exists for the same reason -- so the sentence states the
  * outcome and the one action available.
+ *
+ * ⚠️ Refactoring Rationale: shortened from 86 characters to 64, for the field-width reason recorded on
+ * {@link SCREEN_NOT_AVAILABLE_DETAIL}. "for this CardDemo function" became "here": the operator is
+ * looking at the function, so naming it added no information, and the sentence still names no group,
+ * no claim and no endpoint -- the withholding this constant exists for is untouched. Bounded by
+ * {@link AUTHORED_OPERATOR_SENTENCES}.
  */
 export const ACCESS_DENIED_NOT_AUTHORIZED =
-  'Your sign-on is not authorized for this CardDemo function. Contact your administrator.';
+  'Your sign-on is not authorized here. Contact your administrator.';
 
 /** Label of the control on the not-available surface that returns to the card browse. */
 export const OPEN_CARD_BROWSE_LABEL = 'Open card browse';
@@ -4769,9 +4913,14 @@ export const CARD_DETAIL_INVALID_LINK_GUIDANCE =
  * Assumptions: it is shown BENEATH the transcribed abend sentence rather than replacing it. The
  * abend wording is what the baseline says for a failure it cannot continue past, and this adds the
  * recovery a browser makes possible and a terminal did not.
+ *
+ * ⚠️ Refactoring Rationale: shortened from 96 characters to 53, for the field-width reason recorded on
+ * {@link SCREEN_NOT_AVAILABLE_DETAIL}. The clause dropped -- "the rest of the application is
+ * unaffected" -- was reassurance rather than instruction, and it was the part that overran, so it was
+ * the part an operator never saw anyway. What remains is the one action available, which the assumption
+ * above states is the whole point of the sentence. Bounded by {@link AUTHORED_OPERATOR_SENTENCES}.
  */
-export const SCREEN_LOAD_FAILED_DETAIL =
-  'This screen could not be loaded. Reload to try again; the rest of the application is unaffected.';
+export const SCREEN_LOAD_FAILED_DETAIL = 'This screen could not be loaded. Reload to try again.';
 
 /**
  * Label of the control on the failed-screen surface that reloads the document.
@@ -4881,9 +5030,15 @@ export const CREDENTIAL_HANDOVER_MESSAGES = {
    *
    * Assumptions: it opens with the action rather than the caveats, because the operator's next step is
    * to pass the value on and the caveats only matter once they have.
+   *
+   * ⚠️ Refactoring Rationale: shortened from 118 characters to 70, for the field-width reason recorded
+   * on {@link SCREEN_NOT_AVAILABLE_DETAIL}. "cannot be retrieved afterwards" was dropped as a
+   * restatement of "shown once" rather than a second fact, and "at first sign-on" became "at sign-on"
+   * because a credential that must be changed at sign-on is necessarily changed at the first one. The
+   * action still leads and both surviving caveats follow it. Bounded by
+   * {@link AUTHORED_OPERATOR_SENTENCES}.
    */
-  EXPLANATION:
-    'Give this to the new user now. It is shown once, cannot be retrieved afterwards, and must be changed at first sign-on.',
+  EXPLANATION: 'Give this to the new user now. Shown once; must be changed at sign-on.',
   /**
    * Accessible name of the copy control. Authored.
    *
@@ -4984,21 +5139,41 @@ export const REPORT_RUN_MESSAGES = {
   },
   /** Sentence for a run that stopped without producing a document. */
   FAILED_DETAIL: 'This report run did not complete. Submit the report again to retry it.',
-  /** Sentence for a run the orchestration stopped for exceeding its time limit. */
-  TIMED_OUT_DETAIL:
-    'This report run exceeded its time limit. Submit the report again, narrowing the date range if it covers a long period.',
-  /** Sentence for a run somebody stopped deliberately. */
-  ABORTED_DETAIL:
-    'This report run was stopped before it completed. Submit the report again to retry it.',
+  /**
+   * Sentence for a run the orchestration stopped for exceeding its time limit.
+   *
+   * ⚠️ Refactoring Rationale: shortened from 118 characters to 73, for the field-width reason recorded
+   * on {@link SCREEN_NOT_AVAILABLE_DETAIL}. The conditional tail -- "if it covers a long period" --
+   * went, because a run that exceeded its limit covers a long period by definition, so the condition
+   * was always true and the advice is therefore unconditional. Bounded by
+   * {@link AUTHORED_OPERATOR_SENTENCES}.
+   */
+  TIMED_OUT_DETAIL: 'Report run exceeded its time limit. Submit it again with a shorter range.',
+  /**
+   * Sentence for a run somebody stopped deliberately.
+   *
+   * ⚠️ Refactoring Rationale: shortened from 85 characters to 65, for the field-width reason recorded
+   * on {@link SCREEN_NOT_AVAILABLE_DETAIL}. "Submit the report again to retry it" became "Submit it
+   * again": the pronoun is unambiguous after a sentence whose subject is the report run, and "to retry
+   * it" restated the verb. Bounded by {@link AUTHORED_OPERATOR_SENTENCES}.
+   */
+  ABORTED_DETAIL: 'This report run was stopped before it completed. Submit it again.',
   /**
    * Sentence for a completed run whose document is not in the store.
    *
    * Assumptions: this state is reachable and is not a defect. The contract states that the result
    * location is null after a lifecycle rule has expired what the run wrote, so a run that completed
    * days ago can report success with nothing left to collect.
+   *
+   * ⚠️ Refactoring Rationale: shortened from 106 characters to 75 -- exactly the field width, with no
+   * margin -- for the reason recorded on {@link SCREEN_NOT_AVAILABLE_DETAIL}. "This report run" became
+   * "Report" and "Submit the report again to produce it" became "Submit it again to produce it". Both
+   * facts the assumption above turns on survive: that the run SUCCEEDED, and that its document is gone
+   * rather than pending. Bounded by {@link AUTHORED_OPERATOR_SENTENCES}, which is what makes a sentence
+   * sitting on the limit safe to leave there.
    */
   DOCUMENT_UNAVAILABLE:
-    'This report run completed, but its document is no longer available. Submit the report again to produce it.',
+    'Report completed, but its document is no longer available. Submit it again.',
   /**
    * Sentence for a status read that did not answer.
    *
@@ -5007,9 +5182,17 @@ export const REPORT_RUN_MESSAGES = {
    * the one action named.
    */
   STATUS_READ_FAILED: 'The status of this report run could not be read. Refresh to try again.',
-  /** Sentence for a document collection that did not answer, on the same terms as a failed read. */
+  /**
+   * Sentence for a document collection that did not answer, on the same terms as a failed read.
+   *
+   * ⚠️ Refactoring Rationale: shortened from 77 characters to 72, for the field-width reason recorded
+   * on {@link SCREEN_NOT_AVAILABLE_DETAIL}. This one overran by two characters, which is the case that
+   * makes the bound worth asserting rather than reviewing: nothing about the rendered sentence looked
+   * wrong, and the two words it lost -- "and try" for "to retry" -- were invisible either way.
+   * Bounded by {@link AUTHORED_OPERATOR_SENTENCES}.
+   */
   DOCUMENT_COLLECTION_FAILED:
-    'The report document could not be collected. Refresh the status and try again.',
+    'The report document could not be collected. Refresh the status to retry.',
   /**
    * Sentence shown once the screen has stopped reading the status on its own.
    *
@@ -5020,3 +5203,249 @@ export const REPORT_RUN_MESSAGES = {
   AUTOMATIC_UPDATES_STOPPED:
     'Automatic status updates have stopped. Refresh to read the current status.',
 } as const;
+
+/**
+ * Sentence shown when a page of the card browse could not be read at all.
+ *
+ * Purpose: the source screen composes `WS-FILE-ERROR-MESSAGE` (`app/cbl/COCRDLIC.cbl` L153-L172,
+ * moved to the message field at L1254) by appending the internal file name and the CICS response and
+ * reason codes. That is the class of detail this catalogue's redaction register withholds everywhere
+ * else, and for the same reason: an internal identifier must not reach a browser, a log line or a bug
+ * report. So this sentence is AUTHORED and carries no {@link SourceRef}, and it names the correlation
+ * identifier the operator already holds instead of the file the request touched.
+ *
+ * ⚠️ Refactoring Rationale: this lives here rather than in `ui/src/screens/cardList/index.tsx`, which
+ * declared it locally at 119 characters. Two things were wrong with that. The sentence overran the
+ * {@link MESSAGE_BAND.workAreaWidth}-character message field by 44 characters and was truncated on
+ * screen with no indication, and being screen-local it was outside every check this module applies to
+ * operator-facing text -- including the bound in {@link AUTHORED_OPERATOR_SENTENCES} that would have
+ * caught it. It is now 72 characters and inside that bound. The screen must import it and delete its
+ * local copy; `ui/src/layout/MessageBand.test.tsx` holds a third variant of the same sentence as a
+ * fixture and should use this one too, so all three stop drifting apart.
+ *
+ * Alternatives Considered: leaving it screen-local and asserting its length from the screen's own
+ * test. Rejected because the audit found the same sentence written three ways in three files, which is
+ * what a string with no single home produces; the migration plan's own instruction that every
+ * user-visible string come from the catalogue exists to prevent exactly that.
+ */
+export const CARD_LIST_PAGE_UNAVAILABLE =
+  'Card data is temporarily unavailable. Report it with the correlation id.';
+
+/**
+ * Sentence shown on the sign-on screen when a guard turned the operator away from a guarded route.
+ *
+ * Purpose: say why the operator is looking at sign-on. `ui/src/routes/guards.tsx` redirects an
+ * operator holding no session to `/signon` and hands the entry a reason through
+ * {@link https://developer.mozilla.org/docs/Web/API/History/state | history state} --
+ * `SIGN_ON_BOUNCE_REASON` in `ui/src/routes/navigation.ts` -- and until now nothing rendered a
+ * sentence for it: an audit measured the band present and EMPTY on all nineteen guarded routes, so
+ * being thrown out of `/users/USER0100/delete` was indistinguishable from opening the application for
+ * the first time.
+ *
+ * Assumptions: this sentence is AUTHORED and carries no {@link SourceRef}, because the condition it
+ * describes cannot have one. A 3270 session was held by the CICS region for the terminal's
+ * duration and no program could observe it ending -- there was no browser tab to reload, no
+ * memory-only token store to evict, and `app/cbl/COSGN00C.cbl` accordingly declares exactly five
+ * message literals (L120, L125, L242, L249, L254), none of them about a session that has gone away.
+ * Transcribing one of the five would have been worse than authoring this: `Unable to verify the
+ * User ...` reports a verification that was attempted, and none was.
+ *
+ * Assumptions: it says nothing about WHERE the operator was going, although the guard also carries
+ * the attempted path. Naming the destination in the sentence would paint a value the address bar
+ * supplied -- a mistyped account identifier or card number would be rendered straight back onto the
+ * screen and into any screenshot of it -- which is the same withholding
+ * {@link NOT_FOUND_MESSAGES} records for the rejected path.
+ *
+ * Alternatives Considered: wording it as an expiry (`Your session has expired`). Rejected because the
+ * commonest cause measured was not an expiry at all but a document reload evicting a deliberately
+ * memory-only token store, and a sentence naming a timeout would send the operator looking for an
+ * idle limit that does not exist. "Has ended" is true of both causes. Bounded by
+ * {@link AUTHORED_OPERATOR_SENTENCES}: 50 characters.
+ */
+export const SIGN_ON_SESSION_REQUIRED = 'Your session has ended. Sign on again to continue.';
+
+/**
+ * Sentence explaining the replacement-credential turn the sign-on screen presents.
+ *
+ * Purpose: explain what is being asked and why. The identity provider can answer a sign-on with
+ * `NEW_PASSWORD_REQUIRED`, at which point the screen disables the identifier, relabels the credential
+ * control and clears it -- and an audit measured the band EMPTY through all of that, so the operator
+ * was asked for a new password with no statement that their own was accepted, that it is temporary or
+ * expired, or that setting a permanent one is what completes the sign-on.
+ *
+ * Assumptions: AUTHORED, with no {@link SourceRef}, and the absence is structural rather than an
+ * omission. The reference compared a password held in clear -- `05 SEC-USR-PWD PIC X(08).` at
+ * `app/cpy/CSUSR01Y.cpy` L21, compared at `app/cbl/COSGN00C.cbl` L223 -- so it had no notion of a
+ * credential that must be changed before use and no screen state to change one in;
+ * `app/bms/COSGN00.bms` paints two input fields and no third. The turn exists here only because the
+ * managed provider is what removed the plaintext column, which is why
+ * {@link SIGN_ON_NEW_PASSWORD_LABEL} is authored beside it for the same reason.
+ *
+ * Assumptions: it opens by saying the presented credential was ACCEPTED, which is the fact the
+ * provider's contract turns on -- `services/auth-service/src/main/resources/openapi/auth-api.yaml`
+ * states that `NEW_PASSWORD_REQUIRED` means "the credential presented was correct but is temporary or
+ * expired". Without it an operator reads the replacement prompt as a rejection and retypes the
+ * password that in fact worked, which is precisely why that document also refuses to reuse
+ * `Wrong Password. Try again ...` for this outcome.
+ *
+ * Assumptions: it states NO policy requirement -- no minimum length, no character classes. The
+ * numbers are configured per environment (`infra/modules/cognito/variables.tf` defaults
+ * `password_minimum_length` to 14 and refuses anything below 12), so a copy painted here is wrong the
+ * first time an environment tightens it; the provider reports its exact requirement when it refuses,
+ * and that sentence reaches the replacement control as a field refusal. This is the same reasoning
+ * the retired width hint `D-SIGNON-RETIRED-WIDTH-HINT` is registered on.
+ *
+ * Alternatives Considered: naming the challenge itself, as in "A NEW_PASSWORD_REQUIRED challenge was
+ * raised". Rejected because the token is the provider's vocabulary and an operator can act on none of
+ * it; the register's other sentences name the operator's next action, and this one does too. Bounded
+ * by {@link AUTHORED_OPERATOR_SENTENCES}: 65 characters.
+ */
+export const SIGN_ON_NEW_PASSWORD_REQUIRED =
+  'Your password was accepted but must be replaced. Enter a new one.';
+
+/**
+ * Announcement a screen publishes while a request it issued is still in flight.
+ *
+ * Purpose: give every screen ONE sentence to announce a turn with, so the audible half of a busy
+ * state can be stated. `busyAnnouncement` in `ui/src/layout/fieldHelp.tsx` renders a polite live
+ * region and requires a sentence, and four screens declined to call it -- `ui/src/screens/signon`,
+ * `ui/src/screens/transactionList`, `ui/src/screens/authSummary` and `ui/src/screens/refTypeList` --
+ * each recording the same reason: this catalogue held no busy sentence, and inventing wording in a
+ * screen would breach transformation rule T8. An audit measured the consequence: `aria-busy` on six
+ * of thirteen busy states, on no button anywhere, and no live region announcing a request starting or
+ * ending on any screen.
+ *
+ * Assumptions: AUTHORED, and no source can exist for it. The 3270 equivalent of this state is the
+ * keyboard lock `CTRL=(ALARM,FREEKB)` gave a mapset for free -- a task holding the terminal left the
+ * keyboard locked until it re-sent the map, so the terminal SAID nothing because it did not have to;
+ * the operator physically could not type. Nothing in a browser locks the keyboard, so the property has
+ * to be stated in words that no mapset ever painted.
+ *
+ * Assumptions: ONE sentence serves a browse page turn, a save and a delete, rather than one per
+ * action. It is deliberately silent about which request is outstanding: the screen the operator is
+ * looking at, the control they just pressed and this catalogue's own per-screen legends already say
+ * that, and a per-action variant would multiply into five sentences that differ only in a verb -- with
+ * the drift between them invisible, since no two are ever on screen together.
+ *
+ * Trade-offs: it asks the operator to wait rather than offering to cancel. No screen here can abort an
+ * in-flight request -- `ui/src/api/client.ts` dispatches none with an abort signal -- so a sentence
+ * offering a cancel would name an action the application cannot perform. Bounded by
+ * {@link AUTHORED_OPERATOR_SENTENCES}: 55 characters.
+ */
+export const REQUEST_IN_PROGRESS = 'Working on your request. Wait for the screen to answer.';
+
+/**
+ * Sentence for a failure whose condition may clear on its own, so the same turn may later succeed.
+ *
+ * Purpose: let a screen say "not available at the moment" instead of "that did not work".
+ * `ui/src/api/client.ts` already classifies this -- `ApiFailureRemedy.transient` is true for a
+ * timeout and for the transient statuses, and `isTransientFailure` publishes the predicate -- and an
+ * audit found the distinction never reaching a screen: a timeout, a dropped connection and a 500 were
+ * rendered identically on every route, and one screen described a 404 as a temporary availability
+ * problem because nothing on the failure said which it was.
+ *
+ * Assumptions: AUTHORED, and the condition cannot have a reference sentence. The transport it
+ * describes did not exist: a 3270 program did not cross a network to answer a screen, and the CICS
+ * response and reason codes it did report for a file failure are the class of internal detail this
+ * catalogue's redaction register withholds -- which is the same ground
+ * {@link CARD_LIST_PAGE_UNAVAILABLE} is authored on.
+ *
+ * Assumptions: it invites a retry WITHOUT promising one is safe, and the division of labour is
+ * deliberate. This sentence answers "may the condition clear"; whether repeating THIS request is safe
+ * is the separate `ApiFailureRemedy.repeatable` judgement, because a gateway failure on a payment is
+ * transient and still not repeatable -- the write may already have landed. A screen therefore renders
+ * this sentence from `transient` and gates any repeat CONTROL on `isRepeatableFailure`.
+ *
+ * Alternatives Considered: naming the timeout ("The service did not answer in time"). Rejected
+ * because the transient class is wider than a timeout -- it includes the statuses a gateway or a
+ * load balancer answers while a service is restarting -- so the narrower wording would be false on
+ * most of the paths that reach it. Bounded by {@link AUTHORED_OPERATOR_SENTENCES}: 62 characters.
+ */
+export const TRANSIENT_FAILURE_TRY_AGAIN =
+  'The service is not available at the moment. Try again shortly.';
+
+/**
+ * Sentence for a failure that repeating will not clear, so the operator is told rather than looped.
+ *
+ * Purpose: the other half of the split {@link TRANSIENT_FAILURE_TRY_AGAIN} opens. A failure the
+ * client classifies as NOT transient -- a service that answered with a refusal it described, an
+ * unreachable host, a body that was not a problem document -- fails again identically, so a screen
+ * that invites a retry sends the operator into a loop with no exit. This says the turn did not
+ * happen and names the one action left.
+ *
+ * Assumptions: AUTHORED. Where a service DOES send a sentence, that sentence is rendered verbatim and
+ * this one is not used -- every screen here publishes `message` from the problem document first. This
+ * is for the failures that carry no document at all, which is a browser-side classification no
+ * reference program could have made.
+ *
+ * Assumptions: it names no code, no correlation identifier and no subsystem, although the failure
+ * carries all three. An operator reads this sentence; a code in it would be a value they must copy
+ * accurately under no guidance, and the audit's own finding on this class of wording is that a screen
+ * asking for a correlation identifier it does not display asks for something the operator does not
+ * have. The identifiers stay on the failure, where support reads them.
+ *
+ * Alternatives Considered: "Repeating this will not help", which is the honest mechanical statement.
+ * Rejected because it leaves the operator with no action at all, and this register's other sentences
+ * each name one. "Report it if it happens again" is the escalation the reference had no analogue for
+ * -- a 3270 operator reported an abend by its code from row 23 -- and it is deliberately conditional,
+ * because a single occurrence is not worth a report. Bounded by
+ * {@link AUTHORED_OPERATOR_SENTENCES}: 61 characters.
+ */
+export const PERSISTENT_FAILURE_REPORT_IT =
+  'That request did not complete. Report it if it happens again.';
+
+/**
+ * Every operator-facing sentence this application AUTHORED, as the register its width bound is
+ * asserted over.
+ *
+ * Purpose: a service publishes an operator-facing message through a field of
+ * {@link MESSAGE_BAND.workAreaWidth} characters, and the shell renders a box that wide. A longer
+ * sentence is cut at the boundary with nothing on screen to say so, and the audit that found this had
+ * to measure nine of them by hand. `ui/src/messages/messages.test.ts` asserts the bound over this
+ * array, so the next one fails a test instead.
+ *
+ * Assumptions: it lists AUTHORED sentences only, and that distinction is the whole reason a bound is
+ * enforceable at all. A sentence transcribed from `app/**` is verbatim under the migration's Rule T8 --
+ * including the ones this catalogue preserves with a missing space, a double space or trailing spaces --
+ * so a width failure on one of those would be asking for a change nobody is permitted to make. The
+ * only correct response there is a rendering that does not truncate, which is a shell concern.
+ *
+ * Assumptions: enumerated by hand rather than derived by walking the module's exports. A derived list
+ * would have to decide from a value whether it is an operator-facing SENTENCE, and this module also
+ * holds field labels, screen titles, control names, status words and function-key legends -- none of
+ * which is published through the message field, several of which are transcribed, and one of which is
+ * a single space. Enumeration makes adding a sentence to the bound a deliberate act; derivation would
+ * make it an accident in either direction.
+ *
+ * Trade-offs: an authored sentence a later change forgets to register is unbounded until somebody
+ * notices. That is a real gap and it is the lesser one: the alternative admits transcribed text into a
+ * check that would demand it be edited, and a wrongly-bounded verbatim string is a fidelity defect
+ * where a wrongly-unbounded authored string is a truncation an operator can report.
+ */
+export const AUTHORED_OPERATOR_SENTENCES: readonly string[] = [
+  SCREEN_NOT_AVAILABLE_DETAIL,
+  ACCESS_DENIED_NOT_AUTHORIZED,
+  SCREEN_LOAD_FAILED_DETAIL,
+  CREDENTIAL_HANDOVER_MESSAGES.EXPLANATION,
+  REPORT_RUN_MESSAGES.FAILED_DETAIL,
+  REPORT_RUN_MESSAGES.TIMED_OUT_DETAIL,
+  REPORT_RUN_MESSAGES.ABORTED_DETAIL,
+  REPORT_RUN_MESSAGES.DOCUMENT_UNAVAILABLE,
+  REPORT_RUN_MESSAGES.STATUS_READ_FAILED,
+  REPORT_RUN_MESSAGES.DOCUMENT_COLLECTION_FAILED,
+  REPORT_RUN_MESSAGES.AUTOMATIC_UPDATES_STOPPED,
+  CARD_LIST_PAGE_UNAVAILABLE,
+  /*
+   * Assumptions: the five sentences below are registered in the same act that declares them, which is
+   * what the note above means by "adding a sentence to the bound a deliberate act". Each describes a
+   * condition the reference could not have had -- a browser session ending, a credential replacement
+   * turn, a request in flight across a network, and the two halves of a transport failure -- so each
+   * is authored rather than transcribed and each is therefore inside this bound rather than exempt
+   * from it under rule T8.
+   */
+  SIGN_ON_SESSION_REQUIRED,
+  SIGN_ON_NEW_PASSWORD_REQUIRED,
+  REQUEST_IN_PROGRESS,
+  TRANSIENT_FAILURE_TRY_AGAIN,
+  PERSISTENT_FAILURE_REPORT_IT,
+] as const;

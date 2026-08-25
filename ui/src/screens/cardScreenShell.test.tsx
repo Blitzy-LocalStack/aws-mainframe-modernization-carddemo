@@ -467,17 +467,26 @@ async function detailComposesTheShellAndMapsetLabels(): Promise<void> {
   expect(screen.getByRole('heading', { name: CARD_DETAIL_TITLE })).toBeInTheDocument();
   expect(legendControlNames()).toStrictEqual(['ENTER=Search Cards', 'F3=Exit']);
   /*
-   * WHY : Refactoring Rationale: the account and card labels are expected TWICE and the other three
-   *       once, where every label was expected once before. The mapset paints its two `UNPROT` fields
-   *       -- `ACCTSID` and `CARDSID` -- and the screen now renders them as controls as well as
-   *       rendering the same two values on the record, so each of those two labels names a control and
-   *       a record row. Counting them is what keeps this case able to fail: a single `getByText` would
-   *       have thrown on the duplicate, and relaxing it to `getAllByText` without a count would have
-   *       passed whether the control was rendered or not.
+   * WHY : ⚠️ Refactoring Rationale: EVERY label is expected once, where the account and card labels
+   *       were expected twice. The two-occurrence expectation was an assertion of the defect: a browser
+   *       measured each of those identifiers rendered twice on one screen and in two different
+   *       typefaces -- the criteria control in the system sans beside a `.ant-descriptions` span in
+   *       `SFMono-Regular, Consolas, ...` -- so one label named a control and a record row holding the
+   *       same value. The mapset declares ONE field per identifier and both are criteria controls:
+   *       `ACCTSID` at `POS=(7,45)` (`app/bms/COCRDSL.bms` L84-L88) and `CARDSID` at `POS=(8,45)`
+   *       (L96-L100), with the record zone below declaring only `CRDNAME` (L107), `CRDSTCD` (L116) and
+   *       the `EXPMON`/`EXPYEAR` pair (L126, L133). The program agrees: `1200-SETUP-SCREEN-VARS` moves
+   *       the retrieved keys INTO those two criteria fields at `app/cbl/COCRDSLC.cbl` L463 and L471.
+   *       The record rows were the duplication and are gone.
+   * WHY : Assumptions: the counts are kept as a MAP rather than collapsed into a single expectation,
+   *       even though every entry is now one, because a count is what keeps this case able to fail in
+   *       both directions -- `getAllByText` without one would pass whether a screen rendered the label
+   *       once or three times, and the regression this case now guards is a return of the second
+   *       rendering.
    */
   const labelOccurrences: Record<string, number> = {
-    accountNumber: 2,
-    cardNumber: 2,
+    accountNumber: 1,
+    cardNumber: 1,
     nameOnCard: 1,
     cardActive: 1,
     expiryDate: 1,

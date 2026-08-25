@@ -52,7 +52,7 @@
  * are read as the specification and are never modified.
  */
 
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { Route, RouterProvider, Routes, createMemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
@@ -62,13 +62,14 @@ import { USER_ID_MAX_LENGTH, deleteUser, getUser } from '../api/auth';
 import { ApiRequestError } from '../api/client';
 import type { ApiError, UserResponse } from '../api/types';
 import { CARDDEMO_ADMIN_GROUP, CARDDEMO_USER_GROUP } from '../hooks/useAuth';
-import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
+import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PRIMARY_ACTION_AIDS, UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
 import {
   ACCESS_DENIED_ADMIN_ONLY,
   COMMON_MESSAGES,
   MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   USER_DELETE_CAPTION,
   USER_DELETE_FIELD_LABELS,
@@ -76,13 +77,14 @@ import {
   USER_DELETE_USER_TYPE_HINT,
   formatMessageTemplate,
 } from '../messages/messages';
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import { CARD_DEMO_ROUTES, ROUTE_TABLE, USER_DELETE_PATH } from '../router';
 import UserDeleteScreen, {
   USER_DELETE_FIELD_WIDTHS,
   USER_DELETE_PROGRAM_NAME,
   USER_DELETE_TRANSACTION_ID,
 } from '../screens/userDelete';
-import { FIELD_ERROR_TOKENS } from '../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS } from '../theme/tokens';
 import {
   apiError,
   expectMaxLength,
@@ -378,6 +380,28 @@ async function waitForBandedMessage(expected: string): Promise<void> {
 }
 
 /**
+ * Converts an antd token name into the CSS custom-property segment it resolves to.
+ *
+ * Assumptions: the design system themes through CSS variables at this version, so a token reaches the
+ * DOM as a `var(--...)` reference whose name is the token identifier in kebab case. Deriving the segment
+ * from `ui/src/theme/tokens.ts` rather than writing the property out is what lets this file assert which
+ * ROLE a sentence resolves through while holding no design literal of its own.
+ * @param {string} tokenName - The antd token identifier, as the theme bridge records it.
+ * @returns {string} The kebab-case segment of the custom property it becomes.
+ */
+function cssVariableSegment(tokenName: string): string {
+  /**
+   * Replaces one capital with its hyphenated lower-case form.
+   * @param {string} upper - The matched capital letter.
+   * @returns {string} The replacement.
+   */
+  function hyphenate(upper: string): string {
+    return `-${upper.toLowerCase()}`;
+  }
+  return tokenName.replace(/[A-Z]/gu, hyphenate);
+}
+
+/**
  * The one enterable control is the mapset's only unprotected field, at its declared width.
  * @returns {Promise<void>} Resolves once the assertions hold.
  */
@@ -404,6 +428,67 @@ async function paintsOneEnterableControlAtItsDeclaredWidth(): Promise<void> {
    * control would not be a second cursor but a race between two of them for the same one.
    */
   expect(control).toHaveFocus();
+}
+
+/**
+ * The delete key is measured in the record's own units and sized to its declared width.
+ *
+ * ⚠️ Purpose: two measured defects meet on this one control, and both matter more here than on the two
+ * sibling screens that share them because this field is the key a DESTRUCTIVE turn is issued on.
+ * `maxLength` counts UTF-16 code units, so a value truncated at eight of them is a DIFFERENT key from
+ * the one typed -- the read would return a record the operator never named, and the next key destroys
+ * whatever the read returned. And an eight-character input rendered 1172 pixels wide, which put the
+ * blank-field asterisk this control paints at its right-hand edge roughly 1150 pixels from the value it
+ * qualifies.
+ *
+ * ⚠️ Assumptions: the specimen is astral -- one code point, two UTF-16 units, four UTF-8 bytes -- and is
+ * chosen to be within the `maxLength` attribute counted in code units, so the case cannot pass because
+ * the DOM refused the paste. Four of them are eight code units the attribute admits and sixteen bytes,
+ * against an eight-byte field, so two survive; and the count is computed from the specimen's own byte
+ * cost rather than written as two.
+ *
+ * ⚠️ Assumptions: the survivors are counted as CODE POINTS through the string iterator, never with
+ * `String.prototype.length`, which is the measure under test. That is also what proves a surrogate pair
+ * was never cut in half: an unpaired half would leave a code-point count the assertion cannot satisfy.
+ *
+ * Assumptions: the WIDTH half asserts the DECLARATION and not a rendered pixel measure, because the test
+ * DOM performs no layout -- every box in it measures zero, so a pixel assertion would pass on the broken
+ * value too. The pixel outcome was measured in a browser; this exists to stop the declaration going.
+ * @returns {Promise<void>} Resolves once the assertions hold.
+ */
+async function measuresTheKeyInTheRecordUnitsAndSizesItToThem(): Promise<void> {
+  const { user } = await renderUnselected();
+  const declared = USER_DELETE_FIELD_WIDTHS.userId;
+  const astral = '\u{1F389}';
+  const admitted = Math.floor(declared / new TextEncoder().encode(astral).length);
+  const pasted = astral.repeat(admitted + 2);
+
+  expect(
+    pasted.length,
+    'the specimen must be one the maxLength attribute admits, or the case proves nothing',
+  ).toBeLessThanOrEqual(declared);
+
+  await user.click(fetchKeyControl());
+  await user.paste(pasted);
+
+  const held = (fetchKeyControl() as HTMLInputElement).value;
+
+  expect([...held], 'the key must hold whole characters up to its byte capacity').toHaveLength(
+    admitted,
+  );
+  expect(held, 'and every one of them must be the character that was pasted').toBe(
+    astral.repeat(admitted),
+  );
+
+  const measure = fetchKeyControl().style.maxInlineSize;
+
+  expect(measure, 'the key must declare a maximum measure of its own').not.toBe('');
+  expect(measure, 'capped at the eight character columns the copybook declares').toContain(
+    `${String(declared)}ch`,
+  );
+  expect(fetchKeyControl().style.inlineSize, 'while still shrinking inside a narrow viewport').toBe(
+    '100%',
+  );
 }
 
 /**
@@ -534,6 +619,10 @@ function mapsetShapeCases(): void {
     paintsOneEnterableControlAtItsDeclaredWidth,
   );
   it(
+    'measures the key in the record units and sizes the control to them',
+    measuresTheKeyInTheRecordUnitsAndSizesItToThem,
+  );
+  it(
     'displays first name, last name and user type as a record rather than as controls',
     displaysTheProtectedFieldsAsARecordAndNotAsControls,
   );
@@ -551,43 +640,143 @@ function mapsetShapeCases(): void {
 describe('delete-user screen: the one-enterable-field shape its mapset declares', mapsetShapeCases);
 
 /**
+ * Reports the destructive confirmation, as an accessibility tree consumer finds it.
+ *
+ * ⚠️ Assumptions: the surface is queried by the `dialog` ROLE and by its accessible NAME, and both
+ * halves are load-bearing. This confirmation used to be a `Popconfirm`, whose overlay is hardcoded
+ * `role="tooltip"` at `ui/node_modules/@rc-component/tooltip/es/Popup.js` -- announced to a screen
+ * reader as supplementary text about the button rather than as a question that must be answered, with no
+ * focus trap and no `aria-modal`. Querying the role here is what stops that regressing: a surface that
+ * went back to a tooltip would fail every case in this group rather than silently losing its semantics.
+ * The name comes from the mapset's own row-4 caption through `aria-labelledby`, so it also holds the
+ * dialog to being titled with verbatim text.
+ * @returns {HTMLElement} The open confirmation dialog.
+ */
+function confirmationDialog(): HTMLElement {
+  return screen.getByRole('dialog', { name: USER_DELETE_CAPTION });
+}
+
+/**
  * Reports the confirmation's accepting control.
  *
- * Assumptions: the accepting and dismissing controls carry the design system's own default wording
- * because the screen sets neither `okText` nor `cancelText`, and that is correct rather than an
- * omission: the reference had no pointer and therefore no button labels to carry across, so these two
- * strings are additive and are deliberately absent from `ui/src/messages/messages.ts`, which holds only
- * strings a COBOL source holds.
+ * ⚠️ Assumptions: it is looked up INSIDE the dialog, because its label is the mapset's own `F5=Delete`
+ * and three controls in the document carry that text at once -- this one, the in-content trigger and the
+ * footer legend's own copy. An unscoped query would resolve ambiguously, and worse, a case asserting on
+ * "the accept" could end up asserting on the trigger and pass while the dialog's accept was wrong.
+ *
+ * Assumptions: the accept is LABELLED with the mapset's key label rather than the design system's stock
+ * `OK`, which is what it carried while this was a `Popconfirm`. The dialog performs the act the row-24
+ * legend advertises, so naming it with the legend's own words is verbatim text where a stock label was
+ * additive -- and it tells an operator which of the two buttons destroys the row without their having to
+ * read the colour.
  * @returns {HTMLElement} The control that performs the deletion.
  */
 function confirmationAcceptControl(): HTMLElement {
-  return screen.getByRole('button', { name: 'OK' });
+  return within(confirmationDialog()).getByRole('button', {
+    name: USER_DELETE_KEY_LABELS.PFK05,
+  });
 }
 
 /**
  * Reports the confirmation's dismissing control.
+ *
+ * Assumptions: the dismissing control carries the design system's own default wording, and that is
+ * correct rather than an omission: the reference had no pointer and therefore no cancel button to carry
+ * across, and `ui/src/messages/messages.ts` holds only strings a COBOL source holds. It is scoped to the
+ * dialog for the same reason the accept is.
  * @returns {HTMLElement} The control that closes the confirmation without deleting.
  */
 function confirmationDismissControl(): HTMLElement {
-  return screen.getByRole('button', { name: 'Cancel' });
+  return within(confirmationDialog()).getByRole('button', { name: 'Cancel' });
+}
+
+/**
+ * Reports the in-content control that opens the confirmation.
+ *
+ * ⚠️ Assumptions: it is scoped to the SCREEN BODY landmark, because `F5=Delete` names three different
+ * controls once the dialog is open -- this trigger inside `main`, the row-24 legend's copy inside
+ * `contentinfo`, and the dialog's accept inside a portal appended to the document body. Scoping by
+ * landmark is what distinguishes them, and it distinguishes them by the same structure a screen-reader
+ * user navigates by rather than by a class or a test id.
+ * @returns {HTMLElement} The in-content trigger.
+ */
+function inContentDeleteControl(): HTMLElement {
+  return within(shellLandmark('screenBody')).getByRole('button', {
+    name: USER_DELETE_KEY_LABELS.PFK05,
+  });
 }
 
 /**
  * Waits until the destructive confirmation is open.
  *
- * Assumptions: the awaited condition is the accepting control existing, because antd mounts the
- * confirmation's content only once it opens -- so its absence and a closed confirmation are the same
- * observation.
+ * Assumptions: the awaited condition is the DIALOG being reachable in the accessibility tree, not
+ * merely a node existing. Testing Library's role query skips a subtree hidden by `display: none`, which
+ * is exactly how the dialog primitive parks itself when closed, so this one observation covers both
+ * "not yet mounted" and "mounted but closed" -- and it is the same observation a screen reader makes.
  * @returns {Promise<void>} Resolves once the confirmation is open.
  */
 async function waitForTheConfirmation(): Promise<void> {
   await waitFor(
     /**
-     * Asserts the confirmation's accepting control is present.
+     * Asserts the confirmation dialog is present and reachable.
      * @returns {void} Nothing; the expectation throws until it holds.
      */
     function theConfirmationIsOpen(): void {
-      expect(confirmationAcceptControl()).toBeInTheDocument();
+      expect(confirmationDialog()).toBeInTheDocument();
+    },
+  );
+}
+
+/**
+ * Waits until the destructive confirmation has closed.
+ *
+ * Assumptions: the closed state is asserted through the same role query rather than by counting nodes,
+ * because the dialog primitive keeps its markup mounted and hides it -- so a case that looked for the
+ * node's removal would wait for something that never happens.
+ * @returns {Promise<void>} Resolves once the confirmation is no longer reachable.
+ */
+async function waitForTheConfirmationToClose(): Promise<void> {
+  /*
+   * ⚠️ Assumptions: the closing ANIMATION has to be ended by hand, and that is an accommodation for the
+   * test DOM rather than a statement about the screen. The dialog primitive parks its markup only once
+   * the leave animation reports finishing, and it listens for a native end event on the panel
+   * (`ui/node_modules/@rc-component/motion/es/hooks/useDomMotionEvents.js` L21-L22). jsdom applies the
+   * class that starts the animation but never runs one and never fires that event, so the panel would sit
+   * in `ant-zoom-leave-active` for the whole of a `waitFor` window and the case would fail on a timeout
+   * describing a dialog that is, as far as the application is concerned, already closed.
+   * ⚠️ Assumptions: the event fired is `transitionend` and NOT `animationend`, and the difference is
+   * measured rather than arbitrary. The animation library resolves its own event names by probing for a
+   * constructor and a style property (`util/motion.js` `getVendorPrefixes`): jsdom exposes no
+   * `AnimationEvent`, so the unprefixed animation entry is deleted and the name it settles on is the
+   * vendor-prefixed `webkitAnimationEnd`, which Testing Library's `animationEnd` helper does not emit.
+   * `TransitionEvent` does exist there, so the transition name stays unprefixed. Both events reach the one
+   * handler and it does not inspect the event's type, so ending the transition ends the leave.
+   * Alternatives Considered: asserting the leave CLASS instead of the closed state -- rejected as an
+   * assertion about the animation library rather than about safety. Also considered: asserting only that
+   * no request was issued -- rejected because "the dialog is gone" is exactly the property a keyboard
+   * operator depends on, and the earlier `Popconfirm` form of these cases never asserted it, which is how
+   * a permanently mounted confirmation went unnoticed elsewhere in this delivery.
+   */
+  await waitFor(
+    /**
+     * Ends the leave animation if one is still running, then asserts the dialog has gone.
+     *
+     * Assumptions: the event is fired on every RETRY rather than once before the wait, because the
+     * animation library only accepts an end event once its own step queue has reached the active step,
+     * and that step is scheduled through `requestAnimationFrame` -- so a single event fired immediately
+     * after the click can arrive while the leave is still starting and be discarded
+     * (`useStatus.js` gates on `activeRef.current`). Re-firing costs nothing once the panel is gone,
+     * because the query then returns null.
+     * @returns {void} Nothing; the expectation throws until the dialog is unreachable.
+     */
+    function theConfirmationIsClosed(): void {
+      const leaving = screen.queryByRole('dialog', { name: USER_DELETE_CAPTION });
+
+      if (leaving !== null) {
+        fireEvent.transitionEnd(leaving);
+      }
+
+      expect(screen.queryByRole('dialog', { name: USER_DELETE_CAPTION })).not.toBeInTheDocument();
     },
   );
 }
@@ -642,6 +831,36 @@ async function bandsTheAwaitingConfirmationPromptAfterAFetch(): Promise<void> {
    */
   await waitForBandedMessage(PROGRAM_MESSAGES.COUSR03C.PRESS_PF5_KEY_TO_DELETE_THIS_USER);
   expect(PROGRAM_MESSAGES.COUSR03C.PRESS_PF5_KEY_TO_DELETE_THIS_USER).toContain(' ...');
+
+  /*
+   * ⚠️ Assumptions: the sentence resolves through the NEUTRAL role and not the informational one, which
+   * is the distinction `MOVE DFHNEUTR TO ERRMSGC` at `app/cbl/COUSR03C.cbl` L285 actually makes.
+   * `ui/src/theme/tokens.ts` maps the mapset's NEUTRAL role to `colorTextSecondary` and its TURQUOISE
+   * role to `colorTextLabel`, and the band module records that keeping the two apart is what the token
+   * bridge's G3 decision exists to enforce -- so a screen publishing this line at the `'info'` severity
+   * painted a de-emphasised sentence in the informational hue, which a rendering review recorded as
+   * informational-looking content sitting in the outcome band. Asserted through the token name rather
+   * than a colour, so the case holds no design literal and still fails if the severity regresses.
+   */
+  const sentence = within(messageBand()).getByText(
+    PROGRAM_MESSAGES.COUSR03C.PRESS_PF5_KEY_TO_DELETE_THIS_USER,
+  );
+
+  expect(sentence.getAttribute('style') ?? '').toContain(
+    cssVariableSegment(BMS_TEXT_COLOR_TOKENS.NEUTRAL),
+  );
+  expect(sentence.getAttribute('style') ?? '').not.toContain(
+    cssVariableSegment(BMS_TEXT_COLOR_TOKENS.TURQUOISE),
+  );
+
+  /*
+   * ⚠️ Assumptions: the CHANNEL is row 23 and there is no row-22 line to move it to, which is why the
+   * fix here is a severity and not a relocation. `app/bms/COUSR03.bms` L140-L143 declares exactly one
+   * message field -- `ERRMSG` at `POS=(23,1)`, `LENGTH=78` -- and declares no `INFOMSG`, so this screen
+   * has one channel by construction. The band contract's own tense test agrees: the sentence is not true
+   * until a read has succeeded, so it reports the turn just taken rather than standing guidance.
+   */
+  expect(screen.queryByTestId(INFORMATION_BAND_TEST_ID)).toBeNull();
 }
 
 /**
@@ -655,13 +874,17 @@ async function pf5OpensTheDangerConfirmationBeforeDeleting(): Promise<void> {
   await waitForTheConfirmation();
 
   /*
-   * ⚠️ Assumptions: nothing is deleted by opening the confirmation. AAP section 0.3.2 assigns
-   * `Popconfirm` with `okType="danger"` to "confirmation before destructive action (delete user)", and
-   * the emphasis is what tells an operator which of the two controls destroys the row -- so the danger
-   * class is asserted rather than merely the presence of a dialog.
+   * ⚠️ Assumptions: nothing is deleted by opening the confirmation, and the accept carries BOTH the
+   * danger and the solid-primary classes. The emphasis is what tells an operator which of the two
+   * controls destroys the row, and the two classes together are the measured fix: the legacy
+   * `okType="danger"` this surface used resolves through `convertLegacyProps('danger')` to `danger: true`
+   * with the DEFAULT variant, which rendered the destructive action as the quieter and smaller of the
+   * pair -- emphasis inverted against risk on the most destructive screen in the delivery. Asserting the
+   * dangerous class alone would still pass for that arrangement, which is why both are asserted.
    */
   expect(deleteSpy()).not.toHaveBeenCalled();
   expect(confirmationAcceptControl()).toHaveClass('ant-btn-dangerous');
+  expect(confirmationAcceptControl()).toHaveClass('ant-btn-primary');
 
   /*
    * Refactoring Rationale: this confirmation REPLACES the 3270 re-key-to-confirm convention, which is
@@ -669,15 +892,140 @@ async function pf5OpensTheDangerConfirmationBeforeDeleting(): Promise<void> {
    * pseudo-conversational: the task ends at each screen turn and `DFHCOMMAREA` carries the continuity,
    * with `CDEMO-PGM-CONTEXT` at `app/cpy/COCOM01Y.cpy` L29-L31 discriminating a first entry from a
    * re-entry. AAP section 0.7.1 removes that discriminator entirely, so the two-step USER EXPERIENCE is
-   * preserved as fidelity while the MECHANISM becomes ordinary client state -- which is why the prompt
-   * the confirmation carries is the reference's own awaiting-confirmation sentence rather than a newly
-   * written question.
+   * preserved as fidelity while the MECHANISM becomes ordinary client state.
+   * ⚠️ Assumptions: what the dialog states is the RECORD, and it does NOT restate the band. The
+   * reference's awaiting sentence is on row 23 for as long as the dialog is open, so carrying it into the
+   * dialog as well printed one question twice and named nobody -- which is what a browser sweep of this
+   * screen recorded. The identifier, both names and the user type are asserted inside the dialog, so a
+   * confirmation that went back to echoing a sentence at the operator fails here.
    */
+  const dialog = within(confirmationDialog());
+
+  expect(dialog.getByText(ADMINISTERED_USER_ID)).toBeInTheDocument();
+  expect(dialog.getByText(STORED_USER.firstName)).toBeInTheDocument();
+  expect(dialog.getByText(STORED_USER.lastName)).toBeInTheDocument();
+  expect(dialog.getByText(STORED_USER.userType)).toBeInTheDocument();
   expect(
-    within(screen.getByRole('tooltip')).getByText(
-      PROGRAM_MESSAGES.COUSR03C.PRESS_PF5_KEY_TO_DELETE_THIS_USER,
-    ),
-  ).toBeInTheDocument();
+    dialog.queryByText(PROGRAM_MESSAGES.COUSR03C.PRESS_PF5_KEY_TO_DELETE_THIS_USER),
+  ).not.toBeInTheDocument();
+}
+
+/**
+ * Both of the confirmation's controls describe themselves with the record being destroyed.
+ *
+ * ⚠️ Purpose: the case above proves the record is IN the dialog. This one proves it is announced. A
+ * browser pass measured focus landing on the DECLINING control the instant this dialog opens, which
+ * means a description carried only by the surface as a whole is never read aloud -- the operator is
+ * placed on a button called `Cancel` inside a dialog titled `Delete User`, and nothing at that moment
+ * says which user. Naming the record on both controls is what closes the gap, and it is the arrangement
+ * `ui/src/screens/cardUpdate/index.tsx` and `ui/src/screens/authDetail/index.tsx` already use.
+ *
+ * ⚠️ Assumptions: the reference is RESOLVED and its text inspected, rather than the attribute merely
+ * being compared to a string. A dangling `aria-describedby` is worse than an absent one -- it promises a
+ * description and delivers silence -- so the assertion is that the identifier names an element that
+ * exists and that the element holds the record's own identifier. Comparing the attribute to a constant
+ * would pass for a reference pointing at nothing.
+ *
+ * ⚠️ Assumptions: both controls are checked, not one. They are configured through separate props
+ * (`cancelButtonProps` and `okButtonProps`), so wiring one and not the other is a single-line mistake
+ * that leaves exactly the case that matters -- the focused control -- silent.
+ * @returns {Promise<void>} Resolves once the assertions hold.
+ */
+async function describesBothChoicesWithTheRecordBeingDestroyed(): Promise<void> {
+  const { user } = await renderWithTheRowFetched();
+
+  await pressPfKey(user, 'PFK05');
+  await waitForTheConfirmation();
+
+  const undescribed: string[] = [];
+
+  for (const control of [confirmationDismissControl(), confirmationAcceptControl()]) {
+    const reference = control.getAttribute('aria-describedby') ?? '';
+    const described = reference === '' ? null : document.getElementById(reference);
+
+    if (described === null || !(described.textContent ?? '').includes(ADMINISTERED_USER_ID)) {
+      undescribed.push(control.textContent ?? '');
+    }
+  }
+
+  expect(
+    undescribed,
+    'both choices must name the record, and the identifier must resolve to an element that holds it',
+  ).toEqual([]);
+  expect(document.activeElement).toBe(confirmationDismissControl());
+}
+
+/**
+ * ⚠️ The dialog's labels are the mapset's, and each renders exactly ONE colon rather than two.
+ *
+ * ⚠️ Purpose: close a measured cosmetic defect on this otherwise exemplary surface. A browser pass read
+ * `Enter User ID: :  USER0001` and `First Name: :  Ulric` in this dialog. Both colons were real: the
+ * labels are verbatim mapset text and `app/bms/COUSR03.bms` L84, L102, L115 and L129 END them with a
+ * colon, while the description list adds a second through a `::after` whose content is `":"`.
+ *
+ * ⚠️ Assumptions: the proof is STRUCTURAL -- each label element carrying the component's own
+ * no-colon class -- and not a text assertion, because the second colon is generated CSS content and
+ * jsdom performs no layout and computes no `::after`. A case that read the label's text would pass
+ * against the defect, which is precisely why the label text is asserted too: together they say the
+ * label is unmodified AND the decoration is off.
+ *
+ * ⚠️ Assumptions: the labels are asserted to still END with a colon. Suppressing the component's
+ * decoration is only correct because the source supplies the punctuation; if a future change trimmed the
+ * label instead, this half fails and Rule T8's verbatim requirement is what it fails on.
+ * @returns {Promise<void>} Resolves once the assertions hold.
+ */
+async function rendersOneColonPerLabelWithTheLabelsLeftVerbatim(): Promise<void> {
+  const { user } = await renderWithTheRowFetched();
+
+  await pressPfKey(user, 'PFK05');
+  await waitForTheConfirmation();
+
+  const dialog = within(confirmationDialog());
+
+  for (const label of [
+    USER_DELETE_FIELD_LABELS.userId,
+    USER_DELETE_FIELD_LABELS.firstName,
+    USER_DELETE_FIELD_LABELS.lastName,
+    USER_DELETE_FIELD_LABELS.userType,
+  ]) {
+    const rendered = dialog.getByText(label.trimEnd());
+
+    expect(rendered, label).toHaveClass('ant-descriptions-item-no-colon');
+    expect(label.trimEnd().endsWith(':'), `${label} carries the mapset's own colon`).toBe(true);
+  }
+}
+
+/**
+ * Focus starts on the safe choice, so one bare Enter dismisses rather than deletes.
+ * @returns {Promise<void>} Resolves once the assertions hold.
+ */
+async function focusStartsOnTheSafeChoiceSoEnterCannotDelete(): Promise<void> {
+  const { user } = await renderWithTheRowFetched();
+
+  await pressPfKey(user, 'PFK05');
+  await waitForTheConfirmation();
+
+  /*
+   * ⚠️ Assumptions: the dismissing control holds focus on arrival, and this is the single most important
+   * property of this dialog. A sweep of all eight confirmations in the delivery found initial focus on no
+   * button in seven of them -- leaving `activeElement` on the trigger, so Enter re-fired the screen's own
+   * key -- and on the AFFIRMATIVE in the eighth, so one bare Enter committed a money movement. Deleting a
+   * user is the most destructive act here and has no undo, so the safe choice takes the focus.
+   */
+  expect(confirmationDismissControl()).toHaveFocus();
+
+  /*
+   * ⚠️ Assumptions: Enter is pressed with focus where the dialog left it, and it must destroy NOTHING.
+   * Two mechanisms have to hold together for that: the shell defers Enter to a native button that will
+   * act on it (`ENTER_ACTIVATED_TARGET_SELECTOR` in `ui/src/layout/usePfKeys.ts`), so the screen's own
+   * ENTER arm does not re-read behind the dialog; and the button the browser activates is the one that
+   * cancels. Either alone would leave a bare Enter doing something the operator did not ask for.
+   */
+  await user.keyboard('{Enter}');
+  await waitForTheConfirmationToClose();
+
+  expect(deleteSpy()).not.toHaveBeenCalled();
+  expect(within(recordView()).getByText(STORED_USER.firstName)).toBeInTheDocument();
 }
 
 /**
@@ -687,9 +1035,32 @@ async function pf5OpensTheDangerConfirmationBeforeDeleting(): Promise<void> {
 async function dismissingTheConfirmationDeletesNothing(): Promise<void> {
   const { user } = await renderWithTheRowFetched();
 
-  await pressPfKey(user, 'PFK05');
+  /*
+   * ⚠️ Assumptions: the dialog is opened by CLICKING the in-content trigger rather than by pressing the
+   * key, because this case asserts where focus lands when the dialog closes and the dialog primitive
+   * restores it to whichever element was active before it opened. Pressing the key opens the same dialog
+   * -- three other cases in this group take that path -- but leaves the pre-open active element wherever
+   * the keystroke found it, which is not a property of this screen and would make the assertion a
+   * statement about the harness.
+   */
+  const trigger = inContentDeleteControl();
+
+  await user.click(trigger);
   await waitForTheConfirmation();
+
   await user.click(confirmationDismissControl());
+  await waitForTheConfirmationToClose();
+
+  /*
+   * ⚠️ Assumptions: cancelling is SAFE in the full sense, not merely inactive, so three things are
+   * asserted beyond the absence of a request. The band still carries the reference's awaiting sentence,
+   * so the screen the operator is returned to is the one they left rather than one that has quietly
+   * changed state. The field marks are untouched. And focus comes back to the trigger they opened the
+   * dialog from -- the dialog primitive records the previously active element and restores it in
+   * `doClose` -- so a keyboard operator is not dropped at the top of the document.
+   */
+  expect(trigger).toHaveFocus();
+  await waitForBandedMessage(PROGRAM_MESSAGES.COUSR03C.PRESS_PF5_KEY_TO_DELETE_THIS_USER);
 
   /*
    * Assumptions: a dismissal is the operator declining, and the reference has no arm that deletes
@@ -754,6 +1125,136 @@ async function acceptingTheConfirmationDeletesExactlyOnce(): Promise<void> {
 }
 
 /**
+ * ⚠️ A deletion already in flight cannot be issued a second time from either control.
+ *
+ * ⚠️ Purpose: this is the SCREEN's half of the duplicate protection a measured pass found missing on
+ * the destructive verb -- the report submission carried an `Idempotency-Key` while
+ * `DELETE /auth/users/{userId}` carried nothing, so duplicate protection was present on the safer verb
+ * and absent on the dangerous one. Two halves answer that. The transport joins a concurrent repeat of
+ * the same deletion (`withoutConcurrentDuplicate` in `ui/src/api/auth.ts`, which this file substitutes
+ * and therefore cannot observe), and the screen must not issue the repeat in the first place. This case
+ * owns the second half, which is the one measurable from here.
+ *
+ * ⚠️ Assumptions: BOTH copies of the destructive control are pressed while the turn is outstanding --
+ * the row-24 legend key and the in-content trigger -- because they are separate elements reaching one
+ * action, and a guard placed on only one of them would leave the other able to fire. A browser sweep
+ * already recorded these two disagreeing about their state on this screen once.
+ *
+ * ⚠️ Assumptions: the declines must be SILENT. `busy` is not `disabled`: the key path never routes a
+ * busy press into the rejection channel, so no invalid-key sentence may appear about a key whose own
+ * legend is on the glass in front of the operator.
+ * @returns {Promise<void>} Resolves once the held deletion has been released and acknowledged.
+ */
+async function issuesNoSecondDeletionWhileTheFirstIsOutstanding(): Promise<void> {
+  /**
+   * Placeholder resolver, replaced the moment the held promise hands over its own.
+   *
+   * Assumptions: an initialiser is supplied rather than declaring the binding possibly-undefined,
+   * because the promise executor runs synchronously inside the constructor below and therefore always
+   * replaces it before any code can call it.
+   * @returns {void} Nothing; it is never the resolver that runs.
+   */
+  function releaseNothing(): void {
+    // Assumptions: an empty body is the whole implementation; see the doc block above.
+  }
+
+  let releaseDeletion: () => void = releaseNothing;
+
+  deleteSpy().mockReturnValue(
+    new Promise<void>(
+      /**
+       * Captures the resolver so the case controls when the deletion lands.
+       * @param {() => void} resolve - The promise's own resolver.
+       * @returns {void} Nothing; the resolver is retained for later.
+       */
+      (resolve: () => void): void => {
+        releaseDeletion = resolve;
+      },
+    ),
+  );
+
+  const { user } = await renderWithTheRowFetched();
+
+  await pressPfKey(user, 'PFK05');
+  await waitForTheConfirmation();
+  await user.click(confirmationAcceptControl());
+
+  await waitFor(
+    /**
+     * Asserts the first deletion has been issued, so the window under test is genuinely open.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    function theDeletionWasIssued(): void {
+      expect(deleteSpy()).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  await pressPfKey(user, 'PFK05');
+  await user.click(inContentDeleteControl());
+
+  expect(
+    deleteSpy(),
+    'the deletion is issued once however many times it is asked for',
+  ).toHaveBeenCalledTimes(1);
+  expect(messageBand()).not.toHaveTextContent(COMMON_MESSAGES.INVALID_KEY.text.trimEnd());
+
+  releaseDeletion();
+  await waitForBandedMessage(
+    formatMessageTemplate(MESSAGE_TEMPLATES.USER_HAS_BEEN_DELETED, {
+      'SEC-USR-ID': ADMINISTERED_USER_ID,
+    }),
+  );
+}
+
+/**
+ * After the deletion, neither surviving control can act on the record that is gone.
+ *
+ * ⚠️ Purpose: pin the post-deletion state as safe. A browser sweep recorded the in-content trigger going
+ * `disabled` after the deletion while the row-24 legend's copy of the same key stayed enabled and
+ * clickable "against an emptied record" -- one destructive affordance still offered for a row that no
+ * longer exists. This case fixes what the offer is allowed to DO: it must open no confirmation and issue
+ * no second request.
+ * @returns {Promise<void>} Resolves once the assertions hold.
+ */
+async function offersNoSecondDeletionOnceTheRowIsGone(): Promise<void> {
+  deleteSpy().mockResolvedValue(undefined);
+  const { user } = await renderWithTheRowFetched();
+
+  await pressPfKey(user, 'PFK05');
+  await waitForTheConfirmation();
+  await user.click(confirmationAcceptControl());
+  await waitForTheConfirmationToClose();
+
+  await waitForBandedMessage(
+    formatMessageTemplate(MESSAGE_TEMPLATES.USER_HAS_BEEN_DELETED, {
+      'SEC-USR-ID': ADMINISTERED_USER_ID,
+    }),
+  );
+
+  /*
+   * Assumptions: the POINTER affordance is withdrawn, because the reference paints no delete button at
+   * all -- `app/bms/COUSR03.bms` carries only the row-24 legend -- so withholding a click on a record
+   * that is gone withholds nothing the source offered.
+   */
+  expect(inContentDeleteControl()).toBeDisabled();
+
+  /*
+   * ⚠️ Assumptions: the KEY stays live and is answered rather than refused as unbound, which is a
+   * deliberate difference from disabling it. The reference's `DFHPF5` arm is reachable from any state and
+   * answers a blank key with `'User ID can NOT be empty...'` at `app/cbl/COUSR03C.cbl` L177-L182, and the
+   * success arm has just blanked all four fields at L315. Withdrawing the binding instead would route the
+   * press through the shell's unbound-key path and answer `'Invalid key pressed'`, replacing a sentence
+   * the program moves with one it never moves -- so the fix is to keep the key answering and make sure
+   * what it answers with destroys nothing.
+   */
+  await pressPfKey(user, 'PFK05');
+
+  await waitForBandedMessage(SHARED_MESSAGES.USER_ID_CAN_NOT_BE_EMPTY);
+  expect(screen.queryByRole('dialog', { name: USER_DELETE_CAPTION })).not.toBeInTheDocument();
+  expect(deleteSpy()).toHaveBeenCalledTimes(1);
+}
+
+/**
  * The fetched row is carried between the two turns by client state alone.
  * @returns {Promise<void>} Resolves once the assertions hold.
  */
@@ -801,11 +1302,28 @@ function twoStageWorkflowCases(): void {
     'opens a danger confirmation on PF5 before deleting anything',
     pf5OpensTheDangerConfirmationBeforeDeleting,
   );
+  it(
+    'describes both choices with the record being destroyed',
+    describesBothChoicesWithTheRecordBeingDestroyed,
+  );
+  it(
+    'starts focus on the safe choice, so one bare Enter cannot delete',
+    focusStartsOnTheSafeChoiceSoEnterCannotDelete,
+  );
+  it(
+    'renders one colon per label, leaving the mapset labels verbatim',
+    rendersOneColonPerLabelWithTheLabelsLeftVerbatim,
+  );
   it('deletes nothing when the confirmation is dismissed', dismissingTheConfirmationDeletesNothing);
   it(
     'deletes exactly once when the confirmation is accepted',
     acceptingTheConfirmationDeletesExactlyOnce,
   );
+  it(
+    'issues no second deletion while the first is outstanding',
+    issuesNoSecondDeletionWhileTheFirstIsOutstanding,
+  );
+  it('offers no second deletion once the row is gone', offersNoSecondDeletionOnceTheRowIsGone);
   it(
     'carries the fetched row without re-reading it',
     carriesTheFetchedRowWithNoServerSideSessionField,
@@ -1162,18 +1680,136 @@ async function advertisesExactlyTheFourDescriptorsTheMapsetPaints(): Promise<voi
 }
 
 /**
- * The advertised controls carry the emphasis the design-system mapping fixes.
+ * ⚠️ A key pressed while its OWN turn is outstanding is declined silently, not reported as invalid.
+ *
+ * ⚠️ Purpose: this is what the screen's `busy` channel replaced `disabled` to achieve. `disabled` routes
+ * a press into `usePfKeys`' rejection channel with reason `'disabled'`, and this screen wires that
+ * channel to its band -- so pressing the screen's own fetch key while its own fetch was still running
+ * painted `Invalid key pressed...`, which tells an operator a working key does not work. It works; it
+ * arrived early. The 3270 analogue is input inhibit, which swallowed the attention key and said nothing.
+ *
+ * ⚠️ Assumptions: FOUR properties are asserted together, because the finding is that a busy control
+ * must not become a withdrawn one -- it stays present, enabled, focusable and NAMED, and only the
+ * dispatch is declined. A control that went `disabled` would satisfy "issues no second request" while
+ * failing every other half.
+ *
+ * Assumptions: the read is held open with a promise this case resolves itself, rather than with a timer,
+ * so the in-flight window is bounded by the assertions inside it instead of by a duration.
+ * @returns {Promise<void>} Resolves once the held read has been released and the row has landed.
+ */
+async function declinesAKeyPressedDuringItsOwnTurnSilently(): Promise<void> {
+  /**
+   * Placeholder resolver, replaced the moment the held promise hands over its own.
+   *
+   * Assumptions: an initialiser is supplied rather than declaring the binding possibly-undefined,
+   * because the promise executor runs synchronously inside the constructor below and therefore always
+   * replaces it before any code can call it. The placeholder exists only to satisfy definite
+   * assignment, so it does nothing.
+   * @returns {void} Nothing; it is never the resolver that runs.
+   */
+  function releaseNothing(): void {
+    // Assumptions: an empty body is the whole implementation; see the doc block above.
+  }
+
+  let releaseRead: (row: UserResponse) => void = releaseNothing;
+
+  readSpy().mockReturnValue(
+    new Promise<UserResponse>(
+      /**
+       * Captures the resolver so the case controls when the read lands.
+       * @param {(row: UserResponse) => void} resolve - The promise's own resolver.
+       * @returns {void} Nothing; the resolver is retained for later.
+       */
+      (resolve: (row: UserResponse) => void): void => {
+        releaseRead = resolve;
+      },
+    ),
+  );
+
+  const { user } = await renderSelected();
+  const [enterControl] = legendControls();
+
+  /*
+   * ⚠️ Assumptions: the control is asserted enabled and named WHILE the turn is outstanding, which is
+   * the whole distinction from `disabled`. The name is read from the mapset-derived label rather than
+   * retyped, so a busy render that renamed the control -- which the design system's bare `loading`
+   * prop does, by contributing `loading` to the accessible name -- would fail here.
+   */
+  expect(enterControl).toBeEnabled();
+  expect(enterControl).toHaveAccessibleName(USER_DELETE_KEY_LABELS.ENTER);
+  enterControl?.focus();
+  expect(enterControl).toHaveFocus();
+
+  await pressPfKey(user, 'ENTER');
+
+  /*
+   * ⚠️ Assumptions: exactly ONE read exists, so the early press was declined rather than dispatched;
+   * and the band carries no invalid-key sentence, so it was declined SILENTLY. Both halves are needed:
+   * the first alone would pass for a `disabled` key, the second alone for a key that fired twice.
+   */
+  expect(readSpy()).toHaveBeenCalledTimes(1);
+  expect(messageBand()).not.toHaveTextContent(COMMON_MESSAGES.INVALID_KEY.text.trimEnd());
+
+  /*
+   * WHY : ⚠️ Assumptions: the wait is ANNOUNCED as well as declined, and the announcement is asserted
+   *       from inside the held window rather than after it. An operator who cannot see the spinner has
+   *       only this region, and a screen that painted the spinner without announcing anything would pass
+   *       every assertion above while telling a keyboard-only operator nothing at all.
+   */
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  releaseRead(STORED_USER);
+  await waitFor(
+    /**
+     * Waits until the released read has painted its row, so no state escapes the case.
+     * @returns {void} Nothing; the expectation throws until the row has landed.
+     */
+    (): void => {
+      expect(screen.getByDisplayValue(ADMINISTERED_USER_ID)).toBeInTheDocument();
+    },
+  );
+
+  /*
+   * WHY : Assumptions: the region is asserted EMPTY once the turn has landed, not absent. It stays
+   *       mounted on purpose -- a live region has to be in the accessibility tree before its content
+   *       changes for the first change to be announced -- so emptiness is what "no longer working"
+   *       looks like here, and an unmounted region would be the defect rather than the resting state.
+   */
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
+}
+
+/**
+ * ⚠️ The advertised controls carry the emphasis their DECLARED RISK fixes, not their AID's.
+ *
+ * ⚠️ Purpose: close a measured contradiction. A rendering pass recorded the row-24 `F5=Delete` painted
+ * primary BLUE and byte-identical in all four states to the benign `ENTER=Fetch` three positions to its
+ * left, while the same action rendered danger-OUTLINED in the screen's own body -- one action, two
+ * paints, in a single frame -- and it recorded the destructive control as the quieter of the two.
+ *
+ * ⚠️ Refactoring Rationale: this case used to assert the OPPOSITE and therefore pinned the defect. It
+ * read `PRIMARY_ACTION_AIDS` and required `ENTER` and `PFK05` both to be primary, which is the AID-keyed
+ * rule -- and no AID-keyed rule can be right here, because `PFK05` is `F5=Delete` on
+ * `app/bms/COUSR03.bms` L148 and `F5=Save` on `app/bms/COACTUP.bms`. The screen now declares what each
+ * key DOES and `pfKeyEmphasisFor` resolves the paint from that, so this case asserts the classification
+ * the mapset supports instead of the table that contradicted it.
+ *
+ * ⚠️ Assumptions: the destructive control is asserted as the SOLID dangerous variant and not merely as
+ * `ant-btn-dangerous`. `ui/node_modules/antd/lib/button/Button.js` L96-L107 shows `danger` replacing only
+ * the colour, so `danger` without a type yields `['danger','outlined']` -- the measurably quieter form
+ * that was the in-content copy's own defect. Naming all three classes is what distinguishes the fix from
+ * the half-fix.
  * @returns {Promise<void>} Resolves once the assertions hold.
  */
 async function carriesTheMappedEmphasisOnItsAdvertisedControls(): Promise<void> {
-  await renderUnselected();
+  await renderWithTheRowFetched();
 
   /*
-   * Assumptions: the pairing is asserted against `PRIMARY_ACTION_AIDS`, which `ui/src/layout/PfKeyBar.tsx`
-   * publishes as the single statement of AAP section 0.3.2's mapping -- primary emphasis for Enter and
-   * PF5, the default for the rest. Asserting through the constant rather than restating the two AIDs
-   * means a change to the mapping is a change in one place, and it keeps this case from becoming a
-   * second opinion about the design system.
+   * ⚠️ Assumptions: the AID fallback is asserted to STILL LIST both of these keys, which is what makes
+   * the two assertions below evidence that the declared risk OVERRODE it rather than merely agreed with
+   * it. `ui/src/layout/PfKeyBar.tsx` keeps `PRIMARY_ACTION_AIDS` deliberately unchanged so the twenty
+   * screens that have not classified their keys render exactly as they did; pinning it here is what
+   * would fail if a future change quietly removed the fallback and left this case passing for the wrong
+   * reason.
    */
   expect([...PRIMARY_ACTION_AIDS]).toStrictEqual(['ENTER', 'PFK05']);
 
@@ -1185,10 +1821,35 @@ async function carriesTheMappedEmphasisOnItsAdvertisedControls(): Promise<void> 
    * to the mapset's own left-to-right sequence, so an index here is the mapset's position rather than
    * an arbitrary one.
    */
-  expect(enterControl).toHaveClass('ant-btn-primary');
-  expect(deleteControl).toHaveClass('ant-btn-primary');
+  expect(deleteControl).toHaveClass(
+    'ant-btn-primary',
+    'ant-btn-dangerous',
+    'ant-btn-variant-solid',
+  );
+
+  /*
+   * ⚠️ Assumptions: `ENTER=Fetch` is asserted NOT to be primary, which is the half of the fix that the
+   * AID table made impossible. It reads one row and writes nothing (`app/bms/COUSR03.bms` L148), so a
+   * legend that emphasised it alongside the delete emphasised neither.
+   */
+  expect(enterControl).toHaveClass('ant-btn-default');
+  expect(enterControl).not.toHaveClass('ant-btn-primary');
   expect(backControl).toHaveClass('ant-btn-default');
   expect(clearControl).toHaveClass('ant-btn-default');
+
+  /*
+   * ⚠️ Assumptions: the two copies of the ONE destructive action are asserted to agree, because their
+   * disagreement is the finding. The trigger inside `main` and the legend copy inside `contentinfo` both
+   * resolve their paint from the screen's single declared risk, so this compares the rendered classes of
+   * both rather than trusting that two literals were written alike.
+   */
+  const emphasisClasses = [
+    'ant-btn-primary',
+    'ant-btn-dangerous',
+    'ant-btn-variant-solid',
+  ] as const;
+
+  expect(inContentDeleteControl()).toHaveClass(...emphasisClasses);
 }
 
 /**
@@ -1376,6 +2037,10 @@ function attentionIdentifierCases(): void {
   it(
     'reaches the administrative menu on the unadvertised PF12',
     reachesTheAdministrativeMenuOnTheUnadvertisedKey,
+  );
+  it(
+    'declines a key pressed during its own turn silently',
+    declinesAKeyPressedDuringItsOwnTurnSilently,
   );
 }
 

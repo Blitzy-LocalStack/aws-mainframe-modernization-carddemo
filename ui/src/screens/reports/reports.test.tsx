@@ -51,6 +51,7 @@ import { AppShell, SHELL_CONTENT_ELEMENT_ID } from '../../layout/AppShell';
 import { MESSAGE_BAND_TEST_ID } from '../../layout/MessageBand';
 import {
   MESSAGE_TEMPLATES,
+  PERSISTENT_FAILURE_REPORT_IT,
   REPORTS_CAPTIONS,
   REPORT_RUN_MESSAGES,
   REPORT_TYPE_PROMPTS,
@@ -277,6 +278,78 @@ function collectionRefusal(status: number): ApiRequestError {
     abend: null,
   };
   return new ApiRequestError('PROBLEM', status, problem, `PROBLEM ${String(status)}`);
+}
+
+/**
+ * Builds a status-read rejection whose condition may pass and whose request is safe to repeat.
+ *
+ * Purpose: drive the refreshable half of the screen's remedy selection with a REAL normalised failure.
+ * The screen narrows the cause through `isRepeatableFailure`, which reads a member off an
+ * `ApiRequestError` instance, so a hand-rolled object or a bare `Error` cannot reach that arm at all.
+ *
+ * Assumptions: the fifth constructor argument is supplied explicitly rather than left to the default.
+ * `ui/src/api/client.ts` documents that default as reporting a transient condition and NEVER a safe
+ * repeat — because it is reached with no request described — so relying on it would have produced a
+ * failure that takes the persistent arm and would have made this case assert the opposite of its name.
+ *
+ * Assumptions: 503 is the status chosen because it is the canonical shape of the pair this arm needs on a
+ * read: the condition may clear on its own and re-sending a `GET` is safe, which is exactly the state in
+ * which "Refresh to try again" is a true statement.
+ * @returns {ApiRequestError} The rejection the status transport raises for a momentary outage.
+ */
+function momentaryStatusOutage(): ApiRequestError {
+  const status = 503;
+  const problem: ApiError = {
+    code: 'CARDDEMO-0503',
+    secondaryCode: '',
+    message: 'The reporting service is not accepting requests',
+    severity: 'CRITICAL',
+    subsystem: 'APPLICATION',
+    status,
+    correlationId: 'CD0000000000000000000010',
+    path: '/api/v1/reports/transaction/executions',
+    timestamp: '2022-06-30T23:12:00.000000Z',
+    fieldErrors: [],
+    abend: null,
+  };
+  return new ApiRequestError('PROBLEM', status, problem, `PROBLEM ${String(status)}`, {
+    transient: true,
+    repeatable: true,
+  });
+}
+
+/**
+ * Builds a collection rejection whose condition may pass and whose request is safe to repeat.
+ *
+ * Purpose: drive the retryable half of the collection's remedy selection with a REAL normalised failure,
+ * for the reason {@link momentaryStatusOutage} records — the screen narrows through `isRepeatableFailure`,
+ * which reads a member off an `ApiRequestError` instance.
+ *
+ * Assumptions: this is a separate builder from {@link momentaryStatusOutage} rather than a parameter on
+ * it, because the two describe different endpoints and the path is what a reader checks a fixture
+ * against; a shared builder carrying the executions path would describe a failure the collect operation
+ * cannot raise.
+ * @returns {ApiRequestError} The rejection the collect transport raises for a momentary outage.
+ */
+function momentaryCollectionOutage(): ApiRequestError {
+  const status = 503;
+  const problem: ApiError = {
+    code: 'CARDDEMO-0503',
+    secondaryCode: '',
+    message: 'The reporting service is not accepting requests',
+    severity: 'CRITICAL',
+    subsystem: 'APPLICATION',
+    status,
+    correlationId: 'CD0000000000000000000011',
+    path: '/api/v1/reports/transaction/artifact',
+    timestamp: '2022-06-30T23:14:00.000000Z',
+    fieldErrors: [],
+    abend: null,
+  };
+  return new ApiRequestError('PROBLEM', status, problem, `PROBLEM ${String(status)}`, {
+    transient: true,
+    repeatable: true,
+  });
 }
 
 /** One status read whose answer a case supplies later. */
@@ -795,11 +868,27 @@ function reportRunCases(): void {
   }
 
   /**
-   * A status read that does not answer says so and discloses nothing.
+   * A status read that does not answer says so, discloses nothing, and names the remedy that exists.
    *
    * ⚠️ Assumptions: the assertion is that the internal cause is ABSENT from the document, not merely that
    * a sentence is present. The cause is an HTTP status or a service path; an operator can act on neither,
    * and rendering either would put deployment detail into every screenshot of this screen.
+   *
+   * ⚠️ Refactoring Rationale: this case now drives BOTH remedies, where it drove one. The screen used to
+   * answer every unreadable status with `STATUS_READ_FAILED`, which ends "Refresh to try again" — a
+   * remedy that is honest for a gateway failure and misleading for one a refresh cannot clear, because it
+   * sends the operator round a loop the screen already knows is closed. The screen now selects on
+   * `repeatable`, so the case asserts the selection rather than the sentence: an unclassifiable cause
+   * takes the persistent sentence and a repeatable transport failure takes the refreshable one.
+   *
+   * Assumptions: the unclassifiable arm is a plain `Error`, which is the cause a bug inside the
+   * settlement would produce, and `isRepeatableFailure` answers false for anything it cannot narrow.
+   * That default is asserted deliberately: an unclassifiable failure is not evidence that retrying helps.
+   *
+   * Assumptions: the Refresh control is asserted present in BOTH arms. It is the only access to a run's
+   * state — the execution name is the sole key the status endpoint accepts and it is shown nowhere else —
+   * and the run continues on the service whatever this read did. What the selection changes is what the
+   * operator is told to do, not what they are permitted to do.
    * @returns {Promise<void>} Resolves once the assertions have run.
    */
   async function reportsAnUnreadableStatusSafely(): Promise<void> {
@@ -810,16 +899,62 @@ function reportRunCases(): void {
     render(renderReports());
     submitMonthlyReport();
 
-    await screen.findByText(REPORT_RUN_MESSAGES.STATUS_READ_FAILED);
+    await screen.findByText(PERSISTENT_FAILURE_REPORT_IT);
     expect(
       window.document.body.textContent ?? '',
       'nothing internal may reach the page',
     ).not.toContain(internal);
+    expect(
+      screen.queryByText(REPORT_RUN_MESSAGES.STATUS_READ_FAILED),
+      'a cause no refresh can clear must not offer a refresh as the remedy',
+    ).toBeNull();
     expect(refreshControl(), 'the one action available must remain offered').toBeInTheDocument();
   }
 
   /**
-   * A collection that does not answer says so and discloses nothing.
+   * A status read refused by a condition that may pass keeps the refreshable remedy.
+   *
+   * Assumptions: the failure is built as a real normalised transport failure with `repeatable` set,
+   * because that member is what the screen selects on and a hand-rolled object would not narrow through
+   * `isRepeatableFailure`. A 503 on a `GET` is the canonical shape: the condition may clear on its own
+   * and re-sending the request is safe, which is exactly when "Refresh to try again" is true.
+   *
+   * ⚠️ Assumptions: the persistent sentence is asserted ABSENT here, and the refreshable one absent in the
+   * sibling case above. Asserting only presence in each would pass against a screen that rendered both.
+   * @returns {Promise<void>} Resolves once the assertions have run.
+   */
+  async function keepsTheRefreshRemedyForAConditionThatMayPass(): Promise<void> {
+    submitStub().mockResolvedValue(startedRun(FIRST_RUN));
+    statusStub().mockRejectedValue(momentaryStatusOutage());
+
+    render(renderReports());
+    submitMonthlyReport();
+
+    await screen.findByText(REPORT_RUN_MESSAGES.STATUS_READ_FAILED);
+    expect(
+      screen.queryByText(PERSISTENT_FAILURE_REPORT_IT),
+      'a condition that may pass must not be reported as one to escalate',
+    ).toBeNull();
+    expect(refreshControl(), 'the one action available must remain offered').toBeInTheDocument();
+  }
+
+  /**
+   * A collection that does not answer says so, discloses nothing, and names the remedy that exists.
+   *
+   * ⚠️ Refactoring Rationale: this case now drives the remedy SELECTION, where it drove one sentence for
+   * every cause. `DOCUMENT_COLLECTION_FAILED` ends "Refresh the status to retry", and the cause this case
+   * has always used is the one that makes that misleading: an `AccessDenied` refusal is a permission the
+   * operator does not hold, which no number of refreshes clears. The screen now selects on `repeatable`,
+   * exactly as it does for an unreadable status, so the two target-side failure surfaces on this screen
+   * cannot disagree about what an unrecoverable failure is called.
+   *
+   * Assumptions: the cause stays a plain `Error`, which is what a browser-side or programming failure
+   * produces, and `isRepeatableFailure` answers false for anything it cannot narrow — so this arm is also
+   * the assertion that an unclassifiable failure defaults to the escalation sentence rather than to a
+   * retry.
+   *
+   * ⚠️ Assumptions: the internal cause is asserted ABSENT from the document, not merely that a sentence is
+   * present. `AccessDenied` names a bucket and a deployment, and neither belongs in a screenshot.
    * @returns {Promise<void>} Resolves once the assertions have run.
    */
   async function reportsAFailedCollectionSafely(): Promise<void> {
@@ -831,11 +966,42 @@ function reportRunCases(): void {
     await submitAndAwait(REPORT_RUN_MESSAGES.STATUS_LABELS.SUCCEEDED);
     fireEvent.click(downloadControl() as HTMLElement);
 
-    await screen.findByText(REPORT_RUN_MESSAGES.DOCUMENT_COLLECTION_FAILED);
+    await screen.findByText(PERSISTENT_FAILURE_REPORT_IT);
     expect(
       window.document.body.textContent ?? '',
       'nothing internal may reach the page',
     ).not.toContain(internal);
+    expect(
+      screen.queryByText(REPORT_RUN_MESSAGES.DOCUMENT_COLLECTION_FAILED),
+      'a refusal no refresh can clear must not offer a refresh as the remedy',
+    ).toBeNull();
+    expect(savedDocuments, 'a failed collection must save nothing').toHaveLength(0);
+  }
+
+  /**
+   * A collection refused by a condition that may pass keeps the retry remedy.
+   *
+   * Assumptions: the failure is a real normalised transport failure carrying `repeatable`, for the
+   * reason {@link momentaryStatusOutage} records — the screen narrows through `isRepeatableFailure`, which
+   * reads a member off an `ApiRequestError` instance, so nothing else reaches this arm.
+   *
+   * ⚠️ Assumptions: the persistent sentence is asserted absent here and the retry sentence absent in the
+   * case above. Asserting only presence in each would pass against a screen that rendered both.
+   * @returns {Promise<void>} Resolves once the assertions have run.
+   */
+  async function keepsTheRetryRemedyForACollectionThatMaySucceed(): Promise<void> {
+    submitStub().mockResolvedValue(startedRun(FIRST_RUN));
+    statusStub().mockResolvedValue(statusOf('SUCCEEDED', FIRST_RUN, true));
+    collectStub().mockRejectedValue(momentaryCollectionOutage());
+
+    await submitAndAwait(REPORT_RUN_MESSAGES.STATUS_LABELS.SUCCEEDED);
+    fireEvent.click(downloadControl() as HTMLElement);
+
+    await screen.findByText(REPORT_RUN_MESSAGES.DOCUMENT_COLLECTION_FAILED);
+    expect(
+      screen.queryByText(PERSISTENT_FAILURE_REPORT_IT),
+      'a condition that may pass must not be reported as one to escalate',
+    ).toBeNull();
     expect(savedDocuments, 'a failed collection must save nothing').toHaveLength(0);
   }
 
@@ -1107,7 +1273,15 @@ function reportRunCases(): void {
   it('withholds a document whose coordinates are unknown', withholdsADocumentWithoutCoordinates);
   it('hands a collected document to the browser', handsTheDocumentToTheBrowser);
   it('reports an unreadable status without disclosing why', reportsAnUnreadableStatusSafely);
+  it(
+    'keeps the refresh remedy for a condition that may pass',
+    keepsTheRefreshRemedyForAConditionThatMayPass,
+  );
   it('reports a failed collection without disclosing why', reportsAFailedCollectionSafely);
+  it(
+    'keeps the retry remedy for a collection that may succeed',
+    keepsTheRetryRemedyForACollectionThatMaySucceed,
+  );
   it(
     'reports an absent document as absent rather than as a retry',
     reportsAnAbsentDocumentAsAbsent,

@@ -158,6 +158,29 @@ const READ_RESULT = {
 } as const;
 
 /**
+ * The answer a committed write returns, in the shape the write operation publishes.
+ *
+ * Assumptions: it is a SEPARATE fixture from the read's answer rather than a reuse of it, because the
+ * two operations publish different shapes -- the write's answer additionally carries the refused-field
+ * array and the two message lines it reports itself through -- so a case releasing the read's answer
+ * from the write's promise would be typing a response the transport cannot produce.
+ *
+ * Assumptions: the revision ADVANCES, because a committed write is what makes the one the read handed
+ * back stale. Echoing the read's revision would leave the fixture unable to show that.
+ */
+const WRITE_RESULT = {
+  account: {
+    accountId: ACCOUNT_ID,
+    informationMessage: null,
+    returnMessage: null,
+    fieldErrors: [],
+    account: ACCOUNT,
+    customer: CUSTOMER,
+  },
+  revision: 'W/"8"',
+} as const;
+
+/**
  * A verdict that accepts the submission, which is what advances the screen to the save key.
  *
  * Assumptions: the shape carries exactly the FOUR members the published contract declares. The service
@@ -859,14 +882,28 @@ async function discardsAReadSupersededByANewerRead(): Promise<void> {
 }
 
 /**
- * The keys that start a turn stand down while a request is outstanding.
+ * The key that owns an outstanding request reports it, stays reachable and starts no second one.
  *
- * Assumptions: Enter is asserted disabled and F3 asserted still reachable, together. Disabling every key
- * would satisfy the first assertion and would trap an operator on a slow request, which is the failure
- * the F3 exemption exists to avoid.
+ * ⚠️ Refactoring Rationale: this case asserted the Enter key DISABLED while its own read was
+ * outstanding, and now asserts it busy. The two are different statements to an operator -- disabled
+ * says the action is unavailable, busy says the action they just took is running -- and the shared key
+ * primitive at `ui/src/layout/usePfKeys.ts` gives the second: a busy key stays present, enabled,
+ * focusable and named, and declines a press silently, which is the terminal's input-inhibit. The
+ * protection the old assertion stood for is asserted directly instead, as the absence of a second
+ * request.
+ *
+ * ⚠️ Assumptions: the second press is driven BOTH ways, and both are needed for different reasons. The
+ * keyboard press reaches the screen's Enter arm through the form's own submit -- an Enter inside a
+ * focused field is claimed by that field, so the key hook returns before its handler lookup and never
+ * sees it -- so it exercises the arm's own guard. The pointer press reaches the legend control, so it
+ * exercises the design system's refusal of a click on a loading button. A case driving only one of them
+ * would leave the other path open.
+ *
+ * Assumptions: F3 is asserted still reachable in the same breath, because standing every key down would
+ * satisfy every other assertion here and would trap an operator on a slow request.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
-async function standsTheTurnKeysDownWhileARequestIsOutstanding(): Promise<void> {
+async function reportsTheOutstandingTurnOnTheKeyThatOwnsIt(): Promise<void> {
   const { readAccountView } = await import('../../api/accounts');
   const first = deferred<typeof READ_RESULT>();
   vi.mocked(readAccountView).mockReturnValueOnce(first.promise);
@@ -883,12 +920,19 @@ async function standsTheTurnKeysDownWhileARequestIsOutstanding(): Promise<void> 
    * screen's inline save control as well once that appears.
    */
   const legend = screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL });
-  expect(
-    within(legend).getByRole('button', { name: ACCOUNT_UPDATE_KEY_LABELS.ENTER }),
-  ).toBeDisabled();
+  const enterKey = within(legend).getByRole('button', {
+    name: ACCOUNT_UPDATE_KEY_LABELS.ENTER,
+  });
+  expect(enterKey).toBeEnabled();
+  expect(enterKey).toHaveAttribute('aria-busy', 'true');
   expect(
     within(legend).getByRole('button', { name: ACCOUNT_UPDATE_KEY_LABELS.PFK03 }),
   ).toBeEnabled();
+
+  await user.keyboard('{Enter}');
+  await user.click(enterKey);
+
+  expect(vi.mocked(readAccountView)).toHaveBeenCalledTimes(1);
 
   await act(
     /**
@@ -1002,6 +1046,220 @@ async function retiresTheMaskedIdentifiersOfTheAccountReadBefore(): Promise<void
 }
 
 /**
+ * Drives the screen to the validated action, where all four keys are live and labelled.
+ *
+ * Assumptions: it goes through the real two turns rather than seeding state -- a read, an edit, and an
+ * Enter the service accepts -- because the action is what paints the cancel and save legends, and a case
+ * that reached it any other way would prove nothing about the turn that gets there.
+ * @param {ReturnType<typeof userEvent.setup>} user - The interaction driver for this case.
+ * @returns {Promise<void>} Resolves with the screen in the validated action.
+ */
+async function reachTheValidatedAction(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+  const { validateAccountUpdate } = await import('../../api/accounts');
+  await readOneAccount(user);
+  vi.mocked(validateAccountUpdate).mockResolvedValueOnce(ACCEPTING_VERDICT);
+
+  await user.clear(control('city'));
+  await user.type(control('city'), 'ALBANY');
+  await user.keyboard('{Enter}');
+  await act(
+    /**
+     * Drains the microtask queue so the verdict is applied.
+     * @returns {Promise<void>} Resolves once the queue is empty.
+     */
+    async (): Promise<void> => {
+      await Promise.resolve();
+    },
+  );
+}
+
+/**
+ * Reads one legend control by its painted label.
+ * @param {string} label - The label the legend paints on the wanted control.
+ * @returns {HTMLElement} That control.
+ */
+function legendKey(label: string): HTMLElement {
+  return within(screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL })).getByRole(
+    'button',
+    { name: label },
+  );
+}
+
+/**
+ * The cancel key reports its own re-read, and the processing key does not report it.
+ *
+ * ⚠️ Purpose: this is the case the per-key ownership exists for. Two keys reach one reader on this
+ * screen -- Enter's fetch and F12's cancel both perform the reference's `9000-READ-ACCT` -- so a busy
+ * affordance driven by the in-flight flag alone would spin whichever control the screen happened to
+ * name, and the operator would watch the wrong one work.
+ *
+ * ⚠️ Assumptions: the two halves are asserted TOGETHER and the second half is what discriminates. A
+ * screen that reported every key busy would satisfy the first assertion, and a screen that had simply
+ * kept the old blanket `disabled` would satisfy the second; only the pair pins the ownership.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function reportsTheCancelReReadOnTheCancelKeyAlone(): Promise<void> {
+  const { readAccountView } = await import('../../api/accounts');
+  const { ACCOUNT_UPDATE_KEY_LABELS } = await import('./index');
+  const user = userEvent.setup();
+  await renderScreen();
+  await reachTheValidatedAction(user);
+
+  const pending = deferred<typeof READ_RESULT>();
+  vi.mocked(readAccountView).mockReturnValueOnce(pending.promise);
+  await user.keyboard('{F12}');
+
+  const cancelKey = legendKey(ACCOUNT_UPDATE_KEY_LABELS.PFK12);
+  expect(cancelKey).toBeEnabled();
+  expect(cancelKey).toHaveAttribute('aria-busy', 'true');
+
+  const enterKey = legendKey(ACCOUNT_UPDATE_KEY_LABELS.ENTER);
+  expect(enterKey).toBeDisabled();
+  /*
+   * WHY : Assumptions: the negative half is asserted as the attribute's VALUE and not as its absence,
+   *       because the legend states busyness on every control it paints -- an idle one carries
+   *       `aria-busy="false"` rather than nothing. Asserting absence would fail against a screen that
+   *       reports ownership perfectly, which is the opposite of what this case is for.
+   */
+  expect(enterKey).toHaveAttribute('aria-busy', 'false');
+
+  await act(
+    /**
+     * Releases the outstanding response so the case leaves nothing in flight.
+     * @returns {Promise<void>} Resolves once the queue is empty.
+     */
+    async (): Promise<void> => {
+      pending.release(READ_RESULT);
+      await pending.promise;
+    },
+  );
+}
+
+/**
+ * The save key reports its own write, and the other keys stand down while it runs.
+ *
+ * ⚠️ Assumptions: the write is the one turn on this screen an operator most needs told about, and it is
+ * the turn the old treatment hid: the control they pressed to commit went grey along with every other
+ * key, so the screen said only that nothing was available. It now says that this control is working.
+ *
+ * Assumptions: the write is reached through the confirmation the screen requires -- the key opens the
+ * prompt and the prompt's own accept issues the request -- because that is the only path to a write here
+ * and a case that bypassed it would be asserting about a flow the screen does not have.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function reportsTheWriteOnTheSaveKey(): Promise<void> {
+  const { updateAccount } = await import('../../api/accounts');
+  const { ACCOUNT_UPDATE_KEY_LABELS } = await import('./index');
+  const user = userEvent.setup();
+  await renderScreen();
+  await reachTheValidatedAction(user);
+
+  const pending = deferred<typeof WRITE_RESULT>();
+  vi.mocked(updateAccount).mockReturnValueOnce(pending.promise);
+
+  await user.keyboard('{F5}');
+  const bubble = await screen.findByRole('tooltip');
+  await user.click(within(bubble).getByRole('button', { name: ACCOUNT_UPDATE_KEY_LABELS.PFK05 }));
+
+  const saveKey = legendKey(ACCOUNT_UPDATE_KEY_LABELS.PFK05);
+  expect(saveKey).toBeEnabled();
+  expect(saveKey).toHaveAttribute('aria-busy', 'true');
+  expect(legendKey(ACCOUNT_UPDATE_KEY_LABELS.ENTER)).toBeDisabled();
+  expect(legendKey(ACCOUNT_UPDATE_KEY_LABELS.PFK03)).toBeDisabled();
+
+  await act(
+    /**
+     * Releases the outstanding write so the case leaves nothing in flight.
+     * @returns {Promise<void>} Resolves once the queue is empty.
+     */
+    async (): Promise<void> => {
+      pending.release(WRITE_RESULT);
+      await pending.promise;
+    },
+  );
+}
+
+/**
+ * An unregistered attention key starts no second turn while one is outstanding.
+ *
+ * ⚠️ Purpose: this screen COERCES an unregistered key into its Enter arm -- `app/cbl/COACTUPC.cbl`
+ * L905 to L916 sets its invalid flag and then `SET CCARD-AID-ENTER TO TRUE`, so the reference reaches
+ * the same arm -- and the coercion calls that arm directly rather than dispatching the identifier. It
+ * therefore passes through none of the key descriptor's gates, which made it the one remaining way back
+ * into a turn the screen had already declined to start.
+ *
+ * ⚠️ Assumptions: F7 is pressed because this screen registers no handler for it, so the hook classifies
+ * it `unmapped` and the screen's own coercion runs. A registered key would be declined by the hook
+ * itself and would prove nothing about the coercion.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function anUnregisteredKeyStartsNoSecondTurn(): Promise<void> {
+  const { readAccountView } = await import('../../api/accounts');
+  const pending = deferred<typeof READ_RESULT>();
+  vi.mocked(readAccountView).mockReturnValueOnce(pending.promise);
+  const user = userEvent.setup();
+  await renderScreen();
+
+  await submitFilter(user, ACCOUNT_ID);
+  await user.keyboard('{F7}');
+
+  expect(vi.mocked(readAccountView)).toHaveBeenCalledTimes(1);
+
+  await act(
+    /**
+     * Releases the outstanding response so the case leaves nothing in flight.
+     * @returns {Promise<void>} Resolves once the queue is empty.
+     */
+    async (): Promise<void> => {
+      pending.release(READ_RESULT);
+      await pending.promise;
+    },
+  );
+}
+
+/**
+ * The live region carries the outstanding-request sentence for exactly as long as a turn is in flight.
+ *
+ * ⚠️ Purpose: every other sign this screen gives that it is working is visual -- an overlay across the
+ * form and a spinner on one key -- so an operator who cannot see either had the screen go silent for
+ * the length of the request and then speak only its answer.
+ *
+ * ⚠️ Assumptions: the region is asserted PRESENT and empty before the turn, which is not a formality.
+ * `ui/src/layout/fieldHelp.tsx` records that a live region has to be in the accessibility tree before
+ * its text changes for the change to be announced, so a region that were mounted only while busy would
+ * announce nothing on the first turn.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function announcesTheOutstandingRequestWhileItRuns(): Promise<void> {
+  const { readAccountView } = await import('../../api/accounts');
+  const { BUSY_ANNOUNCEMENT_TEST_ID } = await import('../../layout/fieldHelp');
+  const { REQUEST_IN_PROGRESS } = await import('../../messages/messages');
+  const pending = deferred<typeof READ_RESULT>();
+  vi.mocked(readAccountView).mockReturnValueOnce(pending.promise);
+  const user = userEvent.setup();
+  await renderScreen();
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toBeEmptyDOMElement();
+
+  await submitFilter(user, ACCOUNT_ID);
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  await act(
+    /**
+     * Releases the outstanding response so the announcement retires.
+     * @returns {Promise<void>} Resolves once the queue is empty.
+     */
+    async (): Promise<void> => {
+      pending.release(READ_RESULT);
+      await pending.promise;
+    },
+  );
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toBeEmptyDOMElement();
+}
+
+/**
  * Registers every case, and resets the transport between them.
  * @returns {void} Nothing; the registrations are the effect.
  */
@@ -1040,8 +1298,15 @@ function accountUpdateTurnCases(): void {
   it('captions nothing before a record is read', captionsNothingBeforeARecordIsRead);
   it('discards a read superseded by a newer read', discardsAReadSupersededByANewerRead);
   it(
-    'stands the turn keys down while a request is outstanding',
-    standsTheTurnKeysDownWhileARequestIsOutstanding,
+    'reports an outstanding turn on the key that owns it and starts no second one',
+    reportsTheOutstandingTurnOnTheKeyThatOwnsIt,
+  );
+  it('reports a cancel re-read on the cancel key alone', reportsTheCancelReReadOnTheCancelKeyAlone);
+  it('reports an outstanding write on the save key', reportsTheWriteOnTheSaveKey);
+  it('starts no second turn from an unregistered key', anUnregisteredKeyStartsNoSecondTurn);
+  it(
+    'announces the outstanding request for as long as it runs',
+    announcesTheOutstandingRequestWhileItRuns,
   );
   it('refuses a read that carries no revision', refusesAReadThatCarriesNoRevision);
   it(

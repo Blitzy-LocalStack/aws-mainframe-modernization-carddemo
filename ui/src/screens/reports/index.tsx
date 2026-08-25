@@ -75,7 +75,7 @@ import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
 // resolving two routers.
 import { useNavigate } from 'react-router';
 
-import { isApiRequestError } from '../../api/client';
+import { isApiRequestError, isRepeatableFailure } from '../../api/client';
 import {
   collectReportArtifact,
   newSubmissionKey,
@@ -91,19 +91,28 @@ import type {
 import type { ApiError } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp, fieldHintId } from '../../layout/fieldHelp';
+import {
+  WRAPPED_BUSY_REGION_PROPS,
+  busyAnnouncement,
+  fieldAriaProps,
+  fieldErrorHelp,
+  fieldHintId,
+} from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
+import { copybookFieldWidthStyle } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import {
   MESSAGE_TEMPLATES,
+  PERSISTENT_FAILURE_REPORT_IT,
   PROGRAM_MESSAGES,
   REPORTS_CAPTIONS,
   REPORTS_KEY_LABELS,
   REPORTS_TITLE,
   REPORT_RUN_MESSAGES,
   REPORT_TYPE_PROMPTS,
+  REQUEST_IN_PROGRESS,
   formatMessageTemplate,
 } from '../../messages/messages';
 import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
@@ -238,6 +247,32 @@ export const DATE_PART_WIDTHS: Readonly<Record<DatePart, number>> = {
  * `app/cbl/CORPT00C.cbl` L484-L493 quote a single keystroke back at the operator.
  */
 export const CONFIRM_WIDTH = 1;
+
+/**
+ * Declared width of a date bound's caption cell, in character columns.
+ *
+ * ⚠️ Assumptions: twelve, and BOTH captions are twelve. `app/bms/CORPT00.bms` L122-L126 declares the start
+ * caption `LENGTH=12, POS=(13,15), INITIAL='Start Date :'` and L162-L166 declares the end caption
+ * `LENGTH=12, POS=(14,15), INITIAL='  End Date :'` -- identical length, identical starting column, and the
+ * end caption is right-aligned into that cell by TWO LEADING SPACES rather than by being shorter. So on the
+ * terminal both rows' first input begins in column 29, which is what put the two rows' slashes, inputs and
+ * hints on the same vertical lines.
+ *
+ * ⚠️ Refactoring Rationale: this constant exists because HTML does not reproduce that on its own. A text node
+ * collapses a leading run of spaces, so `'  End Date :'` painted as ordinary text is ten characters wide
+ * against the start caption's twelve; the row is a flex line sized by its caption, so every element after
+ * the caption inherited the two-character difference. A review measured it as six to seven pixels at every
+ * width the row fits -- the first inputs at x143 against x137, the slashes at x352/x575 against x346/x569,
+ * the calendar controls at x905 against x898. Declaring the cell's measure and preserving its spaces is what
+ * makes the two rows start at one x again.
+ *
+ * Trade-offs: this is a data measure and not a design value -- it is the mapset's own `LENGTH`, in the same
+ * class as {@link DATE_PART_WIDTHS} -- so it is expressed in `ch`, the advance measure of the font's zero
+ * glyph, which is the browser's nearest equivalent of a character column and the unit
+ * `copybookFieldWidthStyle` already uses for the same purpose. A pixel measure would be a design value this
+ * screen is not allowed to hold, and would have to be recomputed for every theme.
+ */
+export const BOUND_CAPTION_WIDTH = 12;
 
 /**
  * The separator the mapset paints between the parts of a date, verbatim.
@@ -448,6 +483,28 @@ const HIGHEST_DAY = 31;
 /** Lowest value the reference's calendar validator accepts for a month or a day, both being one-based. */
 const LOWEST_MONTH_OR_DAY = 1;
 
+/**
+ * Lowest year the reference's calendar validator accepts, a year of zero being outside every era.
+ *
+ * ⚠️ Assumptions: one, and the figure comes from the reference's own feedback-code table rather than from a
+ * general view about calendars. `app/cbl/CSUTLDTC.cbl` L70 declares
+ * `88 FC-YEAR-IN-ERA-ZERO VALUE X'000309D959C3C5C5'`, whose condition identifier carries severity 3 and
+ * message number `0x09D9` -- 2521 -- and L145-L146 renders it as `'YearInEra is 0 '`. `CORPT00C` forgives
+ * exactly ONE non-zero outcome: L397 and L419 both read `IF CSUTLDTC-RESULT-MSG-NUM NOT = '2513'`, and 2513
+ * is `FC-UNSUPP-RANGE` at L66. So 2521 is not forgiven, and a year of zero takes the refusal arm with
+ * `'Start Date - Not a valid date...'` at L398 or `'End Date - Not a valid date...'` at L420.
+ *
+ * ⚠️ Assumptions: the year edits BEFORE that call cannot catch it, which is why the check has to live in the
+ * calendar family. The blank test at L273 and L294 passes -- `'0000'` is not spaces -- and the only other
+ * year edit is `IS NOT NUMERIC` at L347 and L373, which `'0000'` also passes. `isPartWithinRange` reproduces
+ * that faithfully by applying no lower bound to a year, so `'0000'` reaches the calendar test exactly as it
+ * reaches `CEEDAYS` there.
+ *
+ * Trade-offs: this refuses a year the four-character field can physically hold, which is the point -- the
+ * field's width and the calendar's domain are different constraints, and the reference enforces both.
+ */
+const LOWEST_YEAR_IN_ERA = 1;
+
 /** Days in each month for a non-leap year, indexed from January, used by {@link daysInMonth}. */
 const DAYS_PER_MONTH: readonly number[] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
@@ -604,6 +661,19 @@ function isExistingCalendarDate(parts: DatePartValues): boolean {
   const year = Number.parseInt(parts.year, 10);
   const month = Number.parseInt(parts.month, 10);
   const day = Number.parseInt(parts.day, 10);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the year is now floored at {@link LOWEST_YEAR_IN_ERA}, and its absence
+   *       was a genuine parity gap rather than a theoretical one -- a keyed `0000` passed every edit on
+   *       this screen and was composed into a submitted request, where the reference refuses it. See that
+   *       constant for the feedback code and the two message numbers that decide it.
+   * WHY : Assumptions: the floor is applied to the year ALONE and the existing day comparison is left to
+   *       carry the month and day floors, because `daysInMonth` already answers zero for a month outside
+   *       one to twelve and the `day >= LOWEST_MONTH_OR_DAY` test already rejects a zero day. Adding a
+   *       second month test here would duplicate a rule that is already expressed once.
+   */
+  if (year < LOWEST_YEAR_IN_ERA) {
+    return false;
+  }
   return day >= LOWEST_MONTH_OR_DAY && day <= daysInMonth(year, month);
 }
 
@@ -1383,12 +1453,26 @@ export function ReportsScreen(): ReactElement {
    * Identity of the run being followed, or `null` when no run has been started this turn.
    *
    * Assumptions: derived from the submission rather than stored beside it, so exactly one run is
-   * followed and it is always the one the screen is displaying. A refusal clears the submission -- see
-   * {@link reportRefusal} -- and therefore stops the loop; the run itself carries on producing its
-   * document, and the deploy runbook records how an operator reaches a document whose handle they no
-   * longer hold.
+   * followed and it is always the one the screen is displaying.
+   *
+   * ⚠️ Refactoring Rationale: a refusal no longer clears the submission and therefore no longer stops the
+   * loop -- see {@link reportRefusal} for why the two were uncoupled. The tracked run now ends only when a
+   * new submission replaces it or the screen is left, so a mistyped field cannot silently strand a run
+   * whose name is the only key its status can be read by. `docs/runbooks/batch-operations.md` remains the
+   * route for an operator who lost a handle by leaving the screen.
    */
   const trackedRun = submission === null ? null : submission.executionName;
+
+  /**
+   * Whether the last turn stopped to ask for the confirmation and the pointer path raised the question.
+   *
+   * ⚠️ Assumptions: this drives the consent balloon's open state rather than the library's own trigger,
+   * which is what keeps a confirmation from being offered before the edits that must precede it have run.
+   * It is set from {@link runTurn}'s own answer in {@link submitFromPointer} and cleared by every other
+   * path, so the balloon can only stand open over a form whose report type and range the screen has
+   * already accepted.
+   */
+  const [confirmationAsked, setConfirmationAsked] = useState(false);
 
   /*
    * WHY : Assumptions: two references guard the asynchronous work, and they answer different
@@ -1667,7 +1751,49 @@ export function ReportsScreen(): ReactElement {
         }
         console.warn('carddemo: the status of a report run could not be read', cause);
         setStatusReadPending(false);
-        setRunNotice(REPORT_RUN_MESSAGES.STATUS_READ_FAILED);
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the notice is now SELECTED on whether repeating this read could
+         *       plausibly succeed, where one sentence covered every cause. `STATUS_READ_FAILED` ends with
+         *       "Refresh to try again", and offering that remedy for a failure a refresh cannot clear --
+         *       a malformed execution name, a permission the operator does not hold -- sends them round a
+         *       loop the screen already knows is closed. `PERSISTENT_FAILURE_REPORT_IT` reads "That
+         *       request did not complete. Report it if it happens again." and names the action that can
+         *       actually change the outcome.
+         * WHY : Assumptions: the split is on `repeatable` and NOT on `transient`, and the two are
+         *       different questions that `ui/src/api/client.ts` L919-L949 deliberately keeps apart:
+         *       `transient` describes the CONDITION and `repeatable` additionally requires the REQUEST to
+         *       be safe to send again. Selecting on `transient` alone would offer a retry for a condition
+         *       that may pass on a request that must not be repeated; this is a `GET`, so for this call
+         *       the two coincide today, and asserting on the narrower member is what keeps the choice
+         *       correct if the read ever stops being a `GET`.
+         * WHY : Assumptions: a cause that is not a normalised transport failure at all -- a programming
+         *       error thrown inside the settlement, say -- falls to the persistent sentence, because
+         *       `isRepeatableFailure` narrows before it reads the member and answers false for anything
+         *       it cannot narrow. That is the right default: an unclassifiable failure is not evidence
+         *       that retrying will help.
+         * WHY : Alternatives Considered: `TRANSIENT_FAILURE_TRY_AGAIN` for the repeatable arm, which is
+         *       the generic half of the authored pair and the symmetrical choice beside
+         *       `PERSISTENT_FAILURE_REPORT_IT`. Rejected because it reads "The service is not available
+         *       at the moment. Try again shortly." and names no action available on this screen, whereas
+         *       `STATUS_READ_FAILED` names the one control that exists for it -- Refresh -- and says what
+         *       failed. The precedence the authored pair is published under is that a MORE SPECIFIC
+         *       sentence wins: a service-supplied message is rendered verbatim over either of them, and
+         *       a screen-owned sentence that is width-checked against the row-23 field and carries the
+         *       remedy is specific in the same way. The generic sentence therefore has no site on this
+         *       screen: its other failure surface is a submission, and that one carries the reference's
+         *       own transcribed sentence under rule T8, which outranks any authored text.
+         * WHY : Assumptions: the Refresh CONTROL stays available in both cases, and is deliberately not
+         *       gated on this judgement. It is the only access to a run's state -- the execution name is
+         *       the sole key the status endpoint accepts and it is shown nowhere else -- and the run
+         *       continues on the service whatever this read did, so a later read can legitimately
+         *       succeed where this one failed. What the judgement changes is what the operator is TOLD
+         *       to do, not what they are permitted to do.
+         */
+        setRunNotice(
+          isRepeatableFailure(cause)
+            ? REPORT_RUN_MESSAGES.STATUS_READ_FAILED
+            : PERSISTENT_FAILURE_REPORT_IT,
+        );
       };
 
       /**
@@ -1695,6 +1821,24 @@ export function ReportsScreen(): ReactElement {
    * as the fields, and the cursor lands on the report-type selector. Every caller depends on that: the
    * refusal path relies on it to leave the band empty, and the success path relies on it to leave the band
    * empty before composing its own sentence into it.
+   *
+   * ⚠️ Refactoring Rationale: this NO LONGER clears {@link submission}, and the omission is the fix for the
+   * reported defect that clearing the form destroyed the reference of a report that was already running.
+   * The reference's `INITIALIZE` list is the ten screen fields and `WS-MESSAGE` -- it cannot mention a
+   * submission handle, because the baseline had none: writing to the `JOBS` queue returned no identity at
+   * all. So the handle is a target-side addition, and folding it into a paragraph named for the reference's
+   * field initialisation gave a form-clearing action the additional power to abandon a live run.
+   *
+   * ⚠️ Trade-offs: a handle therefore OUTLIVES the form that produced it, and the operator can be looking at
+   * an empty form above the panel of the run they last started. That is the intended reading of this screen:
+   * the form is a request builder and the panel is a monitor for one submitted run, so the two are cleared
+   * by different actions. The alternative -- clearing the panel here and giving the operator no way back to
+   * a run that is genuinely still executing on the service -- loses information that cannot be recovered,
+   * because the execution name is the only key the status endpoint accepts and it is not shown anywhere else.
+   *
+   * Assumptions: the started arm of the submission settlement still calls this and then installs its own
+   * handle, so the ordering there is unaffected; and a NEW submission replaces the handle outright, so no
+   * caller has to clear it first to avoid displaying a stale one.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function initialiseAllFields(): void {
@@ -1704,12 +1848,23 @@ export function ReportsScreen(): ReactElement {
     setMessage(null);
     setSeverity('error');
     setFieldErrors([]);
-    setSubmission(null);
     focusField('reportType');
   }
 
   /**
    * Paints one refusal: the sentence in red, the marks on the named controls, the cursor on one of them.
+   *
+   * ⚠️ Refactoring Rationale: a refusal no longer clears {@link submission}, which is the direct fix for the
+   * reported defect that a failed validation unmounted the whole execution panel and destroyed the reference
+   * of an already-submitted report. A refusal is a statement about the FORM -- one field the operator has
+   * still to correct -- and it says nothing whatsoever about a run the service has already accepted. Coupling
+   * the two meant that mistyping a date on the next request silently abandoned the previous run, and the
+   * measured consequence was a monitored run going dark for a minute with no way to recover its name.
+   *
+   * ⚠️ Assumptions: the panel staying mounted also keeps its status chain alive across the refusal, so the
+   * gap the tester measured between two reads closes as a consequence of the same change rather than needing
+   * a second one. The chain is keyed on the tracked run, and the tracked run is exactly what stops being
+   * discarded here.
    * @param {string} refusal - Verbatim sentence for the message band.
    * @param {readonly ReportsFieldError[]} marks - Controls to mark beneath, which may be empty.
    * @param {ReportsField} focus - Control to place the cursor on.
@@ -1729,7 +1884,6 @@ export function ReportsScreen(): ReactElement {
      */
     setSeverity('error');
     setFieldErrors(marks);
-    setSubmission(null);
     focusField(focus);
   }
 
@@ -1935,17 +2089,33 @@ export function ReportsScreen(): ReactElement {
    * Purpose: the operator's own way of asking what became of a run -- the action the baseline required
    * a different system for, because the queue write it performed reported nothing back.
    *
-   * Assumptions: the automatic budget is restored as well as a read being requested, and the two belong
-   * together. The bound on {@link MAX_AUTOMATIC_STATUS_READS} exists to stop an ABANDONED screen reading
-   * forever; an operator pressing this control is by definition not abandoned, so the evidence the bound
-   * was guarding against has just been contradicted.
+   * ⚠️ Refactoring Rationale: this NO LONGER restores the automatic budget, and that restoration was the
+   * measured cause of the reported defect -- an observed 71 automatic reads against a documented bound of
+   * {@link MAX_AUTOMATIC_STATUS_READS}, because each press of this control reset the count to zero and bought
+   * a further sixty. The previous reasoning was that an operator pressing a control has contradicted the
+   * evidence of abandonment the bound guards against. It is true of the press and false of everything after
+   * it: one deliberate press cannot testify that the operator is still present sixty reads and five minutes
+   * later, so re-arming turned a bounded chain into an unbounded one that any single press could extend
+   * indefinitely, and made the `AUTOMATIC_UPDATES_STOPPED` notice describe a state the screen had left.
+   *
+   * ⚠️ Assumptions: the operator loses nothing by this, because requesting a read and scheduling further ones
+   * are separate steps. Advancing the request below re-enters the status effect, which performs ONE read
+   * immediately and unconditionally before it consults the budget at all -- so this control answers every
+   * press even with the budget fully spent, and only the automatic continuation stays stopped. The operator
+   * therefore keeps an unlimited number of reads on demand and the screen keeps a finite number on a timer,
+   * which is the split the bound was written for.
+   *
+   * ⚠️ Alternatives Considered: granting a smaller top-up per press, and resetting the budget only while the
+   * document is still being produced. Both keep the defect in a reduced form -- a total that no longer has a
+   * ceiling, only a slower climb towards none -- and both make the stop notice conditional on arithmetic the
+   * operator cannot see. Leaving the budget alone is the only version in which the notice, once shown, stays
+   * true.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function refreshRunStatus(): void {
     if (trackedRun === null || statusReadPending) {
       return;
     }
-    automaticReads.current = 0;
     setStatusReadRequest(
       /**
        * Advances the read request so the following effect restarts with a fresh read.
@@ -2024,12 +2194,26 @@ export function ReportsScreen(): ReactElement {
        * request, and the two are genuinely different for the operator. `collectReportArtifact` documents
        * 404 as the answer both for a run that never happened and for one whose document a lifecycle rule
        * has expired -- neither of which a second attempt or a status read will recover, so the sentence
-       * that says to submit the report again is the only one that is true. Every other answer may well
-       * be transient, so it gets the sentence that says to try again.
+       * that says to submit the report again is the only one that is true.
+       *
+       * ⚠️ Refactoring Rationale: the remaining answers are now SPLIT on whether repeating the collection
+       * could plausibly succeed, where one sentence covered every one of them. `DOCUMENT_COLLECTION_FAILED`
+       * ends "Refresh the status to retry", and the measured case that makes the split necessary is an
+       * `AccessDenied` refusal: a permission the operator does not hold is not cleared by any number of
+       * refreshes, so the sentence sent them round a loop the screen already knew was closed. This is the
+       * same correction the status reader `reportUnreadableStatus` carries, applied to the other target-side
+       * failure surface so the two do not disagree about what an unrecoverable failure is called.
        *
        * Assumptions: the status is read through the shared failure type rather than from a property of
        * the raw cause, so a rejection that is not one of this client's -- a browser error, a programming
-       * error -- falls through to the general sentence instead of being read for a status it never had.
+       * error -- falls through to the persistent sentence instead of being read for a status it never
+       * had. `isRepeatableFailure` narrows before it reads its member and answers false for anything it
+       * cannot narrow, which is the right default: an unclassifiable failure is no evidence that
+       * retrying will help.
+       *
+       * Assumptions: the not-found test comes FIRST and is not folded into the split. A 404 is a
+       * conclusive answer about a document rather than a failure of the request, so it must not be
+       * re-described as either a retryable or a reportable failure.
        * @param {unknown} cause - Whatever the collection rejected with.
        * @returns {void} Completion is represented by the screen's own state.
        */
@@ -2039,11 +2223,14 @@ export function ReportsScreen(): ReactElement {
         }
         console.warn('carddemo: a report document could not be collected', cause);
         setCollecting(false);
-        const absent = isApiRequestError(cause) && cause.status === DOCUMENT_ABSENT_STATUS;
+        if (isApiRequestError(cause) && cause.status === DOCUMENT_ABSENT_STATUS) {
+          setRunNotice(REPORT_RUN_MESSAGES.DOCUMENT_UNAVAILABLE);
+          return;
+        }
         setRunNotice(
-          absent
-            ? REPORT_RUN_MESSAGES.DOCUMENT_UNAVAILABLE
-            : REPORT_RUN_MESSAGES.DOCUMENT_COLLECTION_FAILED,
+          isRepeatableFailure(cause)
+            ? REPORT_RUN_MESSAGES.DOCUMENT_COLLECTION_FAILED
+            : PERSISTENT_FAILURE_REPORT_IT,
         );
       },
     );
@@ -2066,12 +2253,25 @@ export function ReportsScreen(): ReactElement {
    * raises as a rejection. Surfacing a field-level prompt through an exception path is worse than deciding
    * it here, and deciding it here is also what the reference does: `SUBMIT-JOB-TO-INTRDR` settles all four
    * outcomes before it writes the first record to the queue.
+   *
+   * ⚠️ Refactoring Rationale: the turn now REPORTS whether it stopped to ask for the confirmation, and the
+   * return value exists so the pointer affordance can be driven by the edit chain instead of by a click.
+   * The confirmation balloon previously opened the moment its control was pressed, which put a dialogue
+   * asking the operator to consent in front of a form whose required dates were still blank and whose
+   * edits had not run -- the measured consequence being a balloon covering the `End Date :` caption and
+   * its first two inputs while offering to submit them. The reference cannot reach that state: all three
+   * arms of the outer `EVALUATE` run their edits first and only then `PERFORM SUBMIT-JOB-TO-INTRDR`
+   * (`app/cbl/CORPT00C.cbl` L238, L255 and L435), and that paragraph's blank-answer test at L464-L472 is
+   * the first thing in it. So asking is a RESULT of a turn here, exactly as it is there.
    * @param {string} answer - The confirmation character this turn is answering with.
-   * @returns {void} Completion is represented by the screen's own state.
+   * @returns {boolean} `true` when the turn reached the confirmation and found it unanswered, which is
+   *   the one outcome that leaves the operator with a question to answer; `false` for every other
+   *   outcome, including a refusal earlier in the chain, a decline, a submission and a turn dropped
+   *   because one is already in flight.
    */
-  function runTurn(answer: string): void {
+  function runTurn(answer: string): boolean {
     if (inFlight.current) {
-      return;
+      return false;
     }
 
     /*
@@ -2085,12 +2285,12 @@ export function ReportsScreen(): ReactElement {
         SELECTOR_REFUSAL_MARKS,
         'reportType',
       );
-      return;
+      return false;
     }
 
     const submittedRange = resolveRange(reportType);
     if (submittedRange === null) {
-      return;
+      return false;
     }
 
     const confirmation = evaluateConfirmation(answer, REPORT_TYPE_NAMES[reportType]);
@@ -2100,7 +2300,16 @@ export function ReportsScreen(): ReactElement {
         [{ field: 'confirm', message: confirmation.message }],
         'confirm',
       );
-      return;
+      /*
+       * WHY : ⚠️ Assumptions: only the UNANSWERED outcome reports back as a question, and the
+       *       UNRECOGNISED one deliberately does not, although both take this same refusal. A blank
+       *       answer is the reference ASKING -- L464-L472 paints `Please confirm ...` and returns for the
+       *       operator to answer. An unrecognised character is the reference REJECTING an answer already
+       *       given -- L478-L493 names the character back and refuses it. Offering a consent affordance
+       *       on the second would answer, on the operator's behalf, a question they have already answered
+       *       wrongly, and would hide the fact that what they keyed was not accepted.
+       */
+      return confirmation.outcome === 'UNANSWERED';
     }
     if (confirmation.outcome === 'DECLINED') {
       /*
@@ -2112,18 +2321,52 @@ export function ReportsScreen(): ReactElement {
        *       sentence on the band would be equally wrong.
        */
       initialiseAllFields();
-      return;
+      return false;
     }
 
     startReportRun(reportType, submittedRange, answer);
+    return false;
   }
 
   /**
    * Submits the turn using the confirmation character currently in the field.
+   *
+   * Purpose: the action Enter is bound to, from the keyboard and from the row-24 legend control alike.
+   *
+   * ⚠️ Assumptions: this closes the consent balloon rather than opening it, and the asymmetry with
+   * {@link submitFromPointer} is deliberate. A keyed turn is an answer in the field's own terms, so it
+   * SUPERSEDES a question the pointer path had put on the screen; and a refused keyed turn moves the
+   * cursor into the confirmation field, where a balloon floating beside it would be a second surface
+   * competing for an operator who is already typing into the first.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function submitTurn(): void {
     runTurn(confirmAnswer);
+    setConfirmationAsked(false);
+  }
+
+  /**
+   * Submits the turn from the in-content control, offering consent only if the turn asks for it.
+   *
+   * ⚠️ Refactoring Rationale: this control previously ran a DIFFERENT operation from the Enter key and the
+   * legend control beside it -- it opened a consent balloon whose accept action wrote the consenting
+   * character and submitted, while Enter submitted whatever the field held. Two controls carrying the
+   * same label `ENTER=Continue` in the same primary emphasis, measured 312 pixels apart at 1600, did not
+   * do the same thing. They now run the identical turn through {@link runTurn} with the identical
+   * argument, so the operation is one operation whichever surface reaches it.
+   *
+   * ⚠️ Trade-offs: what remains particular to this control is the balloon, and it is an AFFORDANCE on a
+   * shared operation rather than a second operation. It is offered here and not on the keyboard path
+   * because the reference's own confirmation surface is a keyed character, so a pointer operator has no
+   * equivalent of it -- AAP section 0.3.2 maps the terminal's re-key-to-confirm convention onto
+   * `Popconfirm` for exactly that reason -- whereas a keyboard operator already has the field the cursor
+   * has just been placed in. The alternative of raising the balloon on both paths was rejected on
+   * accessibility: {@link reportRefusal} focuses the confirmation input, so a balloon raised at the same
+   * moment is an unfocused floating surface asking a question the focused control is already asking.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function submitFromPointer(): void {
+    setConfirmationAsked(runTurn(confirmAnswer));
   }
 
   /**
@@ -2134,11 +2377,48 @@ export function ReportsScreen(): ReactElement {
    * was submitted. The character path is retained alongside the dialogue because the dialogue can only
    * express consent and refusal, and two of the reference's four outcomes -- a blank answer and an
    * unrecognised one -- are reachable only by keying the field.
+   *
+   * Assumptions: the balloon is closed here rather than left to `Popconfirm`'s own dismissal, because its
+   * open state is controlled by this screen -- the library will not close what it did not open.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function confirmAndSubmit(): void {
+    setConfirmationAsked(false);
     setConfirmAnswer(CONSENTING_ANSWER);
     runTurn(CONSENTING_ANSWER);
+  }
+
+  /**
+   * Dismisses the consent balloon, leaving every keyed value exactly as it was.
+   *
+   * ⚠️ Assumptions: dismissing is NOT the reference's declining answer, and conflating the two would lose
+   * a distinction the reference draws. Keying `N` is an ANSWER: L480-L483 performs `INITIALIZE-ALL-FIELDS`
+   * and clears the whole form silently, and that path stays reachable by keying the character the
+   * confirmation field's own hint publishes. Dismissing a balloon withdraws the QUESTION, so the operator
+   * returns to the range they keyed with nothing lost -- which is also the only reading under which the
+   * control's stock `Cancel` label is honest about what pressing it does.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function dismissConfirmation(): void {
+    setConfirmationAsked(false);
+  }
+
+  /**
+   * Follows the balloon's own dismissals without letting a trigger press open it.
+   *
+   * ⚠️ Assumptions: an opening request is IGNORED and only a closing one is honoured, which is what makes
+   * the gate hold. `Popconfirm` clones its child and adds a trigger handler, so a press asks to open at
+   * the same moment {@link submitFromPointer} runs the turn -- and honouring that request would restore
+   * the defect exactly, opening the balloon before the edits had run. Closing requests must still be
+   * honoured, because they are how Escape and an outside click dismiss it, and dropping them would trap
+   * the operator in a balloon with only its two buttons as an exit.
+   * @param {boolean} next - Whether the library is asking to open or to close.
+   * @returns {void} Completion is represented by the screen's own state.
+   */
+  function followConfirmationDismissal(next: boolean): void {
+    if (!next) {
+      setConfirmationAsked(false);
+    }
   }
 
   /**
@@ -2181,7 +2461,29 @@ export function ReportsScreen(): ReactElement {
      * @returns {void} Completion is represented by the screen's own state.
      */
     return function recordDatePart(event: ChangeEvent<HTMLInputElement>): void {
-      const accepted = event.target.value.replace(NON_NUMERIC_FIELD_CHARACTERS, '');
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the filtered value is now BOUNDED to the part's declared width, and
+       *       the omission it corrects was reachable. `maxLength` on the control stops a person TYPING past
+       *       the width, but it does not bound a value delivered in one change -- a paste, a password
+       *       manager, an autofill -- and the filter above then SALVAGES digits out of whatever arrived.
+       *       Measured on the deployed build: `{{7*7}}` put `7777` into a two-character month, `1e5` became
+       *       `15` and `0x10` became `010`. Each of those is a value the 3270 field could not have held,
+       *       accepted silently and then edited as though the operator had keyed it.
+       * WHY : Assumptions: this is the same bound {@link recordConfirmAnswer} already applies with
+       *       `CONFIRM_WIDTH`, so the two keyable surfaces on this screen now agree; the confirmation field
+       *       having it and the six date parts not having it was an inconsistency rather than a decision.
+       * WHY : ⚠️ Trade-offs: truncation is chosen over rejecting the whole entry, which is the 3270
+       *       behaviour being reproduced -- a field of width n accepts n characters and the rest never
+       *       arrives, rather than the field refusing what was sent. Rejecting outright would also erase a
+       *       partially valid entry the operator could correct, and would make a paste of a correct date
+       *       into the wrong box clear the box instead of filling it.
+       * WHY : Assumptions: the truncation is applied AFTER the character filter and not before, so a
+       *       payload whose leading characters are punctuation cannot consume the width and leave the
+       *       digits behind it discarded -- which would make the salvage worse rather than better.
+       */
+      const accepted = event.target.value
+        .replace(NON_NUMERIC_FIELD_CHARACTERS, '')
+        .slice(0, DATE_PART_WIDTHS[part]);
       setRange(
         /**
          * Replaces the one part that changed, leaving the other five untouched.
@@ -2282,8 +2584,69 @@ export function ReportsScreen(): ReactElement {
    *       this program's own `COPY` list omits that copybook's target and this module omits both mechanisms.
    */
   const pfKeyHandlers: PfKeyHandlerMap = {
-    ENTER: { onInvoke: submitTurn, label: REPORTS_KEY_LABELS.ENTER },
-    PFK03: { onInvoke: returnToMenu, label: REPORTS_KEY_LABELS.PFK03 },
+    ENTER: {
+      onInvoke: submitTurn,
+      label: REPORTS_KEY_LABELS.ENTER,
+      /*
+       * WHY : Assumptions: `'mutating'` for the whole session, and unlike the bill-payment screen's Enter
+       *       this one needs no per-turn derivation, because this map has ONE Enter arm and it writes.
+       *       `app/cbl/CORPT00C.cbl` L184-L195 sends `DFHENTER` to `PROCESS-ENTER-KEY`, and all three of
+       *       that paragraph's report-type arms -- monthly at L213-L237, yearly at L238-L256 and custom
+       *       from L257 -- end in `PERFORM SUBMIT-JOB-TO-INTRDR`. Every other path out of the paragraph
+       *       is a refusal that writes nothing, and a refusal is what the key does when it CANNOT do what
+       *       the operator asked, not what it is for.
+       * WHY : Alternatives Considered: `'destructive'`, on the grounds that submitting a report spends
+       *       service capacity. Rejected: the risk vocabulary reserves that level for deleting a record
+       *       or moving money, and `ui/src/layout/PfKeyBar.tsx` wraps a destructive control in
+       *       `destructiveFocusTheme` -- a treatment that would put the strongest warning in the
+       *       application on an action whose worst outcome is a report nobody reads. Submitting a run is
+       *       a write, and `'mutating'` is what a write is.
+       */
+      risk: 'mutating',
+      /*
+       * WHY : Refactoring Rationale: this entry reports `busy`, and the hook-level `enabled: !busy` that
+       *       used to sit below was withdrawn to let it. Those two cannot coexist:
+       *       `ui/src/layout/usePfKeys.ts` returns from `invokePfKey` and from its keydown listener on
+       *       `options.enabled === false` BEFORE it looks at the handler at all, so with the global gate
+       *       in place a per-entry busy flag is unreachable. The gate also greyed the Enter control for
+       *       the duration of a submission, which took it out of the tab order at the one moment a
+       *       keyboard operator is most likely to be pressing keys, and told them the key does not work
+       *       when the truth is that they were early. A busy control stays present, focusable and named
+       *       and declines the press in silence, which is what the terminal's input inhibit did.
+       * WHY : Assumptions: the flag is the synchronous ref rather than the `busy` render state, and it is
+       *       passed as a PREDICATE so it is read at dispatch. `submitTurn` latches on the same ref for
+       *       the same reason: a state update is batched, so two Enter presses in one batch would both
+       *       observe the old value and two runs would be submitted for one instruction.
+       */
+      busy:
+        /**
+         * Answers whether a turn this key started is still outstanding.
+         *
+         * Purpose: give the legend control its busy affordance for exactly the window in which a second
+         * press would submit a second run, and release it the moment the turn settles.
+         * @returns {boolean} True while a turn started from this key has not yet settled.
+         */
+        (): boolean => inFlight.current,
+    },
+    PFK03: {
+      onInvoke: returnToMenu,
+      label: REPORTS_KEY_LABELS.PFK03,
+      /*
+       * WHY : Assumptions: `F3=Back` is `'read-only'` because the caption names a navigation and
+       *       `app/cbl/CORPT00C.cbl` L196-L204 performs exactly that -- an `XCTL` to the main menu with
+       *       no file access on the way. It keeps the DISABLED channel rather than reporting busy,
+       *       because it does not own the outstanding turn: the busy channel says "the key you pressed is
+       *       running", which would be a false statement about a key that is merely being withheld while
+       *       a submission it has nothing to do with completes.
+       * WHY : Assumptions: withholding it at all is deliberate and is what `enabled: !busy` used to do
+       *       for it. A 3270 accepted no attention identifier between sending the map and receiving the
+       *       reply, so the reference could not have taken PF3 mid-turn even in principle; leaving it
+       *       live would let an operator leave the screen while the submission that created the run they
+       *       would have monitored was still in flight.
+       */
+      risk: 'read-only',
+      disabled: busy,
+    },
   };
 
   /**
@@ -2296,11 +2659,32 @@ export function ReportsScreen(): ReactElement {
    * @returns {void} Completion is represented by the screen's own state.
    */
   function reportInvalidKey(rejection: PfKeyRejection): void {
+    /*
+     * WHY : Refactoring Rationale: this sink now returns without painting while a submission is in
+     *       flight, and for anything other than an UNMAPPED identifier. Both guards replace what the
+     *       withdrawn `enabled: !busy` option used to do for free: with the global gate in place the hook
+     *       never reached this sink during a turn, so no sentence was painted for any key pressed inside
+     *       the busy window. Withdrawing the gate -- which had to happen for Enter to report `busy` at
+     *       all -- would otherwise have made a mid-submission F9 paint `'Invalid key pressed.'`, and a
+     *       mid-submission F3 paint it too, on a screen that painted nothing for either before.
+     * WHY : Assumptions: silence is the reference's behaviour and not a softening of it. A 3270 inhibited
+     *       the keyboard for the duration of a task, so a key pressed inside the window never reached the
+     *       program and its `WHEN OTHER` arm at `app/cbl/CORPT00C.cbl` L191-L193 never ran. The arm still
+     *       runs for a key pressed when the screen is idle, which is the only state in which the
+     *       reference could have run it.
+     * WHY : Assumptions: the `'disabled'` reason is filtered rather than special-cased, because on this
+     *       map it can arise from exactly one cause -- PF3 withheld for a submission -- and that is the
+     *       same inhibited-keyboard event. Filtering by reason keeps the guard true if a later turn
+     *       withholds a key for some other reason: an unavailable key is not an unrecognised one.
+     */
+    if (inFlight.current || rejection.reason !== 'unmapped') {
+      return;
+    }
+
     reportRefusal(rejection.message, [], 'reportType');
   }
 
   const { bindings, invoke } = usePfKeys(pfKeyHandlers, {
-    enabled: !busy,
     onInvalidKey: reportInvalidKey,
     restoreFocusRef: reportTypeRef,
   });
@@ -2308,6 +2692,20 @@ export function ReportsScreen(): ReactElement {
   useShellSlot({
     screen: { transactionId: REPORTS_TRANSACTION_ID, programName: REPORTS_PROGRAM_NAME },
     ...(paintedAt === undefined ? {} : { now: paintedAt }),
+    /*
+     * WHY : Assumptions: the `message` slot carries NO `information` member, and the omission is
+     *       measured rather than incidental. The frame's information channel reproduces the second
+     *       message line some mapsets declare at row 22 -- `INFOMSG` -- and `CORPT00` declares none:
+     *       `grep -n "POS=(2[0-4]" app/bms/CORPT00.bms` returns exactly two fields, `ERRMSG` at
+     *       `POS=(23,1)` with `LENGTH=78` and the legend at `POS=(24,1)`, and `grep -n INFOMSG` returns
+     *       nothing. This screen has one message line and reserves no row for a second.
+     * WHY : Alternatives Considered: publishing `information: { text: null }` on every turn to reserve
+     *       the row, which is what a screen whose mapset DOES declare row 22 must do so the row cannot
+     *       appear and disappear under the operator. Rejected here because it would hold open a channel
+     *       this map never spends, pushing the row-24 legend down one line on every turn relative to the
+     *       terminal. The screen's own execution panel carries the run-lifecycle notices instead, and
+     *       that panel is a target-side addition with no row on this map at all.
+     */
     message: { text: message, severity, mapset: REPORTS_MAPSET },
     pfKeys: { keys: bindings, onInvoke: invoke },
   });
@@ -2328,6 +2726,56 @@ export function ReportsScreen(): ReactElement {
     fontWeight: cssVar[TYPOGRAPHY_TOKENS.brightEmphasis],
   };
   const fixedPitchStyle: CSSProperties = { fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] };
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the two bound captions are given the mapset's own twelve-column cell
+   *       and told to KEEP their spaces, which is the whole of the fix for the two rows starting at
+   *       different x positions. See {@link BOUND_CAPTION_WIDTH} for the two mapset declarations and the
+   *       measured six-to-seven-pixel offset. `whiteSpace: 'pre'` is the load-bearing half: without it the
+   *       end caption's two leading spaces collapse and the cell holds a ten-character string in a
+   *       twelve-character box, left-aligned, which puts the colon back where it was.
+   * WHY : Assumptions: `flexShrink: 0` is set because the caption sits in a flex line with six inputs, two
+   *       slashes, a hint and a calendar control. A flex item's default is to shrink below its content
+   *       measure when the line is over-full, and a caption that shrank would take the row's whole
+   *       alignment with it at exactly the narrow widths the alignment is hardest to read at. The line
+   *       already wraps, so the caption keeping its measure costs a wrap and not an overflow.
+   * WHY : Trade-offs: this is the caption CELL and not the caption text, so at a narrow width the row
+   *       wraps beneath a twelve-column caption rather than the caption truncating. Truncating was the
+   *       alternative and it loses the operator's only identification of which bound they are keying;
+   *       wrapping costs vertical space, which the screen has.
+   */
+  const boundCaptionStyle: CSSProperties = {
+    ...captionStyle,
+    inlineSize: `${String(BOUND_CAPTION_WIDTH)}ch`,
+    flexShrink: 0,
+    whiteSpace: 'pre',
+  };
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the six date parts and the confirmation field are sized from the
+   *       character widths their own symbolic map declares, through the shared helper. A review measured
+   *       all seven rendering 201 pixels wide at every viewport -- `.ant-input` is `width: 100%` and
+   *       nothing bounded it -- so a two-character month and a one-character confirmation were each as
+   *       wide as a fifty-character address line. Two consequences were scored separately: the row needed
+   *       about 1009 pixels and fragmented to four lines at 375 with both slashes orphaned at line ends,
+   *       and the widget hierarchy INVERTED, each single date part at 201 pixels standing beside a
+   *       calendar control capturing a whole date at 171.
+   * WHY : ⚠️ Assumptions: the styles are spread onto the antd control itself and not onto the `Form.Item`
+   *       wrapping it, which is a measured constraint rather than a preference. The helper's maximum adds
+   *       the design system's own `controlPaddingHorizontal`, and that custom property resolves in the
+   *       control's class scope -- measured, `getPropertyValue('--ant-control-padding-horizontal')` is
+   *       empty on `document.documentElement` and `12px` on an `.ant-input`. Spread onto a wrapper the
+   *       `calc()` would be invalid at computed-value time and the maximum would be dropped.
+   * WHY : Trade-offs: the helper returns a CEILING and keeps `inlineSize: '100%'` beneath it, so a part
+   *       still shrinks rather than forcing the page to scroll sideways at a phone width. That is design
+   *       gap G1's trade applied to size, which `ui/src/layout/recordLayout.ts` records.
+   */
+  const datePartStyles: Readonly<Record<DatePart, CSSProperties>> = {
+    month: { ...fixedPitchStyle, ...copybookFieldWidthStyle(DATE_PART_WIDTHS.month, cssVar) },
+    day: { ...fixedPitchStyle, ...copybookFieldWidthStyle(DATE_PART_WIDTHS.day, cssVar) },
+    year: { ...fixedPitchStyle, ...copybookFieldWidthStyle(DATE_PART_WIDTHS.year, cssVar) },
+  };
+  const confirmFieldStyle = copybookFieldWidthStyle(CONFIRM_WIDTH, cssVar);
 
   /*
    * WHY : Assumptions: both are DERIVED from the last status read rather than stored beside it, so
@@ -2402,7 +2850,7 @@ export function ReportsScreen(): ReactElement {
           onChange={datePartHandler(bound, part)}
           disabled={busy}
           inputMode="numeric"
-          style={fixedPitchStyle}
+          style={datePartStyles[part]}
           {...fieldAriaProps(controlId, {
             invalid: refusal !== undefined,
             hasError: refusal !== undefined,
@@ -2440,7 +2888,7 @@ export function ReportsScreen(): ReactElement {
 
     return (
       <Flex key={bound} align="flex-start" gap="small" wrap>
-        <Typography.Text style={captionStyle}>{caption}</Typography.Text>
+        <Typography.Text style={boundCaptionStyle}>{caption}</Typography.Text>
         {renderDatePart(bound, 'month')}
         <Typography.Text aria-hidden="true" style={hintStyle}>
           {DATE_PART_SEPARATOR}
@@ -2559,12 +3007,41 @@ export function ReportsScreen(): ReactElement {
     <Flex vertical gap="large">
       <ScreenTitle style={titleStyle}>{REPORTS_TITLE}</ScreenTitle>
       {/*
+       * WHY : Purpose: this states IN WORDS that a turn is running, which nothing else on the screen does.
+       *       The spinner below is a visual affordance with no text, and the controls it covers report only
+       *       their disabled state; `REQUEST_IN_PROGRESS` reads "Working on your request. Wait for the
+       *       screen to answer." and tells the operator what to do about it.
+       * WHY : Assumptions: the region is mounted on EVERY turn and holds the empty string when idle, which
+       *       is `busyAnnouncement`'s own contract and is load-bearing rather than tidy. A `role="status"`
+       *       element inserted at the moment it acquires text is frequently not announced at all, because
+       *       the assistive reader has no live region to observe until the text is already there; one
+       *       present from the first render and changed in place is announced. It is visually hidden, so an
+       *       always-mounted region costs nothing an operator can see.
+       * WHY : Alternatives Considered: publishing the sentence onto the row-23 message line. Rejected
+       *       because that line is a parity surface under rule T8 -- every sentence on it is transcribed
+       *       from `app/cbl/CORPT00C.cbl` -- and on the submitting turn it holds the reference's own
+       *       'Please confirm to print the ... report...'. Overwriting a transcribed sentence with an
+       *       authored one would lose the prompt the operator is answering.
+       */}
+      {busyAnnouncement(busy ? REQUEST_IN_PROGRESS : undefined)}
+      {/*
        * Assumptions: the busy affordance wraps the form rather than replacing it, so the fields an operator
        * just filled stay visible while the run is being started. The reference has no such state at all --
        * a 3270 keyboard simply locks -- so a spinner over the unchanged form is the closest available
        * analogue, and it is paired with a disabled submit so a second turn cannot begin.
+       *
+       * WHY : ⚠️ Refactoring Rationale: `WRAPPED_BUSY_REGION_PROPS` is spread onto the spinner, and the
+       *       pairing with the announcement above is one decision rather than two. antd's `Spin` makes the
+       *       element it wraps a live region of its own at the pinned version, so with the authored
+       *       sentence added and nothing done here the whole form would announce alongside it -- every
+       *       label, every keyed value and every hint, read out because a submission started. Suppressing
+       *       the wrapper's own live behaviour leaves exactly one region announcing exactly one sentence.
+       * WHY : Assumptions: suppressing it loses nothing, because what the wrapper would have announced is
+       *       the form's static text and not a statement about the turn. The turn is announced by the
+       *       region above, in words the operator can act on, and the controls keep their own disabled and
+       *       loading states for the sighted operator.
        */}
-      <Spin spinning={busy}>
+      <Spin spinning={busy} {...WRAPPED_BUSY_REGION_PROPS}>
         <Form layout="vertical">
           {/*
            * Assumptions: the three selectors are ONE `Radio.Group` and not three independent controls.
@@ -2623,17 +3100,37 @@ export function ReportsScreen(): ReactElement {
           </Form.Item>
 
           {/*
-           * Assumptions: the two bounds are rendered only for the custom type, because the reference reads
-           * them only in the custom arm and derives them itself for the other two. The block is mounted and
-           * unmounted rather than disabled, so the tab order of the confirmation and the actions below is
-           * unaffected by its presence -- an operator choosing monthly tabs from the selector straight to
-           * the confirmation, exactly as they would on a terminal where the date fields sat unused.
+           * WHY : ⚠️ Refactoring Rationale: the two bounds are now rendered for EVERY report type, and the
+           *       conditional mount they replace is what a review measured as the in-content submit control
+           *       moving about 180 pixels vertically each time `Custom (Date Range)` was selected or
+           *       cleared. The map is the authority and it settles the question outright: `app/bms/
+           *       CORPT00.bms` declares all six parts unconditionally on rows 13 and 14 -- `SDTMM` L127,
+           *       `SDTDD` L138, `SDTYYYY` L149, `EDTMM` L167, `EDTDD` L178, `EDTYYYY` L189 -- so the
+           *       terminal painted them for a monthly report exactly as for a custom one, and the
+           *       confirmation stayed on row 19 whichever type was marked. Unmounting them was a target-side
+           *       addition, and the shift was its cost.
+           * WHY : ⚠️ Assumptions: they stay ENTERABLE rather than becoming disabled, which is the same
+           *       authority carried one step further. All six are `ATTRB=(FSET,NORM,NUM,UNPROT)` on every
+           *       painting of the map, and `app/cbl/CORPT00C.cbl` reads them only inside the custom arm --
+           *       the monthly arm at L214-L237 and the yearly arm at L239-L254 derive their own bounds and
+           *       never reference `SDTMMI` or `EDTMMI` at all. So a range keyed against a preset was
+           *       ignored there and is ignored here.
+           * WHY : ⚠️ Alternatives Considered: disabling them for a preset. It reads better -- it says the
+           *       fields do not apply -- but a disabled control has to say WHY, which this delivery already
+           *       treats as a defect when it is missing, and the sentence explaining it does not exist in
+           *       `ui/src/messages/messages.ts`. Authoring one is a catalogue change outside this screen, so
+           *       taking that path here would have shipped six unexplained dead controls to remove one
+           *       layout shift. Reserving the block's height while leaving it unmounted was also considered
+           *       and rejected: it holds about 180 pixels of empty space open for two of the three report
+           *       types, which trades a shift for a permanent void.
+           * WHY : Trade-offs: `resolveRange` is what makes the enterable-but-ignored state safe rather than
+           *       merely faithful -- it returns the empty range for `monthly` and `yearly` without reading
+           *       the six fields, so a stale keyed range cannot reach the transport under a preset, and the
+           *       custom edits still run in full when custom is the marked type.
            */}
-          {reportType === 'custom' ? (
-            <Flex vertical gap="small">
-              {DATE_BOUNDS.map(renderDateBound)}
-            </Flex>
-          ) : null}
+          <Flex vertical gap="small">
+            {DATE_BOUNDS.map(renderDateBound)}
+          </Flex>
 
           {/*
            * Assumptions: the caption keeps its trailing space and the domain hint stays a separate element,
@@ -2662,7 +3159,7 @@ export function ReportsScreen(): ReactElement {
                 maxLength={CONFIRM_WIDTH}
                 onChange={recordConfirmAnswer}
                 disabled={busy}
-                style={fixedPitchStyle}
+                style={{ ...fixedPitchStyle, ...confirmFieldStyle }}
                 {...fieldAriaProps(`${idPrefix}confirm`, {
                   invalid: refusalFor('confirm') !== undefined,
                   hasError: refusalFor('confirm') !== undefined,
@@ -2686,15 +3183,74 @@ export function ReportsScreen(): ReactElement {
            * beside it because a dialogue can express only consent and refusal, while the reference
            * distinguishes four answers -- and the two it cannot express, a blank answer and an unrecognised
            * character, are reachable only by keying the field and pressing Enter.
+           * Refactoring Rationale: ⚠️ both controls now dispatch the SAME turn. This one ran the dialogue's
+           * accept path directly and the legend's ran the keyed field, so two controls of one label and one
+           * emphasis performed two operations; `submitFromPointer` and `submitTurn` both call `runTurn`
+           * with the field's own value, and the dialogue has become a consequence of that turn.
            */}
           <Flex gap="small" wrap>
+            {/*
+             * Assumptions: `open` is CONTROLLED and the trigger is therefore inert on its own -- the turn
+             * decides whether there is a question to ask, which is what stops a consent dialogue standing
+             * over a form whose required dates are still blank.
+             * Assumptions: `placement` is below the control and not the library's default of above it.
+             * The control sits beneath the whole form, so the default opened the balloon UPWARD across the
+             * `End Date :` caption and its first two inputs -- the row the operator had just keyed and
+             * would need to re-read to answer the question. Opening downward puts it in the space beneath
+             * the form, which no field occupies.
+             * Assumptions: ⚠️ `destroyOnHidden` is set because the library otherwise keeps a dismissed
+             * balloon MOUNTED and merely hides it with a class. Measured: after a dismissal its accept
+             * control was still queryable in the document. A hidden control that assistive software can
+             * still reach is the pattern this delivery already treats as a defect elsewhere, and here it
+             * would be an accept control for a submission the operator has just withdrawn from.
+             */}
             <Popconfirm
               title={REPORTS_CAPTIONS.confirmation.trim()}
               description={REPORTS_CAPTIONS.confirmDomainHint}
+              /*
+               * WHY : ⚠️ Refactoring Rationale: the accepting control is labelled with the reference's own
+               *       consenting CHARACTER rather than the design system's stock `OK`. This screen asks
+               *       its question in the mapset's language -- the balloon's title is the 59-character
+               *       prompt at `app/bms/CORPT00.bms` L200-L205 and its description is that map's own
+               *       `'(Y/N)'` hint at L213-L217 -- so a control captioned `OK` answered a `(Y/N)`
+               *       question with a word that is in neither the map nor the program. The affirmative
+               *       arm is `WHEN CONFIRMI OF CORPT0AI = 'Y' OR 'y'` at `app/cbl/CORPT00C.cbl` L478, and
+               *       {@link confirmAndSubmit} writes exactly that character into the one-position field
+               *       before submitting -- so the caption now names the value the control supplies.
+               * WHY : Assumptions: the caption reads {@link CONSENTING_ANSWER}, the screen's OWN
+               *       consenting character, rather than the shared `CONFIRMATION_ANSWERS.CONFIRM` that
+               *       `ui/src/screens/transactionAdd/index.tsx` L3455 labels its consent surface from.
+               *       Both hold `'Y'` and that sibling establishes the vocabulary as the application's
+               *       rather than this screen's invention; reading the local constant is what makes the
+               *       caption and the character this balloon actually writes impossible to separate,
+               *       since {@link confirmAndSubmit} writes that same constant.
+               * WHY : ⚠️ Assumptions: the DISMISSING control keeps its stock caption and is deliberately
+               *       NOT labelled `N`. Keying `N` is an ANSWER: `app/cbl/CORPT00C.cbl` L480-L483
+               *       performs `INITIALIZE-ALL-FIELDS`, which clears all ten inputs. Dismissing this
+               *       balloon withdraws the QUESTION and leaves every keyed value in place -- the
+               *       behaviour {@link dismissConfirmation} implements and a browser pass measured -- so a
+               *       caption of `N` would promise the reference's clearing action and not perform it.
+               *       Escape resolves to the same withdrawal and cannot be an answer at all, which is the
+               *       second reason the two must not share a label. The declining answer stays reachable
+               *       where the reference put it: the one-position field above, whose hint publishes it.
+               * WHY : Alternatives Considered: labelling the accept control `Continue`, the verb the
+               *       row-24 legend uses at `app/bms/CORPT00.bms` L222-L226 (`ENTER=Continue`) and the
+               *       word the affirmative arm's `CONTINUE` statement carries. Rejected because that
+               *       legend caption names the KEY's action on the screen as a whole, and this control
+               *       does something narrower and more specific -- it supplies one character to one field
+               *       -- so naming it after the value keeps the balloon and the field describing the same
+               *       act.
+               */
+              okText={CONSENTING_ANSWER}
+              open={confirmationAsked}
+              onOpenChange={followConfirmationDismissal}
               onConfirm={confirmAndSubmit}
+              onCancel={dismissConfirmation}
+              placement="bottom"
+              destroyOnHidden
               disabled={busy}
             >
-              <Button type="primary" disabled={busy}>
+              <Button type="primary" onClick={submitFromPointer} disabled={busy}>
                 {REPORTS_KEY_LABELS.ENTER}
               </Button>
             </Popconfirm>
@@ -2714,10 +3270,14 @@ export function ReportsScreen(): ReactElement {
        * Assumptions: the document itself is still not rendered. It is 133 columns of fixed-width text
        * whose amount bands carry COBOL edit masks that a golden-master comparison reads byte for byte,
        * so it is handed to the browser as bytes and never decoded here.
-       * Assumptions: the region is scoped to the turn that started the run -- a refusal clears the
-       * submission and with it this region, which is the refusal contract {@link reportRefusal}
-       * documents. The run carries on producing its document regardless, and
-       * `docs/runbooks/batch-operations.md` is where an operator without a handle goes.
+       * Refactoring Rationale: ⚠️ the region is scoped to the RUN and no longer to the turn that started
+       * it. It previously unmounted on any refusal, because both {@link reportRefusal} and
+       * {@link initialiseAllFields} cleared the submission -- so a mistyped date on the next request
+       * abandoned a run that was still executing, and the execution name it abandoned is the only key the
+       * status endpoint accepts. Neither clears it now, and the region therefore survives a refusal, a
+       * declined confirmation and a PF4 clear, ending only when a new submission replaces it.
+       * Assumptions: `docs/runbooks/batch-operations.md` remains the route for an operator who has lost a
+       * handle some other way, such as leaving the screen; it is no longer reachable by mistyping a field.
        * Assumptions: every sentence and label here is AUTHORED and comes from
        * `REPORT_RUN_MESSAGES`, because the baseline has no run state to transcribe. None of it is
        * painted on row 23: that line carries this program's own nineteen sentences, and the screen

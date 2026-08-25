@@ -86,6 +86,7 @@
  * the function it documents.
  */
 
+import { theme } from 'antd';
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import type { UserEvent } from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
@@ -97,6 +98,8 @@ import type { CardDetail, CardUpdateRequest } from '../api/cards';
 import { ApiRequestError, isConflictFailure } from '../api/client';
 import type { FieldError } from '../api/types';
 import * as authModule from '../hooks/useAuth';
+import { APP_SHELL_TEST_ID, SHELL_PINNED_ZONE_TEST_ID } from '../layout/AppShell';
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, PRIMARY_ACTION_AIDS } from '../layout/PfKeyBar';
 import type { CicsAid } from '../layout/usePfKeys';
@@ -106,21 +109,25 @@ import {
   MESSAGE_BAND,
   MESSAGE_BAND_BY_MAPSET,
   PROGRAM_SOURCE_FILES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   SHARED_MESSAGE_SOURCES,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
 } from '../messages/messages';
 import type { StatusMessage } from '../messages/messages';
-import { ROUTE_TABLE } from '../router';
+import { KEYLESS_ENTRY_ROUTES, ROUTE_TABLE } from '../router';
 import {
   CARD_UPDATE_FIELD_LABELS,
   CARD_UPDATE_FIELD_WIDTHS,
   CARD_UPDATE_MAPSET,
+  CARD_UPDATE_PART_NAMES,
   CARD_UPDATE_PROGRAM_NAME,
+  CARD_UPDATE_TITLE,
   CARD_UPDATE_TRANSACTION_ID,
   CardUpdateScreen,
 } from '../screens/cardUpdate';
-import { FIELD_ERROR_TOKENS } from '../theme/tokens';
+import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 import {
   apiError,
   conflictProblem,
@@ -698,13 +705,23 @@ const STORED_EXPIRY_DAY = CARD.expirationDate.slice(8);
 const AMENDED_NAME = 'JANE Q CITIZEN';
 
 /*
- * WHY : Assumptions: the expiry month's accessible name is COMPOSED exactly as the screen
- *       composes it -- the painted `Expiry Date` label followed by the separator the mapset
- *       paints between the two parts at `app/bms/COCRDUP.bms` L132-L134. The two expiry
- *       controls would otherwise be indistinguishable by name, and a query for either would
- *       resolve to whichever came first.
+ * WHY : ⚠️ Assumptions: each expiry control is addressed by the name the SCREEN gives it, composed the
+ *       way the screen composes it -- the painted `Expiry Date       : ` label at
+ *       `app/bms/COCRDUP.bms` L122-L126 followed by that part's additive qualifier from
+ *       `CARD_UPDATE_PART_NAMES`. Composing them here from the same two exported constants is what
+ *       stops this file from asserting a name of its own: if the screen renames a part, these follow.
+ * WHY : ⚠️ Refactoring Rationale: the month was previously addressed as the label followed by the
+ *       SEPARATOR, which is how the screen composed it then, and the year as the bare label. That
+ *       arrangement is the measured defect these two constants exist to keep fixed: two consecutive
+ *       required controls whose accessible names differed only by a trailing `" /"`, so a screen reader
+ *       announced the same field twice and nothing said which one took the month. A query for the bare
+ *       label also resolved to whichever control came first, which is exactly how a test can type a
+ *       year into a month field and still pass.
  */
-const EXPIRY_MONTH_LABEL = `${CARD_UPDATE_FIELD_LABELS.expiryDate}${CARD_UPDATE_FIELD_LABELS.expirySeparator}`;
+const EXPIRY_MONTH_LABEL = `${CARD_UPDATE_FIELD_LABELS.expiryDate}${CARD_UPDATE_PART_NAMES.month}`;
+
+/** The year control's accessible name, composed from the same two exported constants. */
+const EXPIRY_YEAR_LABEL = `${CARD_UPDATE_FIELD_LABELS.expiryDate}${CARD_UPDATE_PART_NAMES.year}`;
 
 /*
  * WHY : Assumptions: the legend descriptors are SPLIT out of the mapset's own painted
@@ -962,29 +979,25 @@ function legendControl(label: string): HTMLButtonElement {
 }
 
 /**
- * Reports whether one overlay node is actually displayed.
+ * Reports whether one confirmation node is actually displayed.
  *
- * ⚠️ Assumptions: the design system animates an overlay OUT rather than unmounting it, so a
- * closed confirmation stays in the document carrying a hidden or leaving class with all of its
- * content still readable -- and jsdom never fires the transition end that would remove it. A
- * bare presence query therefore reports a confirmation the operator can no longer see, and an
- * absence assertion fails against correct code. It was measured doing exactly that here.
+ * ⚠️ Assumptions: the design system animates a surface OUT rather than unmounting it, so a closed
+ * confirmation can stay in the document carrying a leaving class with all of its content still
+ * readable -- and jsdom never fires the transition end that would remove it. A bare presence query
+ * therefore reports a confirmation the operator can no longer see, and an absence assertion fails
+ * against correct code. It was measured doing exactly that here.
  *
- * Assumptions: the ancestors are walked as well as the node itself, because whether the hidden
- * class lands on the overlay or on the wrapper around it is the library's internal structure
- * and not a contract this file should depend on. `ui/src/screens/transactionAdd` resolves the
- * same problem the same way on the node alone.
- * @param {Element} node - The candidate overlay node.
+ * Assumptions: the ancestors are walked as well as the node itself, because whether the leaving class
+ * lands on the surface or on the wrapper around it is the library's internal structure and not a
+ * contract this file should depend on.
+ * @param {Element} node - The candidate confirmation node.
  * @returns {boolean} `true` when neither it nor any ancestor is hidden or animating out.
  */
 function isDisplayed(node: Element): boolean {
   let current: Element | null = node;
   while (current !== null) {
     const name = current.className;
-    if (
-      typeof name === 'string' &&
-      (name.includes('ant-popover-hidden') || name.includes('-leave'))
-    ) {
+    if (typeof name === 'string' && (name.includes('-hidden') || name.includes('-leave'))) {
       return false;
     }
     current = current.parentElement;
@@ -994,18 +1007,26 @@ function isDisplayed(node: Element): boolean {
 
 /**
  * Collects the confirmation surfaces an operator can currently see.
+ *
+ * ⚠️ Assumptions: the surface is located by the `dialog` ROLE and by its accessible NAME, and both
+ * halves are load-bearing. This confirmation used to be a `Popconfirm`, whose overlay is hardcoded
+ * `role="tooltip"` at `ui/node_modules/@rc-component/tooltip/es/Popup.js` with no prop path to
+ * override it -- announced to a screen reader as supplementary text about a button rather than as a
+ * question that must be answered, and carrying neither `aria-modal` nor a focus trap. Querying the
+ * role is what stops that regressing: a surface that went back to a tooltip would fail every case
+ * in this group rather than silently losing its semantics. The name comes from the catalogued
+ * sentence through the dialog's `aria-labelledby`, so the query holds the surface to asking the
+ * program's own question as well.
  * @returns {readonly HTMLElement[]} The displayed surfaces, empty when none is open.
  */
 function displayedConfirmations(): readonly HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>('.ant-popconfirm')).filter(isDisplayed);
+  return screen
+    .queryAllByRole('dialog', { name: catalogued('PROMPT_FOR_CONFIRMATION').text })
+    .filter(isDisplayed);
 }
 
 /**
  * Waits for the confirmation the save key opens and returns its container.
- *
- * Assumptions: the overlay is located by the design system's own class rather than by a test
- * identifier, because the screen adds none and the class is the library's published
- * structure. The sibling account-update cases resolve the same overlay the same way.
  * @returns {Promise<HTMLElement>} The open confirmation's container.
  * @throws {Error} If no confirmation opens within the runner's allowance, which `waitFor`
  *   raises carrying the message below.
@@ -1070,6 +1091,33 @@ function confirmationActions(confirmation: HTMLElement): {
 }
 
 /**
+ * Waits until the row-22 line carries the confirmation prompt.
+ *
+ * ⚠️ Assumptions: this waits on the BAND rather than on a document-wide text query, and the scoping is
+ * load-bearing. The confirmation dialog is titled with the same catalogued sentence, deliberately -- the
+ * reference asks that question and this application authors no second wording for it -- so once the
+ * dialog has been opened the sentence names two elements at once, and the design system keeps a closed
+ * dialog mounted behind a hidden wrapper because jsdom never fires the transition end that would remove
+ * it. A global query therefore fails with `Found multiple elements` against entirely correct code, which
+ * it was measured doing here. The band is the one place the prompt has to appear for the operator to
+ * read it, so that is what is awaited.
+ * @returns {Promise<void>} Resolves once the prompt is on the row-22 line.
+ */
+async function waitForTheConfirmationPrompt(): Promise<void> {
+  await waitFor(
+    /**
+     * Asserts the row-22 line carries the prompt.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(collapse(informationLineText())).toContain(
+        collapse(catalogued('PROMPT_FOR_CONFIRMATION').text),
+      );
+    },
+  );
+}
+
+/**
  * Amends the name on the card and submits the turn, which validates without writing.
  *
  * ⚠️ Assumptions: the entry is driven with real keystrokes rather than with one synthetic
@@ -1091,7 +1139,7 @@ async function amendAndValidate(user: UserEvent): Promise<void> {
   await user.clear(name);
   await user.type(name, AMENDED_NAME);
   await pressPfKey(user, 'ENTER');
-  await screen.findByText(catalogued('PROMPT_FOR_CONFIRMATION').text);
+  await waitForTheConfirmationPrompt();
 }
 
 /**
@@ -1248,7 +1296,7 @@ async function honoursEveryDeclaredFieldWidth(): Promise<void> {
     [CARD_UPDATE_FIELD_LABELS.nameOnCard, 'CRDNAMEI'],
     [CARD_UPDATE_FIELD_LABELS.cardActive, 'CRDSTCDI'],
     [EXPIRY_MONTH_LABEL, 'EXPMONI'],
-    [CARD_UPDATE_FIELD_LABELS.expiryDate, 'EXPYEARI'],
+    [EXPIRY_YEAR_LABEL, 'EXPYEARI'],
   ];
   for (const [label, declaration] of pairs) {
     expectMaxLength(control(label), declaredField(MAP_FIELDS, declaration).width);
@@ -1369,7 +1417,7 @@ async function declaresThreeExpiryPartsAndEditsTwo(): Promise<void> {
   //       controls, so a disagreement fails here instead of shipping a form seeded from the
   //       wrong part of the date.
   expect(control(EXPIRY_MONTH_LABEL)).toHaveValue(CARD.expirationDate.slice(5, 7));
-  expect(control(CARD_UPDATE_FIELD_LABELS.expiryDate)).toHaveValue(CARD.expirationDate.slice(0, 4));
+  expect(control(EXPIRY_YEAR_LABEL)).toHaveValue(CARD.expirationDate.slice(0, 4));
   expect(screen.queryAllByDisplayValue(STORED_EXPIRY_DAY)).toEqual([]);
   expect(screen.getByRole('main').textContent ?? '').not.toContain(STORED_EXPIRY_DAY);
 }
@@ -1527,6 +1575,79 @@ async function commitsOnlyOnTheSaveKey(): Promise<void> {
 }
 
 /**
+ * The success sentence is stated over the record that was committed, not the one that was typed.
+ *
+ * Purpose
+ * -------
+ * The contract these nine mutating screens share forbids announcing a success while a contradicting
+ * value is displayed: an operator told the write succeeded, looking at the value they typed rather
+ * than the value that was stored, has been told two things and cannot tell which is true.
+ *
+ * ⚠️ Assumptions: the fixture makes the committed record DIFFER from the entry, which is the whole
+ * point of the case -- the service is entitled to canonicalise what it stores, and the reference does
+ * exactly that on this record (`app/cpy/CVACT02Y.cpy` declares the embossed name as a fixed
+ * fifty-character field, so what is stored is the padded, canonical form of what was sent). With an
+ * identical fixture the assertion would pass against a screen that never adopted the response at all,
+ * because the operator's own typing already reads correctly.
+ *
+ * Assumptions: the version is asserted through the NEXT request rather than by inspecting state, since
+ * it is the one part of the adopted record no operator can see. A screen that adopted the name and
+ * kept the stale version would look right and would have its operator's next save refused as a
+ * conflict -- which is the shape of the defect this group's HIGH finding describes.
+ *
+ * Assumptions: the reference resolves this the same way, so the behaviour is transcribed and not
+ * invented: `app/cbl/COCRDUPC.cbl` L1498 to L1520 refreshes the record it holds on the committing turn,
+ * so the map it re-sends carries what was written.
+ * @returns {Promise<void>} Resolves once the committed record has been shown to be displayed.
+ */
+async function statesItsSuccessOverTheCommittedRecord(): Promise<void> {
+  /*
+   * WHY : Assumptions: the entry is typed in LOWER case and the stored form comes back embossed, which
+   *       is a canonicalisation this record genuinely has -- an embossed name is what is pressed into
+   *       the card -- and `EMBOSSED_NAME_PATTERN` admits both cases, so both forms are values the
+   *       screen accepts. It also makes the two strings differ, which the assertion below requires:
+   *       {@link AMENDED_NAME} is already upper case, so deriving the stored form from it would give
+   *       one string twice and the case would pass without the screen adopting anything.
+   */
+  const entered = 'jane q citizen';
+  const committed: CardDetail = {
+    ...CARD,
+    embossedName: entered.toUpperCase(),
+    version: CARD.version + 1,
+  };
+  vi.mocked(updateCard).mockResolvedValue(committed);
+  const user = await renderLoadedScreen();
+
+  const entry = control(CARD_UPDATE_FIELD_LABELS.nameOnCard);
+  await user.clear(entry);
+  await user.type(entry, entered);
+  await pressPfKey(user, 'ENTER');
+  await waitForTheConfirmationPrompt();
+  await pressPfKey(user, 'PFK05');
+  const first = await openConfirmation();
+  fireEvent.click(confirmationActions(first).accept);
+  await screen.findByText(catalogued('CONFIRM_UPDATE_SUCCESS').text);
+
+  expect(committed.embossedName).not.toBe(entered);
+  expect(control(CARD_UPDATE_FIELD_LABELS.nameOnCard)).toHaveValue(committed.embossedName);
+
+  /*
+   * WHY : ⚠️ Assumptions: the entry is asserted to have stopped accepting typing on this turn, which is
+   *       the other half of the same contract: an operator who can type over a value that has just
+   *       been reported as saved is being shown a record that no longer matches the sentence beside
+   *       it. The reference protects all six fields on the committed turn --
+   *       `3300-SETUP-SCREEN-ATTRS` moves `DFHBMPRF` into every one of them at
+   *       `app/cbl/COCRDUPC.cbl` L1191 to L1199 -- so this is transcribed and not added.
+   * WHY : Assumptions: the version half of the adoption is asserted by
+   *       {@link resubmitsAgainstTheVersionTheRefreshReturned} and deliberately not here. A second turn
+   *       cannot be driven on this mount at all: the fields are protected on the committed turn, which
+   *       is exactly what the assertion above establishes, so any case that typed again after a success
+   *       would be asserting against a screen the reference does not paint.
+   */
+  expect(control(CARD_UPDATE_FIELD_LABELS.nameOnCard)).toHaveAttribute('readonly');
+}
+
+/**
  * Declining the confirmation writes nothing.
  *
  * Assumptions: the confirmation replaces the terminal's re-key-to-confirm convention, so its
@@ -1591,6 +1712,151 @@ async function reportsARefusedWrite(): Promise<void> {
   expect(informationLineText()).toContain(catalogued('INFORM_FAILURE').text);
 }
 
+/** The status a service that is momentarily unavailable answers with. */
+const UNAVAILABLE_STATUS = 503;
+
+/**
+ * Builds a refusal from a service that was momentarily unavailable and sent no sentence.
+ *
+ * Assumptions: no message member, which is the arrangement that makes the screen's own selection
+ * observable -- with a sentence present the screen renders that verbatim and the selection never runs.
+ * @returns {ApiRequestError} The rejection the mocked write is to produce.
+ */
+function unavailableRefusal(): ApiRequestError {
+  return new ApiRequestError(
+    'PROBLEM',
+    UNAVAILABLE_STATUS,
+    apiError({ status: UNAVAILABLE_STATUS, message: null }),
+    `PROBLEM ${String(UNAVAILABLE_STATUS)}`,
+  );
+}
+
+/**
+ * A request that never reached the service is reported as an outage, not as a failed update.
+ *
+ * ⚠️ Assumptions: the assertion is a PAIR -- the outage sentence appears and the write-failed sentence
+ * does not -- because either half alone admits the screen this case was written against. It answered
+ * every bodiless refusal with `Update of record failed`, which is a claim about the record: the source
+ * program sets that sentence after a `REWRITE` came back refused (`app/cbl/COCRDUPC.cbl` L988-L1001),
+ * and it is untrue of a request the service never received. An operator told the update failed goes to
+ * check whether it partly applied; an operator told the service is unavailable retries.
+ *
+ * Assumptions: the fixture carries no message member, so what appears is the screen's own choice for a
+ * transient failure rather than text it echoed.
+ * @returns {Promise<void>} Resolves once the outage has been reported.
+ */
+async function reportsATransientRefusalAsAnOutage(): Promise<void> {
+  vi.mocked(updateCard).mockRejectedValue(unavailableRefusal());
+  const user = await renderLoadedScreen();
+
+  await amendAndCommit(user);
+
+  await screen.findByText(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(refusalBandText()).toContain(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(refusalBandText()).not.toContain(catalogued('LOCKED_BUT_UPDATE_FAILED').text);
+}
+
+/**
+ * The outstanding write is announced through a live region that is mounted and empty when idle.
+ *
+ * ⚠️ Assumptions: the region's presence and EMPTINESS on the idle turn are asserted before the write is
+ * started, and that ordering is the point. `ui/src/layout/fieldHelp.tsx` records that a live region has
+ * to be in the accessibility tree before its content changes for the change to be announced, so a
+ * region mounted with its sentence already in place is frequently read by nothing -- which loses the
+ * first transition, the one that matters. A case that only looked for the sentence would pass against
+ * exactly that arrangement.
+ *
+ * Assumptions: the sentence is the catalogue's authored `REQUEST_IN_PROGRESS` compared by identity, not
+ * a literal, so a reword in the catalogue moves this case with it rather than breaking it.
+ * @returns {Promise<void>} Resolves once both states have been observed.
+ */
+async function announcesTheOutstandingWrite(): Promise<void> {
+  const held = deferredCard();
+  vi.mocked(updateCard).mockReturnValue(held.promise);
+  const user = await renderLoadedScreen();
+
+  const region = screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+  expect(region).toHaveTextContent('');
+
+  await amendAndCommit(user);
+
+  await waitFor(
+    /**
+     * Waits until the outstanding write is announced.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+    },
+  );
+
+  await act(
+    /**
+     * Lets the held write settle inside the scope, so the screen's own update is flushed.
+     * @returns {Promise<void>} Resolves once the write has settled.
+     */
+    async (): Promise<void> => {
+      held.settle(AMENDED_CARD);
+      await held.promise;
+    },
+  );
+
+  await waitFor(
+    /**
+     * Waits until the announcement has been withdrawn.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
+    },
+  );
+}
+
+/**
+ * Builds a write whose settlement this case controls.
+ *
+ * Assumptions: a hand-rolled deferred rather than a timer, because the property under test is the state
+ * of the screen WHILE a request is outstanding, and a timer would make the window a duration to race
+ * against instead of a state to observe.
+ * @returns {{ promise: Promise<CardDetail>; settle: (card: CardDetail) => void }} The promise to hand
+ *   the mocked client, and the function that settles it.
+ */
+function deferredCard(): { promise: Promise<CardDetail>; settle: (card: CardDetail) => void } {
+  /*
+   * WHY : Assumptions: the captured resolver is held as possibly-undefined rather than seeded with a
+   *       throwing placeholder, because a placeholder is itself a function and every function in this
+   *       package carries a doc comment -- so seeding it would document a branch that the executor
+   *       below makes unreachable. The guard in the returned settler states the same condition once.
+   */
+  let resolveWrite: ((card: CardDetail) => void) | undefined;
+  const promise = new Promise<CardDetail>(
+    /**
+     * Captures the resolver so the case can settle the write when it chooses.
+     * @param {(card: CardDetail) => void} resolve - The promise's own resolver.
+     * @returns {void} Nothing; the resolver is captured as a side effect.
+     */
+    (resolve: (card: CardDetail) => void): void => {
+      resolveWrite = resolve;
+    },
+  );
+  return {
+    promise,
+    /**
+     * Settles the held write with one record.
+     * @param {CardDetail} card - The record the write answers with.
+     * @returns {void} Nothing; the settlement is the effect.
+     * @throws {Error} If called before the promise executor has run, which cannot happen for a native
+     *   promise but is stated rather than assumed.
+     */
+    settle: (card: CardDetail): void => {
+      if (resolveWrite === undefined) {
+        throw new Error('the deferred write was settled before it was armed');
+      }
+      resolveWrite(card);
+    },
+  };
+}
+
 /**
  * A record that moved under the operator is reported as a conflict, not as a plain failure.
  *
@@ -1624,6 +1890,219 @@ async function distinguishesTheConcurrencyConflict(): Promise<void> {
       expect(getCard).toHaveBeenCalledTimes(2);
     },
   );
+}
+
+/**
+ * Returns the optimistic-lock version carried by each write this case dispatched, in order.
+ *
+ * ⚠️ Assumptions: the VERSIONS are collected rather than the call count alone, because the two
+ * halves of the defect these cases exist for are only visible together. Two dispatches carrying
+ * two different versions would be a retry; two carrying the SAME version are a duplicate that a
+ * service honouring the version answers by accepting the first and refusing the second -- so the
+ * operator is shown a failure for a write that landed. Browser validation measured exactly that
+ * pair on this screen: two `PUT /api/v1/cards/{key}` requests, both with the same version member.
+ * @returns {readonly number[]} The versions submitted, one per dispatched write.
+ */
+function submittedVersions(): readonly number[] {
+  return vi.mocked(updateCard).mock.calls.map(
+    /**
+     * Reads the version out of one dispatched request.
+     * @param {readonly [string, CardUpdateRequest]} call - One recorded call's arguments.
+     * @returns {number} The version that call carried.
+     */
+    (call: readonly [string, CardUpdateRequest]): number => call[1].version,
+  );
+}
+
+/**
+ * Two activations of one open confirmation dispatch ONE write, carrying the read's version.
+ *
+ * ⚠️ Assumptions: both activations are raised with the DOM's own `click()` inside a single `act`
+ * scope, and neither half of that is a convenience. It is the reproduction the review recorded --
+ * "`el.click(); el.click();` in one synchronous JS task (the harshest case -- no React re-render
+ * possible between them)" -- and it is the only shape that discriminates: React batches within the
+ * scope, so a screen guarding its write with a `saving` STATE value sees `false` on both
+ * activations and dispatches twice, while a screen guarding it with a synchronously mutated ref
+ * sees `true` on the second and dispatches once. Testing Library's `fireEvent` wraps each call in
+ * its own `act` and therefore FLUSHES between the two, which makes the state guard look sufficient
+ * -- measured, and the reason this case is written against the raw element.
+ *
+ * Assumptions: the version is asserted as well as the count, so the case fails for either half
+ * independently -- a second dispatch, or a first one carrying a version the read did not return.
+ * The reference program's equivalent guarantee is its own before-image comparison immediately
+ * before the commit at `app/cbl/COCRDUPC.cbl` L470, so a conflict there is a real condition to
+ * name and not an artifact of the screen having asked twice.
+ * @returns {Promise<void>} Resolves once the write has settled.
+ */
+async function writesOnceWhenOneConfirmationIsActivatedTwice(): Promise<void> {
+  vi.mocked(updateCard).mockResolvedValue(AMENDED_CARD);
+  const user = await renderLoadedScreen();
+
+  await amendAndValidate(user);
+  await pressPfKey(user, 'PFK05');
+  const confirmation = await openConfirmation();
+  const { accept } = confirmationActions(confirmation);
+
+  act(
+    /**
+     * Activates the accepting action twice within one synchronous task.
+     * @returns {void} Nothing; both activations are raised as a side effect.
+     */
+    (): void => {
+      accept.click();
+      accept.click();
+    },
+  );
+
+  await screen.findByText(catalogued('CONFIRM_UPDATE_SUCCESS').text);
+  expect(submittedVersions()).toEqual([CARD.version]);
+}
+
+/**
+ * The write is gated by a synchronously readable latch and not by a render state value.
+ *
+ * ⚠️ Refactoring Rationale: this case reads the screen's own SOURCE, and it exists because the
+ * behavioural case above provably cannot discriminate here. Measured in this environment: with the
+ * pre-fix `if (saving)` guard restored, `accept.click(); accept.click();` inside one `act` scope
+ * still produced exactly ONE dispatch -- the probe reported the button still connected and the call
+ * count already at one after the first activation, because React flushes a discrete event's update
+ * before the second activation's handler runs, and Testing Library's `fireEvent` additionally
+ * wraps each call in its own scope. The review measured two dispatches in a real browser from the
+ * same gesture, so the property is real and this environment is simply unable to observe it. The
+ * predictor the review pinned it with IS observable, and with perfect correlation: it found that
+ * the presence of an in-flight ref divided the nine mutating screens into the three that dispatch
+ * once and the six that dispatch twice, this screen among the six.
+ *
+ * Assumptions: four facts are checked, not one, so the case cannot pass on a ref that is declared
+ * and never consulted, nor on one that is consulted and never released. Trade-offs: a source
+ * assertion is coarser than a behavioural one and would not notice a latch that was correct in
+ * shape but wrong in placement; it is accepted because the alternative is no coverage at all for a
+ * HIGH finding, and the three behavioural cases around it pin the outcomes the latch exists to
+ * produce. Reading a screen's own module is an established idiom in this package --
+ * `ui/src/test/transactionList.test.tsx` L286 does the same.
+ * @returns {void} Nothing; each assertion carries its own outcome.
+ */
+function gatesTheWriteOnASynchronousLatch(): void {
+  const source = readFileSync(
+    join(import.meta.dirname, '..', 'screens', 'cardUpdate', 'index.tsx'),
+    'utf8',
+  );
+
+  expect(source).toMatch(/const\s+writeInFlight\s*=\s*useRef\(false\)/u);
+  expect(source).toMatch(/if\s*\(writeInFlight\.current\)\s*\{/u);
+  expect(source).toMatch(/writeInFlight\.current\s*=\s*true/u);
+  expect(source).toMatch(/writeInFlight\.current\s*=\s*false/u);
+  /*
+   * WHY : ⚠️ Assumptions: the ABSENCE of the state guard is asserted as well as the presence of the
+   *       ref, because the two are not alternatives that can safely coexist on this arm. A screen
+   *       that kept `if (saving)` beside the ref would still dispatch twice on whichever arm read
+   *       the state, and the ref would make the source look fixed. `saving` remains in the module
+   *       for what a render reads it for, which is why the pattern names the guard form rather than
+   *       the identifier.
+   */
+  expect(source).not.toMatch(/if\s*\(saving\)\s*\{/u);
+}
+
+/**
+ * A resubmission after a conflict carries the version the REFRESH returned, not the stale one.
+ *
+ * ⚠️ Assumptions: the second read answers a DIFFERENT version, so the case can tell a screen that
+ * renews its retained record from one that merely re-reads and discards the answer. Resubmitting
+ * the version the first read returned would be refused for ever, which is the state an operator
+ * cannot escape from.
+ *
+ * ⚠️ Assumptions: the operator's edits are expected to SURVIVE the conflict, and the case depends
+ * on it -- it amends nothing the second time and still reaches the confirmation, which is only
+ * possible if the amended name is still in the control. That is the reference's own division:
+ * `9300-CHECK-CHANGE-IN-REC` moves the freshly read values into the `CCUP-OLD-*` before-image
+ * only (`app/cbl/COCRDUPC.cbl` L1512-L1518) and leaves `CCUP-NEW-*` -- the operator's typing --
+ * untouched. A screen that re-seeded the form would answer the second Enter with the no-change
+ * refusal instead, and this case would fail there.
+ * @returns {Promise<void>} Resolves once the second write has been dispatched.
+ */
+async function resubmitsAgainstTheVersionTheRefreshReturned(): Promise<void> {
+  /*
+   * WHY : Assumptions: the moved record differs ONLY in its version, so nothing but the version
+   *       can explain a difference between the two dispatched requests. A record that also moved
+   *       its name would change what the change-detection compares and blur the property.
+   */
+  const moved: CardDetail = { ...CARD, version: CARD.version + 5 };
+  vi.mocked(getCard).mockResolvedValueOnce(CARD).mockResolvedValue(moved);
+  vi.mocked(updateCard)
+    .mockRejectedValueOnce(conflictRefusal(null))
+    .mockResolvedValue({ ...moved, embossedName: AMENDED_NAME, version: moved.version + 1 });
+
+  const user = await renderScreen();
+  await screen.findByDisplayValue(CARD.embossedName);
+
+  await amendAndCommit(user);
+  await screen.findByText(catalogued('DATA_WAS_CHANGED_BEFORE_UPDATE').text);
+  await waitFor(
+    /**
+     * Waits for the refresh that renews the retained record.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(getCard).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  await pressPfKey(user, 'ENTER');
+  await waitForTheConfirmationPrompt();
+  await pressPfKey(user, 'PFK05');
+  const confirmation = await openConfirmation();
+  fireEvent.click(confirmationActions(confirmation).accept);
+
+  await waitFor(
+    /**
+     * Waits for the second write to have been dispatched.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(updateCard).toHaveBeenCalledTimes(2);
+    },
+  );
+  expect(submittedVersions()).toEqual([CARD.version, moved.version]);
+}
+
+/**
+ * A conflict whose refresh FAILS still names the conflict and keeps the screen painted.
+ *
+ * ⚠️ Assumptions: this is the sequence browser validation measured -- `PUT` answered 409, then the
+ * refreshing `GET` answered 409, and the screen displayed `Did not find cards for this search
+ * condition`. Both statements were wrong at once: the record existed, and the write the operator
+ * was being told about had a different problem entirely. A failed attempt to renew the
+ * before-image is not news about the write, so the sentence the write produced has to survive it.
+ *
+ * Assumptions: the painted form is asserted as well as the sentence, because the reader used to
+ * raise its busy state on this path -- which withdrew the row-23 zone and the key legend with it,
+ * so the sentence had nowhere to appear even before it was overwritten. The reference never blanks
+ * its map here: it re-sends `CCRDUPA` on the same turn (`app/cbl/COCRDUPC.cbl` L997-L998 into its
+ * own send paragraph).
+ * @returns {Promise<void>} Resolves once the refusal has been rendered over the live form.
+ */
+async function keepsTheConflictWhenTheRefreshFails(): Promise<void> {
+  vi.mocked(getCard).mockResolvedValueOnce(CARD).mockRejectedValue(plainRefusal(null));
+  vi.mocked(updateCard).mockRejectedValue(conflictRefusal(null));
+
+  const user = await renderScreen();
+  await screen.findByDisplayValue(CARD.embossedName);
+
+  await amendAndCommit(user);
+  await waitFor(
+    /**
+     * Waits for the refresh attempt that the conflict issues.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(getCard).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  await screen.findByText(catalogued('DATA_WAS_CHANGED_BEFORE_UPDATE').text);
+  expect(refusalBandText()).toContain(catalogued('DATA_WAS_CHANGED_BEFORE_UPDATE').text);
+  expect(refusalBandText()).not.toContain(catalogued('DID_NOT_FIND_ACCTCARD_COMBO').text);
+  expect(control(CARD_UPDATE_FIELD_LABELS.nameOnCard)).toHaveValue(AMENDED_NAME);
 }
 
 /**
@@ -1895,7 +2374,7 @@ async function boundsTheExpiryMonth(): Promise<void> {
  */
 async function boundsTheExpiryYear(): Promise<void> {
   const user = await renderLoadedScreen();
-  const year = control(CARD_UPDATE_FIELD_LABELS.expiryDate);
+  const year = control(EXPIRY_YEAR_LABEL);
   await user.clear(year);
   await user.type(year, REFUSED_YEAR);
   await pressPfKey(user, 'ENTER');
@@ -1927,11 +2406,11 @@ async function restrictsTheActiveStatusToItsTwoValues(): Promise<void> {
   await user.clear(status);
   await user.type(status, CARD.activeStatus === 'Y' ? 'N' : 'Y');
   await pressPfKey(user, 'ENTER');
-  await screen.findByText(catalogued('PROMPT_FOR_CONFIRMATION').text);
+  await waitForTheConfirmationPrompt();
 }
 
 /**
- * The abend surface contributes field widths and no text, and reports as an error result.
+ * The abend surface contributes field widths and no text, and refuses an unusable selector.
  *
  * ⚠️ Assumptions: the abend copybook is a source of WIDTHS rather than of sentences, and this
  * case proves it rather than asserting it: all four of its fields are declared `VALUE SPACES`,
@@ -1940,11 +2419,19 @@ async function restrictsTheActiveStatusToItsTwoValues(): Promise<void> {
  * Treating the copybook as a source of text would yield four empty strings and hide where the
  * real wording lives.
  *
- * Assumptions: the screen's own failure surface is asserted to be the design system's error
- * result, which AAP section 0.3.2 assigns to this role, and it is reached by giving the route a
- * card-number-shaped value the selector guard refuses -- which is also the assertion that the
- * guard refuses one.
- * @returns {Promise<void>} Resolves once the error surface has rendered.
+ * ⚠️ Refactoring Rationale: the render half no longer asserts `.ant-result-error`, and no longer
+ * expects the refusal sentence on arrival. It asserted both, and both were the defect: the source
+ * program answers a turn holding no usable key by SENDING ITS MAP -- `COCRDUPC` has no `SEND TEXT`
+ * anywhere and `3250-SETUP-INFOMSG` gives that turn its own row-22 prompt
+ * (`app/cbl/COCRDUPC.cbl` L1141-L1144) -- so an error page that erases the frame states less than
+ * the terminal did, and row 23 is reserved and QUIET until the operator submits something.
+ * {@link keepsTheFrameWhenTheSelectorIsRefused} carries what this turn now paints.
+ *
+ * Assumptions: the refusal is still reached by giving the route a card-number-shaped value the
+ * selector guard refuses, which is also the assertion that the guard refuses one, and the read is
+ * still asserted not to have been issued -- an unusable address is answered without asking the
+ * service about it.
+ * @returns {Promise<void>} Resolves once the refused turn has rendered.
  */
 async function carriesTheAbendSurfaceAsWidthsAndNotText(): Promise<void> {
   expect(ABEND_DATA_FIELDS).toHaveLength(pictureDeclarationCount(ABEND_COPYBOOK));
@@ -1958,8 +2445,135 @@ async function carriesTheAbendSurfaceAsWidthsAndNotText(): Promise<void> {
   expect(CARD_NUMBER_SHAPED_SELECTOR).toHaveLength(
     pictureWidthsAt(CARD_RECORD, [CARD_NUMBER_DECLARATION_LINE])[0] ?? 0,
   );
-  expectVerbatimMessage(catalogued('NO_SEARCH_CRITERIA_RECEIVED').text);
-  expect(document.querySelector('.ant-result-error')).not.toBeNull();
+  expect(document.querySelector('.ant-result')).toBeNull();
+  expect(refusalBandText()).toBe('');
+  expect(getCard).not.toHaveBeenCalled();
+}
+
+/**
+ * A refused selector keeps the map frame, and Enter on that turn states the source's own sentence.
+ *
+ * Purpose: this is the case for the finding that `/cards/:key/edit` answered an unusable address by
+ * replacing the frame with a centred error page while its sibling detail screen kept the frame for
+ * the same condition. The reference settles it: every arm of `3400-SEND-SCREEN` issues
+ * `EXEC CICS SEND MAP` with `CCRDUPA` (`app/cbl/COCRDUPC.cbl` L1323-L1336) and the program contains
+ * no `SEND TEXT` at all, so all five bands the mapset declares are painted on this turn too --
+ * identity on rows 1 and 2, the row-22 prompt `3250-SETUP-INFOMSG` selects for
+ * `CCUP-DETAILS-NOT-FETCHED` (L1141-L1144), row 23 reserved and quiet, and the row-24 legend that
+ * `app/bms/COCRDUP.bms` L158-L162 declares `ATTRB=(ASKIP,NORM)` and no paragraph darkens.
+ *
+ * Assumptions: Enter is asserted to state `No input received` rather than to do nothing, because
+ * the legend OFFERS it on this turn and `1200-EDIT-MAP-INPUTS` answers it -- it validates the two
+ * search keys while `CCUP-DETAILS-NOT-FETCHED` and, finding both blank, sets
+ * `NO-SEARCH-CRITERIA-RECEIVED` (L645-L659), whose literal is declared at L185-L186. A key painted
+ * on the legend that silently does nothing is the failure this half guards against.
+ * @returns {Promise<void>} Resolves once the refused turn has answered an Enter.
+ */
+async function keepsTheFrameWhenTheSelectorIsRefused(): Promise<void> {
+  const user = await renderScreen(CARD_NUMBER_SHAPED_SELECTOR);
+
+  expect(document.querySelector('.ant-result')).toBeNull();
+  expect(screen.getByRole('heading', { name: CARD_UPDATE_TITLE })).toBeInTheDocument();
+  expectVerbatimMessage(CARD_UPDATE_TRANSACTION_ID);
+  expectVerbatimMessage(CARD_UPDATE_PROGRAM_NAME);
+  expect(informationLineText()).toContain(catalogued('PROMPT_FOR_SEARCH_KEYS').text);
+  expect(refusalBandText()).toBe('');
+  expect(legendRegion()).toBeInTheDocument();
+  /*
+   * Assumptions: BOTH descriptors of the unconditional legend field are expected, not just the exit
+   * key, because `app/bms/COCRDUP.bms` L158-L162 declares `FKEYS` `ATTRB=(ASKIP,NORM)` with
+   * `INITIAL='ENTER=Process F3=Exit'` and the only field `3300-SETUP-SCREEN-ATTRS` ever un-darkens is
+   * `FKEYSC` (`app/cbl/COCRDUPC.cbl` L1315-L1317). So this turn paints two keys and no more, and the
+   * conditional pair stays dark.
+   */
+  expect(legendLabels()).toEqual([...PRIMARY_LEGEND]);
+
+  await pressPfKey(user, 'ENTER');
+
+  await screen.findByText(catalogued('NO_SEARCH_CRITERIA_RECEIVED').text);
+  expect(refusalBandText()).toContain(catalogued('NO_SEARCH_CRITERIA_RECEIVED').text);
+  expect(getCard).not.toHaveBeenCalled();
+}
+
+/**
+ * The static address this screen is also reachable at, which carries NO route parameter.
+ *
+ * Assumptions: taken from the router's own alias table rather than written as a literal, so this file
+ * tracks the address the application publishes instead of a copy of it. `ui/src/router.tsx` records
+ * why the alias is STATIC: a sentinel parameter would make a screen that guards on a DEFINED parameter
+ * tell an operator their link was broken.
+ * @throws {RangeError} If the alias table holds no entry for this program, so a withdrawn alias fails
+ *   here rather than in a route that cannot match.
+ */
+const KEYLESS_ENTRY_ADDRESS = keylessEntryAddressFor(CARD_UPDATE_PROGRAM_NAME);
+
+/**
+ * Returns the static alias the router publishes for one reference program.
+ *
+ * Assumptions: a named declaration rather than an immediately-invoked arrow, for the reason this file's
+ * header records -- `jsdoc/require-jsdoc` requires a block on an arrow in every position, and Prettier
+ * detaches a block written before one from the function it documents.
+ * @param {string} program - Name of the reference program, as the alias table records it.
+ * @returns {string} That program's parameter-free address.
+ * @throws {RangeError} If the alias table holds no entry for the program, so a withdrawn alias fails
+ *   here rather than in a route that cannot match.
+ */
+function keylessEntryAddressFor(program: string): string {
+  for (const entry of KEYLESS_ENTRY_ROUTES) {
+    if (entry.program === program) {
+      return entry.path;
+    }
+  }
+  throw new RangeError(`no keyless entry route is published for ${program}`);
+}
+
+/**
+ * An arrival with NO route parameter keeps the whole frame, reads nothing, and prompts for the keys.
+ *
+ * ⚠️ Assumptions: the parameter is ABSENT rather than malformed, which is a different arrival from the
+ * one {@link keepsTheFrameWhenTheSelectorIsRefused} covers and is why both exist. This screen is
+ * reachable from a menu option that names the program and carries no record
+ * (`app/cpy/COMEN02Y.cpy`), so the router publishes a static alias for it -- and a screen that guarded
+ * on a DEFINED parameter would answer that arrival by telling the operator their link was broken. The
+ * reference has this arrival too and answers it by painting the map with the search keys unprotected
+ * and the row-22 prompt `3250-SETUP-INFOMSG` selects for `CCUP-DETAILS-NOT-FETCHED`
+ * (`app/cbl/COCRDUPC.cbl` L1141-L1144).
+ *
+ * ⚠️ Assumptions: NO read is issued, and that is asserted rather than inferred from the absence of a
+ * record on the glass. There is no key to read by, so a request would be one built from `undefined` --
+ * which is the shape that reaches a service as a literal `/cards/undefined` and is answered with a 404
+ * the operator cannot act on.
+ *
+ * Assumptions: the whole frame is counted, not just the absence of an error page. The finding this
+ * guards against replaced the frame with a centred result, so asserting only that the prompt appears
+ * would pass against a frame that had lost its header, its legend or its pinned zone.
+ * @returns {Promise<void>} Resolves once the selector-free arrival has been observed.
+ */
+async function keepsTheFrameOnTheKeylessEntryRoute(): Promise<void> {
+  await act(
+    /**
+     * Mounts the screen at its static alias, where the route declares no parameter at all.
+     * @returns {Promise<void>} Resolves once the arrival has settled.
+     */
+    async (): Promise<void> => {
+      await renderInAppShell(<CardUpdateScreen />, {
+        initialEntries: [KEYLESS_ENTRY_ADDRESS],
+        routePath: KEYLESS_ENTRY_ADDRESS,
+      });
+    },
+  );
+
+  expect(KEYLESS_ENTRY_ADDRESS).not.toContain(':');
+  expect(document.querySelector('.ant-result')).toBeNull();
+  expect(screen.getAllByTestId(APP_SHELL_TEST_ID)).toHaveLength(1);
+  expect(document.querySelectorAll('main')).toHaveLength(1);
+  expect(screen.getAllByTestId(SHELL_PINNED_ZONE_TEST_ID)).toHaveLength(1);
+  expect(screen.getByRole('heading', { name: CARD_UPDATE_TITLE })).toBeInTheDocument();
+  expectVerbatimMessage(CARD_UPDATE_TRANSACTION_ID);
+  expectVerbatimMessage(CARD_UPDATE_PROGRAM_NAME);
+  expect(informationLineText()).toContain(catalogued('PROMPT_FOR_SEARCH_KEYS').text);
+  expect(refusalBandText()).toBe('');
+  expect(legendRegion()).toBeInTheDocument();
   expect(getCard).not.toHaveBeenCalled();
 }
 
@@ -2016,7 +2630,7 @@ async function dispatchesEveryActionVia(entry: DispatchEntry): Promise<void> {
   await user.type(name, AMENDED_NAME);
 
   await invokeKey(user, 'ENTER', enterDescriptor ?? '', entry);
-  await screen.findByText(catalogued('PROMPT_FOR_CONFIRMATION').text);
+  await waitForTheConfirmationPrompt();
 
   await invokeKey(user, 'PFK05', saveDescriptor ?? '', entry);
   const confirmation = await openConfirmation();
@@ -2159,11 +2773,23 @@ async function bindsNoKeyBeyondTheFourItDispatchesOn(): Promise<void> {
 }
 
 /**
- * The two acting keys carry the design system's primary emphasis and the other two do not.
+ * The one key that changes the record carries the emphasis, and the three that do not, do not.
  *
- * Assumptions: each control's advertised shortcut is asserted beside its emphasis, so the
- * visible control is tied to the key press it stands for. A control that looked right and
- * advertised the wrong key would leave a screen-reader user pressing something else.
+ * ⚠️ Refactoring Rationale: ONE key is expected to be emphasised, and two were. The emphasis used to be
+ * derived from the attention identifier, through `PRIMARY_ACTION_AIDS`, and that table cannot be right
+ * across this application: the same `PFK05` is `F5=Save` here, `F5=Delete` on `app/bms/COUSR03.bms`
+ * L148 and a browse key elsewhere, so one AID-keyed answer paints a delete and a save identically.
+ * `ui/src/layout/PfKeyBar.tsx` now resolves emphasis from what the key's LABEL says its action does, and
+ * this screen declares that: `F5=Save` is `mutating` and takes the emphasis, while `ENTER=Process`,
+ * `F3=Exit` and `F12=Cancel` are `read-only` and take the default treatment. The classification follows
+ * the source arms rather than the names -- `2000-PROCESS-INPUTS` ends by setting the confirmation prompt
+ * without writing (`app/cbl/COCRDUPC.cbl` L1138-L1163), the exit transfers without writing (L442-L454),
+ * and the cancel redisplays the stored record -- so `ENTER` losing the emphasis is the correction, not a
+ * regression: it never wrote anything.
+ *
+ * Assumptions: each control's advertised shortcut is asserted beside its emphasis, so the visible
+ * control is tied to the key press it stands for. A control that looked right and advertised the wrong
+ * key would leave a screen-reader user pressing something else.
  * @returns {Promise<void>} Resolves once all four controls have been checked.
  */
 async function marksTheActingKeysWithThePrimaryEmphasis(): Promise<void> {
@@ -2173,22 +2799,27 @@ async function marksTheActingKeysWithThePrimaryEmphasis(): Promise<void> {
   const [enterDescriptor, exitDescriptor] = PRIMARY_LEGEND;
   const [saveDescriptor, cancelDescriptor] = CONDITIONAL_LEGEND;
 
-  // WHY : Assumptions: exactly two identifiers carry the primary emphasis, and they are the two
-  //       that ACT -- validate and save. AAP section 0.3.2 assigns the emphasis to those two and
-  //       the default treatment to the back and cancel keys. It is deliberately not inferred
-  //       from the mapset: the terminal expressed emphasis with `ATTRB=BRT`, which this tree
-  //       resolves to font weight rather than to colour, so terminal brightness and button
-  //       emphasis are independent decisions and only the latter is settled here.
-  expect(PRIMARY_ACTION_AIDS).toHaveLength(2);
+  /*
+   * WHY : ⚠️ Assumptions: the AID table is asserted NOT to be what decided this screen's paint, which is
+   *       the half a positive assertion cannot cover. It still contains `ENTER`, because six other
+   *       screens have yet to declare their risks and it remains their fallback; this screen has
+   *       declared, so its `ENTER` renders default DESPITE being in that table. Asserting the
+   *       disagreement is what proves the risk declaration is the operative input.
+   */
   expect(PRIMARY_ACTION_AIDS).toContain('ENTER');
-  expect(PRIMARY_ACTION_AIDS).toContain('PFK05');
+  expect(legendControl(enterDescriptor ?? '')).not.toHaveClass('ant-btn-primary');
 
-  const acting = [enterDescriptor ?? '', saveDescriptor ?? ''];
-  const supporting = [exitDescriptor ?? '', cancelDescriptor ?? ''];
+  const acting = [saveDescriptor ?? ''];
+  const supporting = [enterDescriptor ?? '', exitDescriptor ?? '', cancelDescriptor ?? ''];
   for (const descriptor of acting) {
     expect(legendControl(descriptor)).toHaveClass('ant-btn-primary');
+    // WHY : Assumptions: the save is asserted NOT to be dangerous, which is the other half of the
+    //       classification. `mutating` and `destructive` both resolve to the primary type and differ
+    //       only by the danger flag, so the positive assertion alone would pass against a save painted
+    //       as though it removed the record.
+    expect(legendControl(descriptor)).not.toHaveClass('ant-btn-dangerous');
   }
-  // WHY : Assumptions: the supporting pair is asserted to carry the DEFAULT treatment and not
+  // WHY : Assumptions: the supporting keys are asserted to carry the DEFAULT treatment and not
   //       merely to lack the primary one. The design system emits one class per resolved button
   //       type, so a control that had lost its type altogether would satisfy a bare negative
   //       while rendering as neither of the two treatments AAP section 0.3.2 assigns.
@@ -2368,7 +2999,17 @@ async function marksRefusedFieldsAndLeavesCleanOnesAlone(): Promise<void> {
   expect(FIELD_ERROR_TOKENS.blankMarker).toBe(
     cobolLiteralAt(FIELD_HIGHLIGHT, BLANK_MARKER_LINE, 'app/cpy/CSSETATY.cpy'),
   );
-  expect(FIELD_ERROR_TOKENS.errorColor).toMatch(/^color[A-Za-z]+$/u);
+  // WHY : Refactoring Rationale: this used to assert the token name matched /^color/, using the alias
+  //       family's prefix as a proxy for "this is a design-system token and not a colour literal".
+  //       That proxy was too narrow. No `colorError*` alias in antd 6.5.2 is dark enough for this
+  //       role -- the darkest, `colorErrorTextActive` at #d9363e, measures 4.224:1 against the error
+  //       band's own `colorErrorBg` tint of #fff2f0, below the 4.5:1 bar -- so the bridge entry in
+  //       `ui/src/theme/tokens.ts` points at the ramp member `red7`, which measures 5.097:1 there.
+  //       AAP section 0.3.3 lists the full colour ramp in the map layer of the available token
+  //       surface, so a ramp member IS a design-system token. Asserting MEMBERSHIP in antd's resolved
+  //       token set states the intended property directly instead of matching a naming convention: a
+  //       colour literal fails it, and so does a token name that antd does not publish.
+  expect(Object.keys(theme.getDesignToken({}))).toContain(FIELD_ERROR_TOKENS.errorColor);
 
   const blank = fieldError('embossedName', catalogued('WS_PROMPT_FOR_NAME').text, 'BLANK');
   const notOk = fieldError('activeStatus', catalogued('CARD_STATUS_MUST_BE_YES_NO').text);
@@ -2399,9 +3040,36 @@ async function marksRefusedFieldsAndLeavesCleanOnesAlone(): Promise<void> {
   expect(formItemFor(refusedStatus).textContent ?? '').toContain(notOk.message);
   expect(refusedStatus.closest('.ant-input-affix-wrapper')).toBeNull();
 
-  const untouched = control(CARD_UPDATE_FIELD_LABELS.expiryDate);
+  const untouched = control(EXPIRY_YEAR_LABEL);
   expect(formItemFor(untouched)).not.toHaveClass('ant-form-item-has-error');
   expect(formItemFor(untouched).textContent ?? '').not.toContain(blank.message);
+
+  /*
+   * WHY : ⚠️ Assumptions: the COLOUR is asserted on both refused controls and on neither clean one,
+   *       because the copybook colours BOTH refused states and marks only the blank one.
+   *       `app/cpy/CSSETATY.cpy` L18 to L22 moves `DFHRED` into the field's colour subfield when the
+   *       flag is not-OK, L23 to L26 does the same AND writes the asterisk when it is blank -- so the
+   *       marker distinguishes the two states and the colour does not. Asserting the suffix alone,
+   *       which this case did, would pass against a screen that coloured only the blank field.
+   * WHY : Assumptions: the assertion is on the serialised custom-property reference rather than on a
+   *       resolved colour, for the same reason the token-membership assertion above exists: the value
+   *       belongs to the theme, and the name is what this file is entitled to hold the screen to.
+   */
+  const refusedColour = `var(--ant-${FIELD_ERROR_TOKENS.errorColor.replace(/([A-Z0-9]+)/gu, '-$1').toLowerCase()})`;
+  /*
+   * WHY : ⚠️ Assumptions: the colour is looked for on the affix WRAPPER for the blank field and on the
+   *       control itself for the other, because the design system moves the target: a suffix makes
+   *       `hasPrefixSuffix` true, the control is wrapped, and antd applies the caller's `style` to that
+   *       wrapper (`@rc-component/input/lib/BaseInput.js` L50 to L53 and L87). Nothing is lost by it --
+   *       the wrapper's inner rule sets `color: 'inherit'` on the input
+   *       (`node_modules/antd/lib/input/style/index.js` L407 to L413), so the value text takes the
+   *       wrapper's colour -- but a case that insisted on the input would be asserting antd's internal
+   *       arrangement rather than the colour the operator sees.
+   */
+  const blankSurface = refusedName.closest<HTMLElement>('.ant-input-affix-wrapper');
+  expect(blankSurface?.style.color).toBe(refusedColour);
+  expect(refusedStatus.style.color).toBe(refusedColour);
+  expect(untouched.style.color).toBe('');
 }
 
 /**
@@ -2432,6 +3100,430 @@ function offersNoWayToGrantAuthority(): void {
 }
 
 /**
+ * Asserts one control's rendering is ceilinged at the character width its field declares.
+ *
+ * Assumptions: the `ch` term is matched rather than the whole declaration, because the padding term
+ * is a theme custom property whose serialised form belongs to the design system and not to this
+ * file. What this file is entitled to assert is the character count, which is the copybook's.
+ *
+ * Assumptions: `max-inline-size` is asserted and not a pixel width, because jsdom computes no
+ * layout, so a pixel assertion here would assert nothing. The remedy `ui/src/layout/recordLayout.ts`
+ * supplies is a ceiling expressed in `ch` plus the system's own horizontal control padding, so the
+ * declaration's presence and its character count are exactly what can be established.
+ * @param {HTMLElement} field - The control to inspect.
+ * @param {number} declaredWidth - The width the field's PICTURE clause declares.
+ * @returns {void} Nothing; the expectations throw on a mismatch.
+ */
+function expectDeclaredWidthCeiling(field: HTMLElement, declaredWidth: number): void {
+  const ceiling = field.style.maxInlineSize;
+  expect(ceiling, 'the control must carry a declared-width ceiling').not.toBe('');
+  expect(ceiling).toContain(`${String(declaredWidth)}ch`);
+}
+
+/**
+ * Every control is ceilinged at the character width its own field declares.
+ *
+ * ⚠️ Assumptions: this is the RENDERING half of the width contract and
+ * {@link honoursEveryDeclaredFieldWidth} is the ENTRY half. They are separate because they fail
+ * separately: `maxLength` bounds what an operator can type and says nothing about how wide the box
+ * is drawn, which is how a one-character field came to be measured at two hundred and seventeen
+ * pixels on the sibling list screen while its entry bound was correct all along.
+ *
+ * Assumptions: the ceiling is asserted on the CONTROL and never on a wrapper, because
+ * `copybookFieldWidthStyle` composes `--ant-control-padding-horizontal` into its calculation and that
+ * custom property resolves on `.ant-input`; on a plain wrapper the term would resolve to nothing and
+ * the ceiling would silently collapse to the character count alone.
+ * @returns {Promise<void>} Resolves once every control has been measured.
+ */
+async function boundsEveryControlToItsDeclaredRenderingWidth(): Promise<void> {
+  await renderLoadedScreen();
+
+  const pairs: readonly (readonly [string, number])[] = [
+    [CARD_UPDATE_FIELD_LABELS.accountNumber, CARD_UPDATE_FIELD_WIDTHS.accountNumber],
+    [CARD_UPDATE_FIELD_LABELS.cardNumber, CARD_UPDATE_FIELD_WIDTHS.cardNumber],
+    [CARD_UPDATE_FIELD_LABELS.nameOnCard, CARD_UPDATE_FIELD_WIDTHS.embossedName],
+    [CARD_UPDATE_FIELD_LABELS.cardActive, CARD_UPDATE_FIELD_WIDTHS.activeStatus],
+    [EXPIRY_MONTH_LABEL, CARD_UPDATE_FIELD_WIDTHS.expirationMonth],
+    [EXPIRY_YEAR_LABEL, CARD_UPDATE_FIELD_WIDTHS.expirationYear],
+  ];
+  for (const [label, width] of pairs) {
+    expectDeclaredWidthCeiling(control(label), width);
+  }
+}
+
+/**
+ * The two expiry controls are told apart by more than the separator painted between them.
+ *
+ * ⚠️ Assumptions: the mapset paints ONE label for both parts -- `app/bms/COCRDUP.bms` L126 paints
+ * `Expiry Date       : ` once, L134 paints the `/` between them, and L127-L131 and L135-L139 declare
+ * two separate two- and four-character fields -- so a faithful rendering that took its accessible
+ * name from the painted label alone would give two consecutive required controls names differing
+ * only by a trailing separator. That is the defect: the separator is decoration, it is not a name.
+ *
+ * Assumptions: the painted label is still required to be PRESENT inside each name rather than
+ * replaced by one, because the operator reading the screen sees that label and the two must agree.
+ * The part name is additive, which is the convention `ui/src/screens/accountUpdate/index.tsx`
+ * already established for its own split date fields.
+ *
+ * Assumptions: the two names are compared after stripping every non-alphanumeric character, so a
+ * pair distinguished only by punctuation or spacing fails this. Stripping is what makes the case
+ * discriminating: the pre-fix names `Expiry Date       : /` and `Expiry Date       : ` reduce to one
+ * identical string, while `...Month` and `...Year` do not.
+ * @returns {Promise<void>} Resolves once both names have been compared.
+ */
+async function distinguishesTheTwoExpiryControls(): Promise<void> {
+  await renderLoadedScreen();
+
+  const month = control(EXPIRY_MONTH_LABEL).getAttribute('aria-label') ?? '';
+  const year = control(EXPIRY_YEAR_LABEL).getAttribute('aria-label') ?? '';
+
+  for (const name of [month, year]) {
+    expect(collapse(name)).toContain(collapse(CARD_UPDATE_FIELD_LABELS.expiryDate));
+  }
+  expect(month).not.toBe(year);
+  expect(month.replace(/[^A-Za-z0-9]/gu, '')).not.toBe(year.replace(/[^A-Za-z0-9]/gu, ''));
+  expect(month).toContain(CARD_UPDATE_PART_NAMES.month);
+  expect(year).toContain(CARD_UPDATE_PART_NAMES.year);
+  expect(CARD_UPDATE_FIELD_LABELS.expirySeparator).not.toContain(CARD_UPDATE_PART_NAMES.month);
+}
+
+/**
+ * The two expiry parts sit under ONE painted caption, in one group, on one line.
+ *
+ * ⚠️ Purpose: a browser sweep measured the month, the `/` and the year STACKED vertically at 375,
+ * 768, 1280 and 1920 alike, while the paired account-update screen rendered its own three-part dates
+ * inline at every one of those widths -- two screens rendering the same construct two different ways.
+ * They stacked because they were two SIBLING form items with the separator rendered as the second
+ * item’s own label, and sibling form items stack by design, so the arrangement could never have been
+ * horizontal.
+ *
+ * ⚠️ Assumptions: the mapset settles the arrangement and settles it on ONE row.
+ * `app/bms/COCRDUP.bms` L123-L126 paints the caption at row 15 column 4 over `LENGTH=20`, `EXPMON` at
+ * L127-L131 sits at row 15 column 25 over `LENGTH=2`, the anonymous `INITIAL='/'` at L132-L134 at row
+ * 15 column 28, and `EXPYEAR` at L135-L139 at row 15 column 30 over `LENGTH=4`. AAP design gap G1
+ * surrenders pixel-for-character POSITION and commits to preserving field GROUPING and reading order,
+ * so a caption and two parts the mapset paints side by side belong on one line.
+ *
+ * Assumptions: the two parts stay two controls, which this case does not disturb -- the source answers
+ * a bad month and a bad year with two different sentences from two different edit paragraphs
+ * (`app/cbl/COCRDUPC.cbl` L197-L198 and L199-L200), so one combined field could carry only one of them.
+ * The sibling case above asserts that both still carry their own name.
+ * @returns {Promise<void>} Resolves once the group, its caption and its separator have been asserted.
+ */
+async function groupsTheExpiryPartsUnderOneCaptionOnOneLine(): Promise<void> {
+  await renderLoadedScreen();
+
+  const month = control(EXPIRY_MONTH_LABEL);
+  const year = control(EXPIRY_YEAR_LABEL);
+
+  const group = month.closest<HTMLElement>('[role="group"]');
+
+  if (group === null) {
+    throw new Error('the expiry parts rendered without the group their shared caption names');
+  }
+
+  expect(
+    group.contains(year),
+    'both parts must sit inside ONE group, which is what makes them one line rather than two rows',
+  ).toBe(true);
+
+  /*
+   * WHY : ⚠️ Assumptions: the group's name is resolved THROUGH the document rather than compared as an
+   *       attribute. A dangling `aria-labelledby` promises a name and delivers silence, and an equality
+   *       check on the attribute passes for exactly that case.
+   */
+  const captionId = group.getAttribute('aria-labelledby') ?? '';
+  const caption = captionId === '' ? null : document.getElementById(captionId);
+
+  if (caption === null) {
+    throw new Error('the expiry group names itself by a reference that resolves to nothing');
+  }
+
+  expect(
+    collapse(caption.textContent ?? ''),
+    'the group must be named by the caption the mapset paints once over both parts',
+  ).toBe(collapse(CARD_UPDATE_FIELD_LABELS.expiryDate));
+
+  /*
+   * WHY : ⚠️ Assumptions: the separator is asserted to be INSIDE the group and to be no field's label,
+   *       which is the discriminating half. The pre-fix arrangement rendered the `/` as the SECOND form
+   *       item's own label, and a form item's label sits outside the group and stacks the item beneath
+   *       its sibling -- so a case that only looked for the character somewhere on the screen would have
+   *       passed against the vertical stack this replaced.
+   */
+  expect(
+    group.textContent ?? '',
+    'the separator must be painted between the parts, inside their group',
+  ).toContain(CARD_UPDATE_FIELD_LABELS.expirySeparator);
+
+  const separatorLabels: string[] = [];
+
+  for (const label of document.querySelectorAll<HTMLElement>('label')) {
+    if (collapse(label.textContent ?? '') === collapse(CARD_UPDATE_FIELD_LABELS.expirySeparator)) {
+      separatorLabels.push(label.textContent ?? '');
+    }
+  }
+
+  expect(
+    separatorLabels,
+    'the separator is painted decoration and must label no field at all',
+  ).toEqual([]);
+
+  /*
+   * WHY : Assumptions: the caption's own `for` is asserted to resolve to the FIRST part, because a
+   *       caption associated with no field is the second half of the defect an accessibility audit
+   *       raised against the equivalent groups on the paired account-update screen.
+   */
+  const captionLabel = caption.closest<HTMLElement>('label');
+  expect(
+    captionLabel?.getAttribute('for'),
+    'the caption must point at the group\u2019s first part',
+  ).toBe(month.id);
+}
+
+/**
+ * No field carries a standing requirement marker, and the requirement is still published.
+ *
+ * ⚠️ Assumptions: the design system's own marker is refused because it states the wrong thing.
+ * `app/cpy/CSSETATY.cpy` L18-L26 moves an asterisk into a field only on the turn that field arrived
+ * BLANK and was refused; the system's marker says "this field is always required" and is painted
+ * from the first turn, so leaving both on would put a permanent asterisk where the reference paints
+ * a conditional one and give the operator two markers with two different meanings.
+ *
+ * Assumptions: the requirement itself is asserted to survive on the machine-readable channel, so
+ * this case cannot be satisfied by simply dropping the rule. `aria-required` is what a screen reader
+ * announces; the asterisk is what the reference reserves for a refusal.
+ *
+ * Assumptions: the SUPPRESSION is asserted through the class the design system keys it on, not
+ * through the absence of the glyph. antd paints the marker from a `::before` rule --
+ * `node_modules/antd/lib/form/style/index.js` L159-L173 gives `.ant-form-item-required::before` the
+ * literal content `"*"` and gives `.ant-form-item-required-mark-hidden` a `display: none` that
+ * cancels it -- and jsdom renders no pseudo-element, so querying for an asterisk would pass whatever
+ * the screen did. Requiring the cancelling class on every required label states the same property
+ * and does discriminate: without `requiredMark={false}` on the form, antd leaves that class off.
+ *
+ * Assumptions: at least one required label is required to EXIST, so the case cannot be satisfied by
+ * a form that stopped requiring anything.
+ * @returns {Promise<void>} Resolves once the markers and the requirement have been inspected.
+ */
+async function offersNoStandingRequiredMarker(): Promise<void> {
+  await renderLoadedScreen();
+
+  const required = Array.from(document.querySelectorAll<HTMLElement>('.ant-form-item-required'));
+  expect(required.length).toBeGreaterThan(0);
+  for (const label of required) {
+    expect(label).toHaveClass('ant-form-item-required-mark-hidden');
+  }
+  expect(screen.queryAllByText(FIELD_ERROR_TOKENS.blankMarker)).toEqual([]);
+
+  for (const label of [
+    CARD_UPDATE_FIELD_LABELS.nameOnCard,
+    CARD_UPDATE_FIELD_LABELS.cardActive,
+    EXPIRY_MONTH_LABEL,
+    EXPIRY_YEAR_LABEL,
+  ]) {
+    expect(control(label)).toHaveAttribute('aria-required', 'true');
+  }
+}
+
+/**
+ * The confirmation asks the reference's own question and names the record it would write.
+ *
+ * ⚠️ Assumptions: the question is the catalogued sentence and never a key label. The reference asks
+ * `app/cbl/COCRDUPC.cbl`'s own `PROMPT-FOR-CONFIRMATION` sentence on that turn, so a surface titled
+ * with the name of the key that opened it would be asking nothing at all.
+ *
+ * Assumptions: the record is named by the two identifiers the mapset paints as this screen's keys --
+ * the account number and the MASKED card number -- carried with their painted labels, so the
+ * operator confirming a write is told which card is being written rather than only that something
+ * is. The unmasked number is deliberately absent: it is absent from the whole screen.
+ *
+ * Assumptions: focus is asserted to start on the DECLINING action. A committing confirmation whose
+ * accepting action holds focus commits on the next bare Enter, which is the gesture this program's
+ * operator uses constantly -- `app/cpy/CSSTRPFY.cpy` makes Enter the attention identifier every
+ * turn dispatches on -- so the safe choice is the one that may hold it.
+ *
+ * Assumptions: both actions point at the record identity with `aria-describedby`, so the record is
+ * announced with whichever action is landed on rather than only when the surface is read whole.
+ * @returns {Promise<void>} Resolves once the confirmation has been inspected.
+ */
+async function namesTheRecordInItsConfirmation(): Promise<void> {
+  const user = await renderLoadedScreen();
+
+  await amendAndValidate(user);
+  await pressPfKey(user, 'PFK05');
+  const confirmation = await openConfirmation();
+
+  /*
+   * WHY : ⚠️ Assumptions: the MODALITY is asserted alongside the role, because the two together are
+   *       what make this a question rather than a remark. `aria-modal` is what tells an assistive
+   *       technology that the rest of the document is unavailable until the question is answered, and
+   *       it is exactly what the `Popconfirm` this surface replaced could not carry -- its overlay is
+   *       hardcoded `role="tooltip"` and sets no modality at all. The attribute comes from
+   *       `@rc-component/dialog/es/Dialog/Content/Panel.js` L113-L115 along with the role and the
+   *       labelling, so a surface that lost one of the three would fail here.
+   */
+  expect(confirmation.getAttribute('aria-modal')).toBe('true');
+
+  const surface = collapse(confirmation.textContent ?? '');
+  expect(surface).toContain(collapse(catalogued('PROMPT_FOR_CONFIRMATION').text));
+  for (const fragment of [
+    collapse(CARD_UPDATE_FIELD_LABELS.accountNumber),
+    CARD.accountId,
+    collapse(CARD_UPDATE_FIELD_LABELS.cardNumber),
+    CARD.displayCardNumber,
+  ]) {
+    expect(surface).toContain(fragment);
+  }
+
+  const { accept, decline } = confirmationActions(confirmation);
+  expect(document.activeElement).toBe(decline);
+  expect(accept).toHaveClass('ant-btn-primary');
+  expect(decline).not.toHaveClass('ant-btn-primary');
+
+  const described = accept.getAttribute('aria-describedby');
+  expect(described).not.toBeNull();
+  expect(decline.getAttribute('aria-describedby')).toBe(described);
+  const identity = document.getElementById(described ?? '');
+  expect(identity).not.toBeNull();
+  expect(collapse(identity?.textContent ?? '')).toContain(CARD.displayCardNumber);
+  expect(identity?.style.fontFamily).toBe(
+    `var(--ant-${TYPOGRAPHY_TOKENS.fixedPitchData.replace(/([A-Z])/gu, '-$1').toLowerCase()})`,
+  );
+}
+
+/**
+ * `Escape` withdraws the confirmation and writes nothing.
+ *
+ * ⚠️ Assumptions: this case exists because the withdrawal MECHANISM changed and the behaviour must
+ * not. While the confirmation was a controlled `Popconfirm` declaring `trigger={[]}`, the library's
+ * own dismissal was switched off and this screen installed a document-level `Escape` listener to put
+ * it back; browser validation had measured `Escape`, a second `Escape`, a `Tab` then a third
+ * `Escape` and a click outside all leaving the overlay open, so the only ways out were its two
+ * buttons or `F12` -- and `F12` DISCARDS the edits. The dialog primitive routes `Escape` to the
+ * cancel handler itself (`@rc-component/dialog` `Dialog/index.js`, `onWrapperKeyDown` on
+ * `KeyCode.ESC`), so the screen's listener was withdrawn with the `Popconfirm`. This asserts the
+ * library is doing what the listener did.
+ *
+ * Assumptions: the keystroke is delivered through the operator rather than through the screen's key
+ * handler, because what is being asserted is what the BROWSER does with `Escape` while that surface
+ * is open -- `ui/src/layout/usePfKeys.ts` maps only Enter and the function keys, so `Escape` is never
+ * an attention identifier this screen claims.
+ *
+ * Assumptions: the operator's typing is asserted to SURVIVE, for the same reason the declining
+ * action's case asserts it: a withdrawal that discarded the amendment would be safe from the
+ * service's point of view and destructive from the operator's, and `F12` is the only key on this
+ * screen the reference lets discard anything.
+ * @returns {Promise<void>} Resolves once the withdrawal has been observed.
+ */
+async function escapeWithdrawsTheConfirmation(): Promise<void> {
+  vi.mocked(updateCard).mockResolvedValue(AMENDED_CARD);
+  const user = await renderLoadedScreen();
+
+  await amendAndValidate(user);
+  await pressPfKey(user, 'PFK05');
+  await openConfirmation();
+
+  await user.keyboard('{Escape}');
+
+  await waitFor(
+    /**
+     * Waits for the confirmation to have been withdrawn.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(displayedConfirmations()).toEqual([]);
+    },
+  );
+  expect(updateCard).not.toHaveBeenCalled();
+  expect(control(CARD_UPDATE_FIELD_LABELS.nameOnCard)).toHaveValue(AMENDED_NAME);
+}
+
+/**
+ * A bare Enter on the open confirmation writes nothing.
+ *
+ * ⚠️ Assumptions: this is the gesture the umbrella contract exists for. An operator who has just
+ * pressed the save key is holding the keyboard, and Enter is the key this program dispatches on
+ * every other turn; if the confirmation's accepting action holds focus then the habitual Enter
+ * commits a write the operator has not yet agreed to. The remedy is focus on the declining action,
+ * which turns the same keystroke into a cancellation.
+ *
+ * Assumptions: the keystroke is delivered bare, through the operator and not through the screen's
+ * key handler, because what is being asserted is what the BROWSER does with Enter while that
+ * surface is open. `ui/src/layout/usePfKeys.ts` L318-L324 defers Enter to a focused native button
+ * rather than claiming it, so the button's own activation is what runs.
+ *
+ * Assumptions: the record is asserted to survive intact afterwards, not merely that no request was
+ * sent, because a cancellation that discarded the operator's typing would be safe from the
+ * service's point of view and destructive from the operator's.
+ * @returns {Promise<void>} Resolves once the cancellation has been observed.
+ */
+async function commitsNothingOnABareEnter(): Promise<void> {
+  vi.mocked(updateCard).mockResolvedValue(AMENDED_CARD);
+  const user = await renderLoadedScreen();
+
+  await amendAndValidate(user);
+  await pressPfKey(user, 'PFK05');
+  const confirmation = await openConfirmation();
+  expect(document.activeElement).toBe(confirmationActions(confirmation).decline);
+
+  await user.keyboard('{Enter}');
+
+  await waitFor(
+    /**
+     * Waits for the confirmation to have been withdrawn.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(displayedConfirmations()).toEqual([]);
+    },
+  );
+  expect(updateCard).not.toHaveBeenCalled();
+  expect(control(CARD_UPDATE_FIELD_LABELS.nameOnCard)).toHaveValue(AMENDED_NAME);
+}
+
+/**
+ * A name that would overflow the record's field is refused and nothing is sent.
+ *
+ * ⚠️ Assumptions: this documents a REFUTATION as much as it guards a behaviour. The report's
+ * concern is that an entry bound counting UTF-16 units admits a value that overflows a fixed-width
+ * field measured in code points and bytes. On THIS field that cannot happen through the bound
+ * alone: `app/cbl/COCRDUPC.cbl` L1230-L1240 accepts only alphabetic characters and spaces, and
+ * every character in that alphabet is one unit, one code point and one byte alike -- so any value
+ * that could overflow in bytes is refused by the alphabet first, with the program's own sentence.
+ *
+ * Assumptions: the width term was adopted regardless, at the same site, so the contract stays
+ * correct if the accepted alphabet is ever widened. It is asserted here only through the refusal it
+ * shares with the alphabet term, because no accepted value can reach it -- which is the honest
+ * extent of what this screen can be held to today.
+ * @returns {Promise<void>} Resolves once the refusal has been rendered.
+ */
+async function refusesANameThatOverflowsTheRecord(): Promise<void> {
+  const user = await renderLoadedScreen();
+
+  const name = control(CARD_UPDATE_FIELD_LABELS.nameOnCard);
+  await user.clear(name);
+  await user.type(name, 'é'.repeat(CARD_UPDATE_FIELD_WIDTHS.embossedName));
+  await pressPfKey(user, 'ENTER');
+
+  await waitFor(
+    /**
+     * Waits for the refusal to be marked on the field.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(formItemFor(control(CARD_UPDATE_FIELD_LABELS.nameOnCard))).toHaveClass(
+        'ant-form-item-has-error',
+      );
+    },
+  );
+  expect(formItemFor(control(CARD_UPDATE_FIELD_LABELS.nameOnCard)).textContent ?? '').toContain(
+    catalogued('WS_NAME_MUST_BE_ALPHA').text,
+  );
+  expect(updateCard).not.toHaveBeenCalled();
+}
+
+/**
  * Registers the cases that hold this screen to the widths, the cursor placement and the
  * composition its mapset and symbolic map declare.
  * @returns {void} Nothing; the cases are registered as a side effect.
@@ -2451,6 +3543,16 @@ function registerFieldConstraintCases(): void {
     'declares three expiry parts and offers two of them for edit',
     declaresThreeExpiryPartsAndEditsTwo,
   );
+  it(
+    'bounds every control to its declared rendering width',
+    boundsEveryControlToItsDeclaredRenderingWidth,
+  );
+  it('distinguishes the two expiry controls', distinguishesTheTwoExpiryControls);
+  it(
+    'groups the expiry parts under one caption on one line',
+    groupsTheExpiryPartsUnderOneCaptionOnOneLine,
+  );
+  it('offers no standing required marker', offersNoStandingRequiredMarker);
   it('places exactly one initial cursor', placesExactlyOneInitialCursor);
   it(
     'composes the screen from design-system components',
@@ -2467,13 +3569,32 @@ function registerCommitContractCases(): void {
   it('commits where the reference program commits', commitsWhereTheProgramCommits);
   it('validates on the enter key without writing', validatesOnEnterWithoutWriting);
   it('commits only on the save key, behind its confirmation', commitsOnlyOnTheSaveKey);
+  it('states its success over the committed record', statesItsSuccessOverTheCommittedRecord);
   it('writes nothing when the confirmation is declined', decliningTheConfirmationWritesNothing);
+  it('names the record in its confirmation', namesTheRecordInItsConfirmation);
+  it('commits nothing on a bare enter', commitsNothingOnABareEnter);
+  it('withdraws the confirmation on escape', escapeWithdrawsTheConfirmation);
   it('refuses an unchanged submission and offers no save key', refusesAnUnchangedSubmission);
   it('reports a refused write as an unsuccessful turn', reportsARefusedWrite);
+  it(
+    'reports a transient refusal as an outage rather than a failed update',
+    reportsATransientRefusalAsAnOutage,
+  );
+  it('announces the outstanding write through a live region', announcesTheOutstandingWrite);
   it(
     'distinguishes the concurrency conflict from a plain failure',
     distinguishesTheConcurrencyConflict,
   );
+  it(
+    'writes once when one confirmation is activated twice',
+    writesOnceWhenOneConfirmationIsActivatedTwice,
+  );
+  it('gates the write on a synchronous latch', gatesTheWriteOnASynchronousLatch);
+  it(
+    'resubmits against the version the refresh returned',
+    resubmitsAgainstTheVersionTheRefreshReturned,
+  );
+  it('keeps the conflict when the refresh fails', keepsTheConflictWhenTheRefreshFails);
   it(
     'builds refusals the shared client classifies as intended',
     buildsRefusalsTheClientClassifiesAsIntended,
@@ -2496,6 +3617,7 @@ function registerMessageFidelityCases(): void {
   it('withholds the technical file diagnostic', withholdsTheTechnicalFileDiagnostic);
   it("refuses a name outside the program's own alphabet", refusesANameOutsideTheProgramsAlphabet);
   it('refuses an empty name', refusesAnEmptyName);
+  it('refuses a name that would overflow the record', refusesANameThatOverflowsTheRecord);
   it('bounds the expiry month', boundsTheExpiryMonth);
   it('bounds the expiry year without borrowing the month sentence', boundsTheExpiryYear);
   it('restricts the active status to its two values', restrictsTheActiveStatusToItsTwoValues);
@@ -2503,6 +3625,61 @@ function registerMessageFidelityCases(): void {
     'carries the abend surface as widths and not as text',
     carriesTheAbendSurfaceAsWidthsAndNotText,
   );
+  it('keeps the frame when the selector is refused', keepsTheFrameWhenTheSelectorIsRefused);
+  it('keeps the frame on the keyless entry route', keepsTheFrameOnTheKeylessEntryRoute);
+}
+
+/**
+ * This screen's legend and message line are carried in the frame's pinned zone.
+ *
+ * Purpose
+ * -------
+ * A browser measured this route's function-key legend below the fold at every width it was taken to:
+ * 124 pixels below at 375 and 576, and bottom-clipped by 9.6 pixels at 768, 992, 1200 and 1600 -- so
+ * on a 900-pixel viewport this screen never showed its keys in full at any width. The reference cannot
+ * express that state: rows 23 and 24 exist on `app/bms/COCRDUP.bms` (L146-L167) and a 24-row display
+ * does not scroll, so the outcome of a turn and the keys for the next one were always on the glass.
+ *
+ * ⚠️ Assumptions: the cause was the FRAME and not this screen, so the remedy is the frame's and this
+ * case only establishes that this route inherits it. `ui/src/layout/AppShell.tsx` L1324-L1332 pins the
+ * zone holding rows 22, 23 and 24 with `position: sticky` and `inset-block-end: 0`; the general
+ * contract is asserted by `ui/src/layout/appShell.test.tsx`. Trimming this screen's own content
+ * instead was rejected outright: at 375 the form is legitimately taller than the viewport, so no
+ * amount of trimming could hold the guarantee, and a screen that fitted by 9 pixels would still be one
+ * added field away from the same defect.
+ *
+ * Assumptions: what is asserted here is CONTAINMENT plus the pinning declaration, because jsdom
+ * computes no layout and cannot be asked where the legend falls. Containment is what makes the
+ * declaration reach this screen's legend, and the declaration is what keeps it on the glass.
+ *
+ * ⚠️ Assumptions: the ROW-22 information line is held to the same containment, and that half is what
+ * this case gained. This screen used to compose that band itself, inside the screen body: a browser
+ * measured it at rect 775.67-815.67 inside `main` while the pinned zone spanned 764-860, and
+ * `document.elementFromPoint(459, 796)` returned an element the band did not contain -- so the
+ * acknowledgement `Changes committed to database` was FULLY OCCLUDED at `scrollY 0` and became
+ * readable only after the operator scrolled the remaining 52 pixels. An operator saved and saw
+ * nothing. The band being inside the pinned zone is what fixes that, and it being OUTSIDE `main` is
+ * what proves it is not a second copy left behind in the body -- the two assertions together fail if
+ * either the delegation or the deletion is undone.
+ * @returns {Promise<void>} Resolves once the zone has been inspected.
+ */
+async function carriesItsLegendInTheFramesPinnedZone(): Promise<void> {
+  await renderLoadedScreen();
+
+  const zone = screen.getByTestId(SHELL_PINNED_ZONE_TEST_ID);
+  expect(zone).toContainElement(screen.getByTestId(MESSAGE_BAND_TEST_ID));
+  expect(zone).toContainElement(legendRegion());
+  expect(zone.style.position, 'the zone holding rows 23 and 24 may not be in flow').toBe('sticky');
+  expect(zone.style.insetBlockEnd, 'the zone must be pinned to the block end').toBe('0px');
+
+  const informationBands = screen.getAllByTestId(INFORMATION_BAND_TEST_ID);
+  expect(informationBands, 'row 22 is one line, so one band may paint it').toHaveLength(1);
+  const [informationBand] = informationBands;
+  expect(zone).toContainElement(informationBand ?? null);
+  expect(
+    informationBand?.closest('main'),
+    'a row-22 band inside the scrolling body is occluded by the pinned zone above it',
+  ).toBeNull();
 }
 
 /**
@@ -2521,6 +3698,7 @@ function registerKeyContractCases(): void {
   it('exits from the visible legend', exitsFromTheLegend);
   it('binds no key beyond the four it dispatches on', bindsNoKeyBeyondTheFourItDispatchesOn);
   it('marks the acting keys with the primary emphasis', marksTheActingKeysWithThePrimaryEmphasis);
+  it("carries its legend in the frame's pinned zone", carriesItsLegendInTheFramesPinnedZone);
 }
 
 /**

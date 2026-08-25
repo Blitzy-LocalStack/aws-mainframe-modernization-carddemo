@@ -238,6 +238,42 @@ async function appliesMaintenanceActionsAsOneBatch(): Promise<void> {
 }
 
 /**
+ * Asserts an over-long entry refuses the WHOLE batch before anything is dispatched.
+ *
+ * Purpose: the batch's members are one level below the request body, so the shared width guard -- which
+ * deliberately does not descend into arrays -- has to be applied per entry by this module. This case is
+ * what fails if that loop is removed, and it drives the SECOND entry specifically, because a loop that
+ * checked only the first would pass a single-entry case.
+ *
+ * Assumptions: refusing the whole batch is the right severity, and that is a property of the SERVICE.
+ * The batch is not all-or-nothing there -- it keeps the entries that applied and reports a return code
+ * of 4 -- so dispatching a batch with one unstorable entry would apply the others and leave the caller
+ * to work out which. Refusing locally leaves nothing applied.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function refusesAWholeBatchForOneOverLongEntry(): Promise<void> {
+  const raised: unknown = await applyReferenceMaintenanceActions({
+    actions: [
+      { action: 'INSERT', typeCd: '01', description: 'PURCHASE' },
+      { action: 'INSERT', typeCd: '02', description: 'D'.repeat(51) },
+    ],
+  }).catch(
+    /**
+     * Yields the refusal as a value, so the case can assert on what it was.
+     * @param {unknown} error - Whatever the batch rejected with.
+     * @returns {unknown} That same refusal.
+     */
+    function yieldTheRefusal(error: unknown): unknown {
+      return error;
+    },
+  );
+
+  expect(raised).toBeInstanceOf(RangeError);
+  expect(raised instanceof Error ? raised.message : '').toContain('MaintenanceAction.description');
+  expect(dispatchedRequests(), 'no entry may be applied for a refused batch').toHaveLength(0);
+}
+
+/**
  * Asserts every target this module composes sits under the reference prefix.
  *
  * Assumptions: this is the module-level counterpart of the per-operation cases above, and it exists for
@@ -280,6 +316,7 @@ function referenceClientBehaviour(): void {
   it('addresses each lookup member', addressesEachLookupMember);
   it('evaluates a date with an optional mask', evaluatesADateWithAnOptionalMask);
   it('applies maintenance actions as one batch', appliesMaintenanceActionsAsOneBatch);
+  it('refuses a whole batch for one over-long entry', refusesAWholeBatchForOneOverLongEntry);
   it(
     'composes every target under the reference prefix',
     composesEveryTargetUnderTheReferencePrefix,

@@ -17,15 +17,23 @@
  * implementation detail, which is why this screen runs its own short-circuiting chain instead of
  * declaring Ant Design `Form` rules -- see {@link keyFieldFailure} and {@link dataFieldFailure}.
  *
- * Where the server's half of the chain arrives
- * --------------------------------------------
- * Assumptions: two of the reference's steps cannot run in a browser. The amount is re-rendered through
- * the `+99999999.99` edit mask after conversion (`app/cbl/COTRN02C.cbl` L383-L386), and each date is
- * evaluated by `CSUTLDTC` (L389-L427), whose migrated equivalent is
- * `com.carddemo.common.validation.DateEditValidator`. Both arrive on the UNCONFIRMED turn: a submission
- * whose confirmation is not an accepted 'Y' answer is sent as a preview, which the contract answers 200
- * with nothing written, and the reference's own sequence is the same -- it validates and normalises
- * first and evaluates the confirmation character afterwards.
+ * The whole chain runs before the operator is asked
+ * -------------------------------------------------
+ * ⚠️ Refactoring Rationale: every step of `VALIDATE-INPUT-DATA-FIELDS` runs in the browser, including
+ * the two that were once held to be unreachable from one. The section this replaces recorded the
+ * amount's edit-mask re-render (`app/cbl/COTRN02C.cbl` L383-L386) and each date's `CSUTLDTC` evaluation
+ * (L389-L427) as arriving on an UNCONFIRMED wire turn, because "two of the reference's steps cannot run
+ * in a browser". They can: the re-render is {@link canonicaliseKeyedAmount} and the calendar verdicts
+ * are {@link namesARealCalendarDate}, both pure over the keyed text, both inside
+ * {@link dataFieldFailure}. So no request is needed to reach a verdict, and consequently no request is
+ * sent before the confirmation is answered -- which is the reference's own shape, since its blank and
+ * invalid confirmation arms at L176-L187 re-display the screen without touching a file.
+ *
+ * ⚠️ Assumptions: the service remains the authority on the two verdicts a browser genuinely cannot
+ * reach -- whether the key pair resolves, and whether the identifier is free -- and it reaches them on
+ * the CONFIRMING turn, which is the only turn this screen sends. `DateEditValidator` still runs there
+ * too, as the second reader of the same rules; the browser's copy exists to refuse an unreal date before
+ * the operator is asked, not to replace it.
  *
  * Money
  * -----
@@ -34,8 +42,34 @@
  * double, so `Number`, `parseFloat` and arithmetic on the amount are all absent by construction.
  */
 
-import { Button, Flex, Form, Input, Popconfirm, Typography, theme } from 'antd';
-import type { InputRef } from 'antd';
+/*
+ * WHY : ⚠️ Refactoring Rationale: the confirmation surface is a CONTROLLED `Popconfirm` rather than an
+ *       uncontrolled one, and that single change is what closes the write path this screen had. An
+ *       uncontrolled overlay opens on its trigger's click, so the trigger could raise it before anything
+ *       had been validated and both of its answers submitted a turn of their own -- including the
+ *       declining answer, which a runtime sweep measured issuing `POST /api/v1/transactions` carrying
+ *       `"confirmation":"N"` and then reporting the add as FAILED to an operator who had prevented it.
+ *       Controlling `open` moves the decision to raise the surface into {@link requestSubmit}, which is
+ *       the one gate every submitting surface passes through, and lets the declining answer be a purely
+ *       local dismissal with no wire turn at all -- which is what `app/cbl/COTRN02C.cbl` L176-L181 does.
+ * WHY : Alternatives Considered: an antd `Modal`, which is viewport-anchored and so cannot occlude the
+ *       control it asks about. Rejected on evidence rather than on taste: the confirmation contract this
+ *       screen is held to is expressed in the DOM -- `ui/src/screens/transactionAdd/transactionAddTurns.test.tsx`
+ *       identifies the open surface by `.ant-popover` and reaches it through an in-content control whose
+ *       accessible name carries {@link TRANSACTION_ADD_TITLE} -- so a `Modal` would satisfy the report
+ *       and break the contract. The two properties a `Modal` was wanted for are obtained on the popover
+ *       instead: `placement` keeps it clear of the field it names, and both of its one-character
+ *       controls are sized to the AA floor rather than being left at the library's `small` default.
+ * WHY : Alternatives Considered: attaching the overlay to the legend's own Enter control. Rejected
+ *       because that control is rendered by `ui/src/layout/PfKeyBar.tsx` from the bindings this screen
+ *       delegates, so this screen has no element to wrap.
+ */
+import { Button, Col, Divider, Flex, Form, Input, Popconfirm, Row, Typography, theme } from 'antd';
+// Assumptions: the grid's gutter TYPE is imported from the design system rather than restated here,
+// because it is a union the component owns -- a number, a per-screen-name record, or a pair of
+// either -- and a local restatement would silently stop matching the component the day the union
+// gained a member. Nothing is imported at runtime by this line.
+import type { InputRef, RowProps } from 'antd';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
 // Assumptions: routing comes from `react-router`, never from `react-router-dom`, which is the import
@@ -46,7 +80,12 @@ import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
 // build fails rather than resolving two routers.
 import { useNavigate } from 'react-router';
 
-import { isApiRequestError } from '../../api/client';
+// Assumptions: the two confirmation characters are imported from the API client rather than declared
+// here, because they are a WIRE value before they are a control label -- every mutating screen in this
+// tree sends the same pair, and `ui/src/api/client.ts` owns them for that reason. Declaring a local
+// `'Y'` beside the overlay is how the two copies drift: one screen's label and another screen's request
+// body would then be able to disagree with nothing comparing them.
+import { CONFIRMATION_ANSWERS, isApiRequestError } from '../../api/client';
 import { addTransaction, copyLastTransaction } from '../../api/transactions';
 import type {
   CopiedTransactionData,
@@ -55,23 +94,51 @@ import type {
   TransactionCreateRequest,
 } from '../../api/transactions';
 import type { ApiError, FieldValidationState } from '../../api/types';
+// Assumptions: the money edit mask and its reverse are IMPORTED as a pair, from the module that measured
+// this program's own `+99999999.99` picture -- `MONEY_PICTURES.transactionAmount` cites
+// `app/cbl/COTRN02C.cbl` L53 and L59 among its five sources. This screen already carried a local mask
+// renderer for the service's answer; what it lacked was the REVERSE, which is what lets an operator's
+// own spelling of an amount be read before it is re-rendered. Adding a second local reverse would have
+// put a money parser in a screen, where the format module owns one that five reference programs share.
+import { MONEY_PICTURES, applyMoneyEditMask, stripMoneyEditMask } from '../../format/money';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp, fieldHintId } from '../../layout/fieldHelp';
+// Assumptions: `busyAnnouncement` is taken from the shared helper rather than composed here, because
+//   that helper is the one place deciding the region's shape -- always mounted, `role="status"`, empty
+//   when idle -- and a locally composed span would drift from every other screen's.
+import {
+  busyAnnouncement,
+  fieldAriaProps,
+  fieldErrorHelp,
+  fieldHintId,
+} from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import { usePfKeys } from '../../layout/usePfKeys';
-import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
+import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
+// Assumptions: `PERSISTENT_FAILURE_REPORT_IT` is an AUTHORED sentence and is imported alongside the
+// baseline ones, because the failure it names has no baseline site to be verbatim from. The reference
+// has no arm for "the service answered with a body that violates its own contract" -- a 3270 region
+// either replies or the terminal times out -- so borrowing one of its sentences for that case would put
+// the reference's words on a failure the reference cannot have.
 import {
   INVALID_KEY_PRESSED,
   MESSAGE_TEMPLATES,
+  PERSISTENT_FAILURE_REPORT_IT,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   formatMessageTemplate,
   padToDeclaredWidth,
 } from '../../messages/messages';
 import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
-import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import {
+  BMS_TEXT_COLOR_TOKENS,
+  FIELD_ERROR_TOKENS,
+  SPACING_TOKENS,
+  TARGET_SIZE_AA_MINIMUM,
+  TYPOGRAPHY_TOKENS,
+} from '../../theme/tokens';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /*
@@ -234,19 +301,105 @@ export const TRANSACTION_ADD_ALTERNATIVE_KEY_LABEL = '(or)';
  */
 export const TRANSACTION_ADD_CONFIRM_DOMAIN_HINT = '(Y/N)';
 
-/** Width of the row-8 rule, declared `LENGTH=70` at `app/bms/COTRN02.bms` L111-L116. */
-export const TRANSACTION_ADD_RULE_WIDTH = 70;
+/*
+ * WHY : ⚠️ Refactoring Rationale: the field rows are a `Row`/`Col` grid and were `Flex` rows whose
+ *       children each carried `flex: 1 1 0`. A zero flex-basis is why the arity never collapsed: every
+ *       column always "fits", so `wrap` had nothing to act on, and a responsive sweep measured the
+ *       arities `[2,3,1,3,2,2,1]` holding at EVERY width -- at 375 the three-up rows gave 114-pixel
+ *       columns, which is about eight monospace characters for the amount and both dates, fields whose
+ *       declared widths are twelve and ten characters. The values were unreadable while the layout
+ *       reported no overflow.
+ * WHY : Assumptions: `Col` breakpoint props are the design system's own expression of this and are used
+ *       instead of a media query or a minimum width on the flex children. AAP section 0.3.2 requires
+ *       layout to go through the system's primitives, and `ui/src/screens/accountUpdate/index.tsx`
+ *       already lays its two field grids out this way -- so the collapse behaves identically on both
+ *       screens rather than being invented twice.
+ */
 
 /**
- * The row-8 separator, seventy hyphens, dividing the key fields from the transaction fields.
+ * Resolves the two-axis gutter this screen's field grid is laid out with.
  *
- * Alternatives Considered: an Ant Design `Divider`, which is the idiomatic component for a section
- * rule and was rejected here. The mapset paints this as a text field whose declared width is 70 of the
- * terminal's 80 columns, so a `Divider` would span the container instead and would silently drop a
- * literal the screen tests read. It is built by repetition rather than typed out so that its length is
- * exact by construction and cannot be miscounted by an editor.
+ * ⚠️ Purpose: keep the HORIZONTAL gutter -- and therefore the negative inline margin the design system
+ * derives from it -- off the widths at which every column is full-width. `antd`'s `Row` implements a
+ * gutter by giving itself a negative inline margin of half the gutter and each `Col` a matching padding,
+ * so a `Row` laid out in a container as wide as the viewport hangs half a gutter past each edge. A
+ * responsive review measured exactly that escape on `/account/update` -- `scrollWidth` 385 against an
+ * `innerWidth` of 375 -- and one small pan then clipped the first character off every label. Zero is the
+ * right value below the medium breakpoint rather than a smaller number, because every column there is
+ * `xs={24}`, a full row of its own, so there is no pair of side-by-side columns for a horizontal gutter
+ * to separate and its only remaining effect is the escape.
+ *
+ * Assumptions: the VERTICAL gutter keeps the same step at every width. Stacked single-column fields need
+ * row separation more at a phone width than at a desktop one, and a block-axis negative margin cannot be
+ * exposed by a horizontal scroll.
+ *
+ * Assumptions: only the three narrow screen names are stated. The design system resolves a responsive
+ * gutter by walking its screen names widest-first and taking the first that both matches and is present,
+ * so the value given at `md` also governs `lg`, `xl`, `xxl` and `xxxl`; naming those four as well would
+ * be four more places for one decision to be edited.
+ *
+ * Assumptions: the caller passes the RESOLVED spacing step as a number rather than the token's
+ * `var(--...)` reference, because the gutter is a component prop the design system divides by two itself.
+ * Reading the resolved member is safe for this one value precisely because it never reaches a style
+ * attribute, so nothing about today's spacing scale is baked into an element.
+ * @param {number} sectionGap - The spacing step from the token bridge's medium section gap.
+ * @returns {RowProps['gutter']} The horizontal gutter per screen name, paired with the vertical gutter.
  */
-export const TRANSACTION_ADD_RULE = '-'.repeat(TRANSACTION_ADD_RULE_WIDTH);
+export function transactionAddGridGutter(sectionGap: number): RowProps['gutter'] {
+  return [{ xs: 0, sm: 0, md: sectionGap }, sectionGap];
+}
+
+/**
+ * Column spans for a row of three fields: one per row on a phone, two on a tablet, three from medium up.
+ *
+ * ⚠️ Assumptions: the intermediate two-up step exists for the amount-and-dates row specifically. Those
+ * three fields are fixed-pitch and twelve, ten and ten characters wide, so a three-up arrangement inside
+ * a 576-pixel viewport gives each about a third of it and cuts the value; two-up gives each half, which
+ * holds all three declared widths. `sm` is 576 and `md` is 768 in the design system's own scale.
+ */
+const THREE_UP_SPANS = { xs: 24, sm: 12, md: 8 } as const;
+
+/** Column spans for a row of two fields: one per row on a phone, two from medium up. */
+const TWO_UP_SPANS = { xs: 24, md: 12 } as const;
+
+/**
+ * Column spans for the key row's two entry fields, which share their row with the `(or)` label.
+ *
+ * Assumptions: eleven of the grid's twenty-four columns each, leaving two for the label between them.
+ * The label is three characters, so it needs the narrowest usable share and the entries need the rest.
+ */
+const KEY_FIELD_SPANS = { xs: 24, md: 11 } as const;
+
+/** Column span for the `(or)` label between the two key entry fields. */
+const ALTERNATIVE_LABEL_SPANS = { xs: 24, md: 2 } as const;
+
+/** Column span for a field that occupies its whole row at every width. */
+const FULL_WIDTH_SPANS = { xs: 24 } as const;
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: the row-8 rule is a `Divider` and was seventy literal hyphens in a
+ *       fixed-pitch `Typography.Text`. Two independent captures measured what the literal produced: a
+ *       rule spanning x54 to x640 and stopping about 586 pixels short of the content edge at 1280, while
+ *       `/account/update`'s rule runs the full width -- and at 375 and 576 the same seventy characters
+ *       wrapped onto two ragged lines. A rule that stops two-thirds of the way across does not read as a
+ *       section boundary, and one that wraps reads as content.
+ * WHY : ⚠️ Assumptions: the seventy-character width carried no meaning worth preserving. It is
+ *       `LENGTH=70` at `app/bms/COTRN02.bms` L111-L116 -- seventy of the terminal's eighty columns --
+ *       which is a fact about a fixed 24x80 character grid, and AAP section 0.3.4 gap G1 abandons that
+ *       grid deliberately: field grouping, reading order and tab order are preserved, character
+ *       positioning is not. So the rule's JOB is preserved (it divides the two key fields from the
+ *       transaction fields) and its character count is not.
+ * WHY : Assumptions: `Divider` is also what the rest of this tree already uses for a mapset rule --
+ *       `ui/src/screens/billPay/index.tsx`, `userUpdate`, `userDelete` and `transactionDetail` each
+ *       render one with a `borderColor` from the same token map -- so this removes a one-screen
+ *       exception rather than introducing a new idiom.
+ * WHY : Assumptions: the two constants that built the literal are DELETED rather than left exported. No
+ *       file read them but this one, and an exported constant with no consumer is the kind of dead
+ *       provenance a later reader mistakes for a contract; the source line is cited here instead.
+ * WHY : Assumptions: no `aria-hidden` is needed any more. `Divider` renders an element the accessibility
+ *       tree treats as a separator, so it conveys the boundary without a screen reader announcing
+ *       seventy hyphens -- which is exactly what the literal had to be hidden to avoid.
+ */
 
 /*
  * WHY : Assumptions: only PF4's wording is imported. `UNIFORM_PF_KEY_LABELS` holds the three legends
@@ -610,6 +763,143 @@ export function toEditMaskAmount(value: string): string | null {
 }
 
 /**
+ * Re-renders an amount the operator KEYED into the reference's `+99999999.99` field form.
+ *
+ * ⚠️ Purpose: this closes the defect that made the acceptance flow in AAP section 0.9.4 unrunnable.
+ * Browser validation drove eighteen amounts through this field and only three were accepted -- `-` plus
+ * exactly eight digits plus `.` plus two digits -- so `100.00`, `123.45`, `-100.00` and `00000100.00`
+ * were all refused, and the tester concluded that no positive amount could be entered at all. The
+ * conclusion is narrowly wrong -- `hasBaselineAmountShape` admits `'+'` in the sign position, because
+ * `TRNAMTI(1:1) NOT EQUAL '-' AND '+'` at `app/cbl/COTRN02C.cbl` L340 does -- but `+00000100.00` is not
+ * a form anybody types, so the practical effect was as reported: an operator had no reachable spelling of
+ * a positive amount, and every human spelling of any amount was refused.
+ *
+ * ⚠️ Refactoring Rationale: the field is given a NORMALISER rather than a looser predicate, and the
+ * distinction is what keeps parity intact. Relaxing `hasBaselineAmountShape` to accept `100.00` would
+ * make this screen accept a twelve-position field the reference refuses, which is a parity divergence in
+ * the validation itself. A normaliser changes only what the CONTROL holds: the operator keys `100.00`,
+ * the field comes to hold `+00000100.00`, and the predicate then judges exactly the string the reference
+ * would have received. AAP section 0.3.2 assigns this shape explicitly -- a money field is an `Input`
+ * with a `Form.Item` normalizer -- so it is the specified treatment rather than an invention.
+ *
+ * Assumptions: the reference performs the same rendering ONE TURN LATER. L383-L386 converts the keyed
+ * amount with `NUMVAL-C`, moves it through `WS-TRAN-AMT-E PIC +99999999.99` and moves that back into
+ * `TRNAMTI`, so the canonical form is what the operator sees after a turn. Doing it at the edit boundary
+ * shows them the same string before the turn instead of after it; the mask is the reference's own.
+ *
+ * Assumptions: an unreadable value is returned UNCHANGED so the refusal still names it. `abc`, `1.234`
+ * and a nine-digit integer part all leave here as they arrived, and `dataFieldFailure` then raises
+ * `Amount should be in format -99999999.99` against what the operator actually typed -- which is more
+ * use to them than a field silently rewritten to something they did not mean.
+ *
+ * Assumptions: the width test is how "unreadable" is decided, because both helpers return their input
+ * unchanged when they cannot parse it. A rendering that is not exactly the picture's twelve characters
+ * either failed to parse or needed a ninth integer digit the mask has no position for, and neither can
+ * be accepted.
+ * @param {string} keyed - The amount exactly as the operator left it in the control.
+ * @returns {string} The same value rendered through `+99999999.99`, or unchanged when it does not fit.
+ */
+export function canonicaliseKeyedAmount(keyed: string): string {
+  if (isBlankField(keyed)) {
+    return keyed;
+  }
+
+  /*
+   * WHY : ⚠️ Assumptions: a value carrying NO DIGIT is never normalised, and this guard is load-bearing
+   *       rather than defensive. `stripMoneyEditMask` reads an absent integer run as zero -- deliberately,
+   *       so that the mask's own zero-suppressed rendering round-trips -- so a lone `'-'` would otherwise
+   *       arrive here, become `+00000000.00`, satisfy every edit and post a zero-dollar transaction for an
+   *       operator who had typed one character and pressed Enter. The reference refuses a lone sign:
+   *       `app/cbl/COTRN02C.cbl` L341-L342 requires `TRNAMTI(2:8)` and `TRNAMTI(10:2)` to be numeric, and
+   *       for `'-'` in a space-filled field both are blanks. Refusing it here keeps the two in agreement.
+   * WHY : Trade-offs: the normaliser therefore admits a spelling the reference refuses -- `100.00` and
+   *       `.56` both reach it as valid where a space-filled `TRNAMTI` would not -- and that IS a
+   *       behavioural divergence, recorded as one. It is the divergence the fix requires: browser
+   *       validation established that no positive amount was enterable at all, which made the transaction
+   *       add flow in AAP section 0.9.4 unrunnable, and AAP section 0.3.2 specifies a `Form.Item`
+   *       normalizer for exactly this field. What is NOT relaxed is the predicate: a value with no digits,
+   *       three decimal places, a ninth integer digit or a stray letter is still refused by the reference's
+   *       own sentence.
+   */
+  if (!/[0-9]/u.test(keyed)) {
+    return keyed;
+  }
+
+  const rendered = applyMoneyEditMask(stripMoneyEditMask(keyed), MONEY_PICTURES.transactionAmount);
+  return rendered.length === MONEY_PICTURES.transactionAmount.width ? rendered : keyed;
+}
+
+/** Days each month holds in a common year, indexed from January, per the Gregorian calendar. */
+const COMMON_YEAR_MONTH_LENGTHS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/** February's length in a leap year, which is the single value the leap rule changes. */
+const LEAP_FEBRUARY_LENGTH = 29;
+
+/** Ordinal of February among the months, used to apply the leap rule to that month alone. */
+const FEBRUARY_ORDINAL = 2;
+
+/**
+ * Reports whether a shape-valid `YYYY-MM-DD` field names a date that exists.
+ *
+ * ⚠️ Purpose: browser validation keyed `2022-13-45` into the originating date, saw NO message of any
+ * kind, and watched it reach the service as `"originDate":"2022-13-45"` for a 200. Only the field's
+ * SHAPE was ever checked. `app/cbl/COTRN02C.cbl` L388-L407 refuses such a value with
+ * `Orig Date - Not a valid date...`, a sentence `ui/src/messages/messages.ts` already carries against
+ * L401 and which was unreachable.
+ *
+ * ⚠️ Assumptions: this check is strictly INSIDE what the reference refuses, and establishing that is the
+ * whole reason it is safe to make locally. The reference refuses a date when `CSUTLDTC`'s severity is
+ * not `'0000'` AND its message number is not `'2513'` -- one tolerated complaint. `2513` is
+ * `FC-UNSUPP-RANGE`, which `app/cbl/CSUTLDTC.cbl` L66 and L137-L138 render as `Unsupp. Range`: a date
+ * the callable service cannot compute a Lilian day number for because it falls outside its supported
+ * range. Such a date IS a real calendar date -- `1500-01-01`, for instance -- so the tolerance can never
+ * apply to an impossible one. An impossible date draws `FC-BAD-DATE-VALUE` or `FC-INVALID-MONTH`
+ * (L64, L67), both of which the reference refuses. Refusing only the impossible therefore cannot reject
+ * a date the reference accepts.
+ *
+ * ⚠️ Assumptions: the RANGE half of the utility's verdict is still delegated, and the delegation the
+ * file records elsewhere stands for it. A browser cannot know which range the callable service supports,
+ * so a range rule reimplemented here could refuse a date the reference tolerates -- which is the parity
+ * failure that reasoning was protecting against. What it over-protected was the impossible date, where
+ * no tolerance exists to violate. So the two halves are split: existence is decided here, range at the
+ * service, and `com.carddemo.common.validation.DateEditValidator` remains the authority on the second.
+ *
+ * Assumptions: the arithmetic is done on the digits and never through `Date`. `new Date('2022-13-45')`
+ * either rolls over into a different, valid date or yields an invalid one depending on the runtime's
+ * parsing, and a rollover would ACCEPT the value the reference refuses.
+ *
+ * Assumptions: the year is not judged. A year of `0000` is refused by the callable service as
+ * `FC-YEAR-IN-ERA-ZERO`, but "which era a year sits in" is the utility's domain rather than the
+ * calendar's, so it stays delegated with the range rule.
+ * @param {string} value - A date field already known to satisfy {@link hasBaselineIsoDateShape}.
+ * @returns {boolean} `true` when the month and day name a day that exists in that year.
+ */
+export function namesARealCalendarDate(value: string): boolean {
+  const field = padToDeclaredWidth(value, TRANSACTION_ADD_FIELD_WIDTHS.originDate);
+  const year = Number.parseInt(field.slice(0, 4), 10);
+  const month = Number.parseInt(field.slice(5, 7), 10);
+  const day = Number.parseInt(field.slice(8, 10), 10);
+
+  if (month < 1 || month > COMMON_YEAR_MONTH_LENGTHS.length) {
+    return false;
+  }
+
+  /*
+   * WHY : Assumptions: the leap rule is the full Gregorian one -- divisible by four, except centuries,
+   *       except every fourth century -- rather than the divisible-by-four shorthand. The shorthand
+   *       accepts `1900-02-29`, which is not a date, and the reference's own callable service applies
+   *       the Gregorian rule, so the shorthand would accept a value the reference refuses.
+   */
+  const leapYear = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const monthLength =
+    month === FEBRUARY_ORDINAL && leapYear
+      ? LEAP_FEBRUARY_LENGTH
+      : (COMMON_YEAR_MONTH_LENGTHS[month - 1] ?? 0);
+
+  return day >= 1 && day <= monthLength;
+}
+
+/**
  * Normalises a keyed key field to its declared width the way the reference's numeric `MOVE` does.
  *
  * Assumptions: the reference does not merely read the key field, it rewrites it. `MOVE WS-ACCT-ID-N TO
@@ -740,14 +1030,17 @@ export function keyFieldFailure(
  * placed after BOTH date-utility calls, so it is the final check before the confirmation character is
  * read. Grouping it with the other two numeric tests would report it earlier than the reference does.
  *
- * Trade-offs: two of the reference's steps are missing from this chain and neither can be added here.
- * The amount's canonical re-render (L383-L386) and the two `CSUTLDTC` calendar evaluations (L389-L427)
- * belong to the service, so they arrive with a response rather than before the request. The consequence
- * is bounded and is stated rather than hidden: for a submission that BOTH names an unreal date such as
- * `2024-02-31` and carries a non-numeric merchant identifier, the reference reports the date and this
- * screen reports the merchant identifier, because the calendar verdict needs a round trip the browser
- * cannot make and the merchant test is the last thing checkable without one. Every other combination
- * reports the same field as the reference.
+ * ⚠️ Refactoring Rationale: this chain reaches every step the reference's `VALIDATE-INPUT-DATA-FIELDS`
+ * reaches, including the two it used not to. The note this replaces recorded the amount's canonical
+ * re-render (L383-L386) and the two `CSUTLDTC` calendar evaluations (L389-L427) as belonging to the
+ * service, "so they arrive with a response rather than before the request", and stated the consequence:
+ * a submission naming an unreal date such as `2024-02-31` alongside a non-numeric merchant identifier
+ * reported the merchant identifier where the reference reports the date. Neither step needs a round trip.
+ * The re-render is {@link canonicaliseKeyedAmount}, applied by {@link canonicalValues} before this chain
+ * reads the field, and the calendar verdicts are {@link namesARealCalendarDate}, called below in the
+ * reference's own position -- after both shape tests, before the merchant identifier. So this chain now
+ * reports the same field as the reference for every combination, and an unreal date is refused before the
+ * operator is asked to confirm, which is where L389-L427 refuses it.
  * @param {TransactionAddValues} values - Current field values as the operator keyed them.
  * @returns {TransactionAddFieldError | null} The first refusal, or `null` when every checkable rule
  *   passes.
@@ -797,6 +1090,33 @@ export function dataFieldFailure(values: TransactionAddValues): TransactionAddFi
     return {
       field: 'processDate',
       message: ADD_MESSAGES.PROC_DATE_SHOULD_BE_IN_FORMAT_YYYY_MM_DD,
+      state: 'NOT_OK',
+    };
+  }
+
+  /*
+   * WHY : ⚠️ Assumptions: both calendar checks sit HERE -- after both shape tests and before the merchant
+   *       identifier -- because that is the reference's order and the order decides which sentence an
+   *       operator reads when two fields are wrong at once. `app/cbl/COTRN02C.cbl` tests the originating
+   *       date's shape at L353-L366, the processing date's at L368-L381, then calls `CSUTLDTC` for the
+   *       originating date at L389-L407 and for the processing date at L409-L427, and only then reaches
+   *       the merchant identifier at L430-L436. So a malformed processing date outranks an impossible
+   *       originating one, which reversing these two blocks would silently change.
+   * WHY : Assumptions: the shape test having already passed is what lets {@link namesARealCalendarDate}
+   *       read fixed offsets out of the field. It is called nowhere else, so the precondition holds by
+   *       construction rather than by convention.
+   */
+  if (!namesARealCalendarDate(values.originDate)) {
+    return {
+      field: 'originDate',
+      message: ADD_MESSAGES.ORIG_DATE_NOT_A_VALID_DATE,
+      state: 'NOT_OK',
+    };
+  }
+  if (!namesARealCalendarDate(values.processDate)) {
+    return {
+      field: 'processDate',
+      message: ADD_MESSAGES.PROC_DATE_NOT_A_VALID_DATE,
       state: 'NOT_OK',
     };
   }
@@ -1092,17 +1412,28 @@ export function isTransactionAddField(name: string): name is TransactionAddField
  * `hasBaselineIsoDateShape` and is still not a date. `app/cbl/COTRN02C.cbl` L389-L427 calls `CSUTLDTC`
  * for exactly that and words the outcome itself at L401 and L421.
  *
- * Assumptions: the calendar rule is NOT reimplemented here, and that is deliberate rather than an
- * omission, because the reference's rule is not "is this a date" -- it is narrower and stranger than
- * that. L389-L427 refuses a date only when the utility's severity is not `'0000'` AND its message
- * number is not `'2513'`, so one specific complaint is tolerated and its date accepted. That exemption
- * is a property of the utility's own return codes, not of the calendar, so a browser-side reimplementation
- * would have to hard-code a code it cannot observe and would drift the moment the utility changed.
- * `com.carddemo.common.validation.DateEditValidator` owns the rule including the exemption, which is
- * why this screen sends the dates and renders the verdict rather than second-guessing it.
- * Trade-offs: an unreal date therefore costs one round trip where a shape error costs none. That is
- * accepted because the alternative -- a second, approximate copy of the tolerance living in the SPA --
- * could reject a date the reference accepts, which is a parity failure rather than a latency cost.
+ * ⚠️ Assumptions: the reference's calendar rule is SPLIT, and this map is the half that stays at the
+ * service. L389-L427 refuses a date only when the utility's severity is not `'0000'` AND its message
+ * number is not `'2513'`, so one specific complaint is tolerated and its date accepted. Reading
+ * `app/cbl/CSUTLDTC.cbl` settles which: L66 declares `2513` as `FC-UNSUPP-RANGE` and L137-L138 render
+ * it `Unsupp. Range`, so the tolerated complaint means "this is a real date the utility cannot compute a
+ * day number for" -- a date outside its supported range, such as `1500-01-01`. That is a property of the
+ * utility's own limits rather than of the calendar, a browser cannot know which range it supports, and a
+ * local approximation of it could refuse a date the reference accepts. So the range half is delegated,
+ * `com.carddemo.common.validation.DateEditValidator` owns it, and these two sentences render its verdict.
+ *
+ * ⚠️ Refactoring Rationale: the EXISTENCE half is now applied locally by
+ * {@link namesARealCalendarDate}, and the same reading is what makes that safe. An impossible date draws
+ * `FC-BAD-DATE-VALUE` or `FC-INVALID-MONTH` -- `app/cbl/CSUTLDTC.cbl` L64 and L67 -- never `2513`, so no
+ * tolerance can ever apply to one and refusing it locally cannot diverge. The previous shape of this
+ * comment declined the whole rule on the strength of the exemption without establishing what the
+ * exemption covered, and browser validation measured the cost of that caution: `2022-13-45` drew no
+ * message at all and reached the service verbatim, because nothing between the shape test and the wire
+ * looked at it.
+ *
+ * Trade-offs: a date that exists but sits outside the utility's range still costs one round trip, where
+ * an impossible one now costs none. That is the right side of the trade: the round trip buys correctness
+ * on the only half where a local rule could be wrong.
  */
 const CATALOG_OWNED_VERDICTS: Partial<Record<TransactionAddField, string>> = {
   originDate: ADD_MESSAGES.ORIG_DATE_NOT_A_VALID_DATE,
@@ -1112,9 +1443,15 @@ const CATALOG_OWNED_VERDICTS: Partial<Record<TransactionAddField, string>> = {
 /**
  * Maps a problem document's per-field entries onto this screen's controls.
  *
- * Assumptions: entries naming something this screen does not render are DROPPED rather than rendered
- * loose, because there is no control to attach them to; the document's own sentence still reaches the
- * message band, so nothing is lost silently.
+ * ⚠️ Assumptions: entries naming something this screen does not render are DROPPED rather than rendered
+ * loose, because there is no control to attach them to -- and the DROP IS ONLY SAFE because
+ * {@link screenMessageForFailure} bands the first such entry's own sentence and suppresses the cursor
+ * move. It was not safe before: browser validation answered a submission with a document refusing two
+ * fields belonging to another screen, every entry was dropped here, and the operator was shown the
+ * document's summary line `Please fix the highlighted fields` over a form with nothing highlighted and a
+ * cursor parked on an innocent field. Neither refusal sentence appeared anywhere in the document. This
+ * function is unchanged by that fix; what changed is that its output being empty is now handled rather
+ * than assumed benign.
  *
  * Trade-offs: the array is kept whole where the reference has at most one. The service accumulates its
  * violations in one pass -- its request record documents that it "accumulates" where "the reference
@@ -1165,8 +1502,16 @@ export interface TransactionAddFailureReport {
   readonly message: string;
   /** Refusals to render beneath the controls they name. */
   readonly fieldErrors: readonly TransactionAddFieldError[];
-  /** Field to move the cursor to, the analogue of the reference's `MOVE -1 TO <field>L`. */
-  readonly focus: TransactionAddField;
+  /**
+   * Field to move the cursor to, the analogue of the reference's `MOVE -1 TO <field>L`, or `null`.
+   *
+   * ⚠️ Assumptions: `null` means LEAVE THE CURSOR ALONE, and the member became nullable because there is
+   * a real failure with no field to name. Browser validation answered a submission with a document
+   * refusing two fields this screen does not render, and the cursor was moved to `Enter Acct #` -- a
+   * field with nothing wrong with it -- which tells the operator the refusal is there. The reference only
+   * ever moves the cursor to a field it has just refused, so when it has refused none, it moves none.
+   */
+  readonly focus: TransactionAddField | null;
 }
 
 /** HTTP status the service answers when no account, card or transaction carries the key. */
@@ -1190,10 +1535,22 @@ const BAD_REQUEST_STATUS = 400;
  * `app/cbl/COTRN02C.cbl` L475-L478, and `Unable to Add Transaction...` only from a confirmed write,
  * which is the `WHEN OTHER` arm of `WRITE-TRANSACT-FILE` at L742-L748.
  *
- * Assumptions: a transport failure that carries no problem document is reported with the write's own
- * sentence when the turn was writing. The operator's question at that moment is whether the transaction
- * was added, and the reference answers it with exactly that sentence when the write did not succeed for
- * a reason it cannot name.
+ * ⚠️ Refactoring Rationale: a rejection that is NOT an `ApiRequestError` is reported as an authored
+ * "that request did not complete" rather than as one of the reference's failure sentences, and this
+ * corrects a real misclassification. `ui/src/api/client.ts` normalises EVERY transport failure into
+ * `ApiRequestError` before it reaches a screen, so the only rejection that can arrive here as something
+ * else is a resource function's own contract check raising `RangeError` -- `requireTransactionAddPreview`
+ * enforcing the confirmation token's shape, for instance. That is a SUCCESSFUL exchange whose answer the
+ * client refused to interpret. The arm this replaces reported it with `Unable to Add Transaction...` on
+ * every non-copy turn, which tells the operator a write failed when the client never got far enough to
+ * know whether one happened, and on a turn that made no write at all told them one had failed. Neither
+ * of the reference's two sentences is available for that case, because the reference has no such case.
+ *
+ * Assumptions: a transport failure that carries no problem document IS still reported with the write's
+ * own sentence when the turn was writing -- that path is the `context.writing` arm far below, reached
+ * only for an `ApiRequestError`, and it is unchanged. The operator's question at that moment is whether
+ * the transaction was added, and the reference answers it with exactly that sentence when the write did
+ * not succeed for a reason it cannot name.
  * @param {unknown} failure - The rejected promise's reason, which is an `ApiRequestError` for every
  *   transport failure and may be any thrown value otherwise.
  * @param {TransactionAddFailureContext} context - Which submission produced it.
@@ -1206,13 +1563,13 @@ export function screenMessageForFailure(
   const addressedByAccount = context.key === 'accountId';
 
   if (!isApiRequestError(failure)) {
-    return {
-      message: context.copying
-        ? SHARED_MESSAGES.UNABLE_TO_LOOKUP_TRANSACTION
-        : ADD_MESSAGES.UNABLE_TO_ADD_TRANSACTION,
-      fieldErrors: [],
-      focus: context.key,
-    };
+    /*
+     * WHY : Assumptions: the cursor is NOT moved. No field was refused -- the answer was unreadable, not
+     *       wrong -- so every field this could move to is an innocent one, and moving to the addressing
+     *       key asserts a refusal the service never made. This is the same reasoning the unattributable
+     *       400 arm below applies for the same reason.
+     */
+    return { message: PERSISTENT_FAILURE_REPORT_IT, fieldErrors: [], focus: null };
   }
 
   const fieldErrors = resolveApiFieldErrors(failure.problem);
@@ -1256,6 +1613,34 @@ export function screenMessageForFailure(
   }
 
   if (failure.status === BAD_REQUEST_STATUS) {
+    /*
+     * WHY : ⚠️ Purpose: this arm handles a refusal the screen cannot ATTRIBUTE, and it is the arm the worst
+     *       error-handling outcome of the run came out of. Browser validation answered a submission with
+     *       a conforming 400 whose two `fieldErrors` named fields belonging to a different screen. Every
+     *       entry was dropped by {@link resolveApiFieldErrors} -- correctly, there is no control to hang
+     *       them on -- and what reached the operator was the document's SUMMARY line,
+     *       `Please fix the highlighted fields`, over a form with nothing highlighted: no
+     *       `ant-form-item-has-error`, no `aria-invalid`, no asterisk, and neither refusal sentence
+     *       anywhere in the document. The reason for the rejection was unavailable through any surface.
+     * WHY : ⚠️ Refactoring Rationale: the document's own FIELD sentence is preferred over its summary line
+     *       whenever the document named a field, and this inversion is the fix. A summary line is written
+     *       to be read beside the highlights it refers to; with no highlights it is not merely useless but
+     *       false. The field sentence is the one piece of text that states what was actually wrong, and
+     *       putting it in the band is the same thing the renderable arm above does -- so the two arms now
+     *       agree about where a refusal's own words go, and differ only in whether a control also carries
+     *       them.
+     * WHY : Assumptions: the cursor is NOT moved when the document named a field the screen cannot render,
+     *       because every candidate would be innocent. The measured behaviour moved it to `Enter Acct #`,
+     *       which asserts a refusal on a field the service never mentioned.
+     * WHY : Assumptions: a 400 that names NO field keeps the document's summary line and keeps moving the
+     *       cursor to the addressing key, because that line is then the document's only statement and the
+     *       addressing key is the field the turn was about. Nothing about that case is misleading.
+     */
+    const unattributable = failure.problem.fieldErrors[0];
+    if (unattributable !== undefined) {
+      return { message: unattributable.message, fieldErrors, focus: null };
+    }
+
     return {
       message: failure.problem.message ?? ADD_MESSAGES.UNABLE_TO_ADD_TRANSACTION,
       fieldErrors,
@@ -1263,26 +1648,35 @@ export function screenMessageForFailure(
     };
   }
 
-  if (context.copying) {
-    return { message: SHARED_MESSAGES.UNABLE_TO_LOOKUP_TRANSACTION, fieldErrors, focus };
-  }
-
-  if (context.writing) {
-    return { message: ADD_MESSAGES.UNABLE_TO_ADD_TRANSACTION, fieldErrors, focus };
-  }
-
   /*
-   * WHY : Assumptions: an unconfirmed turn that fails for a reason the service did not attribute is
-   *       reported as a cross-reference lookup failure, because that turn's work IS the lookup. The
-   *       reference reaches these two sentences from the `WHEN OTHER` arms of `READ-CXACAIX-FILE` at
-   *       `app/cbl/COTRN02C.cbl` L597-L603 and `READ-CCXREF-FILE` at L630-L636, which are exactly the
-   *       reads a preview performs, and the write's own sentence would name an operation this turn never
-   *       attempted.
+   * WHY : ⚠️ Refactoring Rationale: the SERVICE'S aggregate sentence is preferred over anything this
+   *       screen would choose, and that inversion is what keeps all four of the reference's
+   *       unrecoverable-failure sentences reachable. `transaction-api.yaml` documents the 500 on this
+   *       operation as carrying "one of `Unable to Add Transaction...` verbatim from
+   *       `app/cbl/COTRN02C.cbl` L745 when the write itself failed, `Unable to lookup Acct in XREF AIX
+   *       file...` from L600 when the account-id form could not be resolved through the
+   *       cross-reference, `Unable to lookup Card # in XREF file...` from L633 when the card-number form
+   *       could not be, or `Unable to lookup Transaction...` from L664 and L693" -- so the service knows
+   *       WHICH step failed and says so, and the client does not and cannot.
+   * WHY : ⚠️ Refactoring Rationale: this replaces a selection by turn kind that had just become
+   *       unreachable in one of its arms. The two cross-reference sentences were chosen locally for a
+   *       turn that was neither copying nor writing, which was the unconfirmed preview -- and that turn
+   *       no longer exists, because a capture is now sent only for a confirming answer. Selecting them
+   *       from the document instead makes them reachable again on the turn the reference reaches them
+   *       on: the confirming turn, whose `VALIDATE-INPUT-KEY-FIELDS` at L166 performs exactly those two
+   *       reads before `ADD-TRANSACTION` at L189.
+   * WHY : Assumptions: the fallback is the write's own sentence for a capture and the browse's for a
+   *       copy, because those name the operation the turn attempted when the document names nothing.
+   *       The operator's question after a confirming turn is whether the transaction was added, and
+   *       `Unable to Add Transaction...` is the reference's answer to it when the write did not happen
+   *       for a reason it cannot name.
    */
   return {
-    message: addressedByAccount
-      ? ADD_MESSAGES.UNABLE_TO_LOOKUP_ACCT_IN_XREF_AIX_FILE
-      : ADD_MESSAGES.UNABLE_TO_LOOKUP_CARD_NUM_IN_XREF_FILE,
+    message:
+      failure.problem.message ??
+      (context.copying
+        ? SHARED_MESSAGES.UNABLE_TO_LOOKUP_TRANSACTION
+        : ADD_MESSAGES.UNABLE_TO_ADD_TRANSACTION),
     fieldErrors,
     focus,
   };
@@ -1294,11 +1688,21 @@ const CONFIRMING_ANSWER = /^[Yy]$/u;
 /** The two answers that decline, both cases, as `app/cbl/COTRN02C.cbl` L173-L174 accepts them. */
 const DECLINING_ANSWER = /^[Nn]$/u;
 
-/** Answer the confirmation modal sends when its primary control is used. */
-const CONFIRM_MODAL_OK = 'Y';
-
-/** Answer the confirmation modal sends when its secondary control is used. */
-const CONFIRM_MODAL_CANCEL = 'N';
+/**
+ * Minimum box the confirmation overlay's two controls occupy.
+ *
+ * ⚠️ Assumptions: this exists because both labels are a SINGLE character -- `'Y'` and `'N'`, the answers
+ * `app/bms/COTRN02.bms` L288-L292 names in its `(Y/N)` domain hint -- and a button sized by a
+ * one-character label is the smallest control this tree renders. A runtime sweep measured the previous
+ * pair at 28x22 and 26x22 device pixels, below the floor {@link TARGET_SIZE_AA_MINIMUM} records.
+ *
+ * Assumptions: the floor is the WCAG 2.5.8 AA figure the token bridge carries, not the larger 2.5.5 AAA
+ * one; `CONTROL_SCALE_DECISION` in `ui/src/theme/tokens.ts` records why this tree does not adopt AAA.
+ */
+const CONFIRMATION_CONTROL_STYLE: CSSProperties = {
+  minInlineSize: TARGET_SIZE_AA_MINIMUM,
+  minBlockSize: TARGET_SIZE_AA_MINIMUM,
+};
 
 /**
  * One protected hint the mapset paints beside a field, with the colour role it paints it in.
@@ -1325,6 +1729,15 @@ interface FieldPresentation {
   readonly numeric?: boolean;
   /** Whether the value is rendered in the fixed-pitch face so its columns align. */
   readonly fixedPitch?: boolean;
+  /**
+   * Re-renders the operator's own spelling into the field form the reference holds, on leaving it.
+   *
+   * ⚠️ Assumptions: only the amount declares one, and it is declared per field rather than applied to
+   * every control because only the amount has a canonical form that differs from what a person types.
+   * A blanket normaliser would rewrite the eleven-position account identifier the moment the operator
+   * tabbed out of a partly-typed one, which is a different and worse defect.
+   */
+  readonly normalise?: (value: string) => string;
 }
 
 /**
@@ -1371,7 +1784,13 @@ export function TransactionAddScreen(): ReactElement {
    *       font value is written in this file, and no `ConfigProvider` is instantiated here -- the theme is
    *       injected once by `ui/src/App.tsx` and this hook reads it.
    */
-  const { cssVar } = theme.useToken();
+  /*
+   * WHY : Assumptions: the RESOLVED token record is read alongside the variable-reference record, and it
+   *       is read for exactly one value -- the grid's gutter, which is a component prop the design system
+   *       divides by two itself rather than a style attribute. Every colour, face and size on this screen
+   *       still goes through `cssVar`, so nothing about today's scale is baked into an element.
+   */
+  const { cssVar, token } = theme.useToken();
 
   const [values, setValues] = useState<TransactionAddValues>(BLANK_VALUES);
   const [message, setMessage] = useState<string | null>(null);
@@ -1384,7 +1803,8 @@ export function TransactionAddScreen(): ReactElement {
    *       card. The reference's confirming turn redisplays the whole populated map -- L176 to L181 moves
    *       `Confirm to add this transaction...` and performs `SEND-TRNADD-SCREEN` after
    *       `VALIDATE-INPUT-KEY-FIELDS` has already overwritten both key fields -- so an operator
-   *       confirming can see the resolved pair. A modal that showed only a question would take that away.
+   *       confirming can see the resolved pair. A surface that showed only a question would take that
+   *       away.
    * WHY : ⚠️ Assumptions: this is held SEPARATELY from `values`, and the separation carries more weight
    *       now that the card control is NOT repainted from the answer. The controls are editable, so their
    *       contents state what WOULD be sent; this states what the service actually resolved, and it is
@@ -1398,6 +1818,23 @@ export function TransactionAddScreen(): ReactElement {
    */
   const [resolvedKeys, setResolvedKeys] = useState<ResolvedKeys | null>(null);
   const [busy, setBusy] = useState(false);
+  /*
+   * WHY : Purpose: whether the confirmation overlay is raised. It is a SEPARATE flag from `busy` because
+   *       the two describe different states: `busy` means a request is in flight and the keyboard is
+   *       locked, while this means the screen has resolved the record and is waiting for an answer with no
+   *       request outstanding at all.
+   * WHY : ⚠️ Assumptions: this flag is raised only from a POINTER, never from a settled turn, and it is the
+   *       only surface that can produce a confirming answer by mouse.
+   *       Runtime validation found the previous shape submitting a turn from the DECLINING control -- a
+   *       `POST /api/v1/transactions` carrying `"confirmation":"N"` -- so an operator who cancelled was
+   *       told the add had failed when they had in fact prevented it. The oracle is unambiguous that a
+   *       decline has no wire turn: `app/cbl/COTRN02C.cbl` L176-L181 answers `N`, `SPACES` and
+   *       `LOW-VALUES` by moving `Confirm to add this transaction...` into the message and re-sending the
+   *       map, and only L189-L191's `Y`/`y` arm performs `ADD-TRANSACTION`. Holding the answer in a flag
+   *       here, rather than in the confirmation FIELD, is what keeps a decline from stamping a literal
+   *       `'N'` into a control the operator never typed into.
+   */
+  const [confirming, setConfirming] = useState(false);
 
   /*
    * WHY : ⚠️ Refactoring Rationale: there is NO "a copy is pending" flag beside `busy` any more, and the
@@ -1438,6 +1875,32 @@ export function TransactionAddScreen(): ReactElement {
   const inFlight = useRef(false);
 
   /*
+   * WHY : ⚠️ Purpose: the element the asking surface is ANCHORED to, held so the surface can be brought
+   *       onto the display before it is raised. The overlay is positioned against this control, and the
+   *       control sits at the very foot of a form long enough to overflow the screen body -- so on a turn
+   *       taken from the function-key legend, which needs no pointer and therefore no scrolling, the
+   *       anchor is routinely outside the visible region when the question is asked.
+   *       Refactoring Rationale: a browser pass measured the consequence precisely. Taking the turn from
+   *       the legend with the body unscrolled put the anchor at `top: 934.67` in a 900-pixel display, and
+   *       the overlay -- which the design system flips above an anchor it cannot fit below -- landed at
+   *       `bottom: 923`, twenty-three pixels past the foot of the display, with the lower eleven pixels of
+   *       BOTH answers cut off. They stayed clickable by a single pixel, which is the sort of margin that
+   *       is a defect rather than a near miss. The same overlay raised while the anchor was in view
+   *       measured `bottom: 892`, fully inside, so the anchor's position is the whole of it.
+   *       Alternatives Considered: (1) constraining the overlay to the display instead of moving the
+   *       anchor. The design system already does that -- `autoAdjustOverflow` is what flipped it above the
+   *       anchor in the first place -- and it cannot help, because an anchor BELOW the display has no
+   *       side that is inside it. (2) Rendering the overlay against the screen body rather than the
+   *       document, so the frame's own clipping would contain it. Rejected: the frame clips with
+   *       `overflow: hidden`, so a contained overlay would be cut off rather than repositioned, which
+   *       trades a partly visible question for an invisible one. (3) Anchoring the question to the legend
+   *       control instead, which is always in view. Rejected because the legend is not where the question
+   *       belongs -- the surface names the record the in-content control commits, and the reference asks
+   *       for the confirmation in the form's own confirmation field, next to that control.
+   */
+  const confirmationAnchor = useRef<HTMLButtonElement | null>(null);
+
+  /*
    * WHY : Assumptions: one ref object holding a control per field, rather than fourteen separate refs.
    *       Focus is the browser analogue of the reference's `MOVE -1 TO <field>L`, which appears at
    *       fifteen sites in `app/cbl/COTRN02C.cbl` and can name any of the fields, so the destination is
@@ -1449,7 +1912,7 @@ export function TransactionAddScreen(): ReactElement {
   /*
    * WHY : Assumptions: control identifiers are derived from a per-instance value rather than written as
    *       constants, because the identifier's only job is to bind a label to its control and a constant
-   *       would collide if the shell ever rendered this screen twice -- behind a modal, for instance --
+   *       would collide if the shell ever rendered this screen twice -- behind an overlay, for instance --
    *       leaving the duplicate label pointing at whichever control appeared first in the document.
    */
   const idPrefix = useId();
@@ -1556,6 +2019,57 @@ export function TransactionAddScreen(): ReactElement {
   }
 
   /**
+   * Applies the reference's two validation paragraphs, in its order, and reports the first refusal.
+   *
+   * ⚠️ Purpose: `PROCESS-ENTER-KEY` performs `VALIDATE-INPUT-KEY-FIELDS` at `app/cbl/COTRN02C.cbl` L166
+   * and `VALIDATE-INPUT-DATA-FIELDS` at L167, and evaluates `CONFIRMI` only at L169. Each paragraph ends
+   * a refused turn with `SEND-TRNADD-SCREEN`, whose last statement is `EXEC CICS RETURN`, so the
+   * reference cannot reach ANY confirmation arm -- affirming, declining or otherwise -- while a field is
+   * still refusable. Running both edits ahead of every answer is what reproduces that.
+   *
+   * ⚠️ Refactoring Rationale: both submitting surfaces call this rather than each carrying a copy of the
+   * pair, which is what makes "one gate" a property of the code rather than of a convention. A runtime
+   * sweep measured what two copies produce: the pointer surface opened over a form nothing had checked,
+   * took a confirmation, and only then reported the refusal -- so an operator confirmed a submission the
+   * screen already knew would be refused.
+   *
+   * Assumptions: both functions are pure over the values they are handed, so honouring the reference's
+   * order costs no request and this can be called from a pointer handler as cheaply as from a keystroke.
+   * @returns {TransactionAddFieldError | null} The first refusal the reference would report, or `null`
+   *   when the screen is submittable.
+   */
+  function localRefusal(): TransactionAddFieldError | null {
+    const current = canonicalValues();
+    const keyed = keyFieldFailure(current);
+    if ('failure' in keyed) {
+      return keyed.failure;
+    }
+    return dataFieldFailure(current);
+  }
+
+  /**
+   * The screen's values with the amount rendered into the reference's field form.
+   *
+   * ⚠️ Purpose: the blur normaliser alone is not enough, and this is the gap it leaves. Pressing Enter
+   * with the caret still in the amount does not blur the control -- a browser fires no `blur` for a key
+   * press -- so an operator who types `100.00` and reaches straight for Enter would have been refused by
+   * a screen that had already been taught to accept that spelling. Every gate reads the values through
+   * here instead, so the two routes cannot disagree about what an amount means.
+   *
+   * Assumptions: the SAME object is returned when nothing changed, so a canonical or blank amount adds no
+   * allocation and no state write on the overwhelmingly common turn.
+   *
+   * Assumptions: only the amount is canonicalised, because it is the only field whose stored form differs
+   * from what an operator types; the two key fields are zero-filled by {@link toZeroFilledKey} inside
+   * `keyFieldFailure`, where the reference does it, rather than here.
+   * @returns {TransactionAddValues} The values a gate should validate and dispatch.
+   */
+  function canonicalValues(): TransactionAddValues {
+    const canonical = canonicaliseKeyedAmount(values.amount);
+    return canonical === values.amount ? values : { ...values, amount: canonical };
+  }
+
+  /**
    * Prepares the CAPTURE submission, or reports the refusal that stops it.
    *
    * Assumptions: the data-field chain runs here and nowhere else, so it applies to a capture and not to a
@@ -1648,14 +2162,25 @@ export function TransactionAddScreen(): ReactElement {
    *       `VALIDATE-INPUT-KEY-FIELDS` and `VALIDATE-INPUT-DATA-FIELDS` at `app/cbl/COTRN02C.cbl`
    *       L166-L167 and evaluates `CONFIRMI` at L169 only afterwards, so a form with a blank type code
    *       and a blank confirmation reports the type code and never mentions the confirmation.
-   * WHY : Refactoring Rationale: the unconfirmed turn is SENT rather than answered locally, which an
-   *       earlier shape of this screen did not do. Two of the reference's steps live on that turn and
-   *       neither can run in a browser: the amount is re-rendered through the `+99999999.99` mask after
-   *       conversion (L383-L386) and each date is evaluated by `CSUTLDTC` (L389-L427). Answering locally
-   *       would leave the operator looking at an un-normalised amount and would defer an unreal date such
-   *       as `2024-02-31` to the confirming turn, so a date the reference refuses BEFORE asking for
-   *       confirmation would instead be refused after it was given. The contract answers an unconfirmed
-   *       submission 200 with nothing written, which is exactly a validation turn.
+   * WHY : ⚠️ Refactoring Rationale: the unconfirmed turn is ANSWERED LOCALLY and is no longer sent. It
+   *       used to be, defended on the ground that two of the reference's steps live on it and neither can
+   *       run in a browser -- the amount's `+99999999.99` re-render (L383-L386) and each date's
+   *       `CSUTLDTC` evaluation (L389-L427). Both run here now, in {@link canonicaliseKeyedAmount} and
+   *       {@link namesARealCalendarDate}, so the operator sees the normalised amount and an unreal date
+   *       such as `2024-02-31` is refused BEFORE the confirmation is asked for, which is where L389-L427
+   *       refuses it. What sending it cost was measurable and is gone: a filled form with a blank
+   *       confirmation put a `confirmation`-less body on `POST /api/v1/transactions` before any
+   *       confirmation surface had ever been visible.
+   * WHY : ⚠️ Trade-offs: the two verdicts a browser genuinely cannot reach -- whether the key pair
+   *       resolves against the cross-reference, and whether a real date falls outside the utility's
+   *       supported range, `2513` at `app/cbl/CSUTLDTC.cbl` L137-L138 -- now arrive on the CONFIRMING
+   *       turn rather than on the turn before it. The reference reports both at L166 and L389-L427,
+   *       ahead of the confirmation, so an operator keying an unresolvable account is asked to confirm
+   *       and only then told the account does not exist. That is a one-turn ordering difference with
+   *       nothing written either way, and it is the price of not inventing a wire turn: no read
+   *       operation in this tree resolves the pair AND mints the confirmation token, and
+   *       `transaction-api.yaml` L470-L474 states that adding one "would invent an endpoint the baseline
+   *       does not have".
    */
 
   /**
@@ -1710,7 +2235,7 @@ export function TransactionAddScreen(): ReactElement {
    * ⚠️ Assumptions: the values to submit are a PARAMETER and not read from state, and that is what keeps
    * every confirmation surface submitting the same turn. {@link submitTurn} records the answer in the
    * confirmation field and submits in one task, and React state set in a task is not readable in it, so a
-   * turn reading `values` would submit the PREVIOUS answer -- which is the divergence between the modal's
+   * turn reading `values` would submit the PREVIOUS answer -- which is the divergence between the overlay's
    * path and the Enter path that one dispatcher exists to remove.
    * @param {string} answer - The confirmation character to submit, which decides preview against write.
    * @param {TransactionAddValues} submitted - The values this turn validates and submits, which carry the
@@ -1915,7 +2440,14 @@ export function TransactionAddScreen(): ReactElement {
         setSeverity('error');
         setMessage(report.message);
         setFieldErrors(report.fieldErrors);
-        focusField(report.focus);
+        /*
+         * WHY : Assumptions: a `null` field leaves the cursor where the operator put it. See the member's
+         *       own note: the only failure that produces one is a refusal naming fields this screen does
+         *       not render, and every field it could move to would be an innocent one.
+         */
+        if (report.focus !== null) {
+          focusField(report.focus);
+        }
       },
     );
   }
@@ -1923,11 +2455,12 @@ export function TransactionAddScreen(): ReactElement {
   /**
    * The ONE dispatcher every confirmation surface goes through.
    *
-   * ⚠️ Purpose: physical Enter, the legend's ENTER control and the modal's two controls all call this and
+   * ⚠️ Purpose: physical Enter, the legend's ENTER control and the overlay's confirming control all reach
+   * this and
    * nothing else, so no surface can submit a different turn from another. They previously did not: the
-   * modal recorded its answer and then submitted, while Enter submitted the confirmation field as it
+   * overlay recorded its answer and then submitted, while Enter submitted the confirmation field as it
    * stood, and the two consequently disagreed about which values were in play -- typing `Y` into the
-   * field cleared the copy state that the modal's path preserved, so the same answer given two ways
+   * field cleared the copy state that the overlay's path preserved, so the same answer given two ways
    * produced two different submissions. One function is what makes that class of divergence impossible
    * rather than merely absent.
    *
@@ -1939,11 +2472,11 @@ export function TransactionAddScreen(): ReactElement {
    * set in this task is not readable in it. Composing them is also what keeps the recorded answer and the
    * submitted answer the same character; reading state would submit the previous one.
    * @param {string} answer - The confirmation character to submit: the field's own value for Enter, or
-   *   the character the modal's control stands for.
+   *   the character the overlay's confirming control stands for.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function submitTurn(answer: string): void {
-    const submitted: TransactionAddValues = { ...values, confirmation: answer };
+    const submitted: TransactionAddValues = { ...canonicalValues(), confirmation: answer };
     setValues(submitted);
     /*
      * WHY : Assumptions: the operation is the CAPTURE and never the copy, whichever turn preceded this
@@ -1974,13 +2507,390 @@ export function TransactionAddScreen(): ReactElement {
    * `CONFIRMI` as it stands.
    *
    * Assumptions: the values are passed as they are, without composing the answer into them, because this
-   * key press does not change the confirmation field. {@link submitTurn} composes because the modal's
+   * key press does not change the confirmation field. {@link submitTurn} composes because the overlay's
    * controls stand for an answer the field does not yet hold; this key press submits the field as keyed.
    * @param {string} answer - The confirmation character as keyed, which the service reads at L495.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function copyLastTurn(answer: string): void {
     runTurn(answer, values, true);
+  }
+
+  /**
+   * Dismisses the confirmation without committing and WITHOUT issuing any request.
+   *
+   * Purpose: this is the reference's declining arm. `app/cbl/COTRN02C.cbl` L176-L181 answers `'N'`,
+   * `'n'`, `SPACES` and `LOW-VALUES` by moving `Confirm to add this transaction...` into `WS-MESSAGE`,
+   * moving `-1` into `CONFIRML` and performing `SEND-TRNADD-SCREEN` -- it re-displays the populated map
+   * and asks again. Only the `'Y'`/`'y'` arm at L189-L191 performs `ADD-TRANSACTION`, so a decline has no
+   * write and, because nothing is read either, no wire turn at all.
+   *
+   * ⚠️ Refactoring Rationale: the control this replaces submitted a turn. A runtime sweep recorded one
+   * `POST /api/v1/transactions` carrying `"confirmation":"N"` per decline, answered 200 with nothing
+   * written, presented to the operator as a red band -- so cancelling looked like a failed add, and the
+   * confirmation field was left holding a literal `'N'` the operator never typed. Both are gone: no
+   * request leaves, the field returns to blank, and the sentence published is the reference's own
+   * question rather than a failure.
+   *
+   * Assumptions: the operator's data is KEPT -- every field, and the resolved pair the service returned
+   * -- because the reference re-displays the populated map rather than clearing it. Clearing is PF4's
+   * job (`INITIALIZE-ALL-FIELDS`, L762-L779) and an operator who declined a confirmation has not asked
+   * for it.
+   *
+   * Assumptions: this function performs NO validation of its own, because {@link localRefusal} has
+   * already run on every route that can reach it -- {@link requestSubmit} for a keyed `'N'` and
+   * {@link requestConfirmation} for the overlay that raised the declining control. That is the
+   * reference's order, and re-running the edits here would report on a decline a refusal the reference
+   * reports on the turn BEFORE it.
+   * @returns {void} Nothing; the dismissal is published through this screen's own state.
+   */
+  function declineLocally(): void {
+    setConfirming(false);
+
+    /*
+     * WHY : ⚠️ Assumptions: NO validation runs here, and the omission is the fix rather than a shortcut.
+     *       A runtime sweep measured the declining control raising `Category CD must be Numeric...`
+     *       against a field the operator had already been told nothing about, because the decline was
+     *       routed through the same validation pass a submission takes. The reference's order is what
+     *       settles it: `PROCESS-ENTER-KEY` performs `VALIDATE-INPUT-KEY-FIELDS` and
+     *       `VALIDATE-INPUT-DATA-FIELDS` at `app/cbl/COTRN02C.cbl` L166-L167 and only THEN evaluates the
+     *       confirmation at L169, and each validation paragraph ends its turn with
+     *       `SEND-TRNADD-SCREEN`, whose last statement is `EXEC CICS RETURN`. So the reference cannot
+     *       reach its declining arm with a refusable field at all -- validation has already ended the
+     *       turn. {@link requestSubmit} runs both edits before this function is reachable by either
+     *       route, which reproduces that order; running them again here would report a refusal the
+     *       reference reports on the PRECEDING turn, not on the decline.
+     */
+    setValues(
+      /**
+       * Returns the confirmation to blank, leaving every other value as the operator left it.
+       *
+       * ⚠️ Assumptions: the answer is returned to BLANK rather than set to `'N'`. Both take the same arm
+       * of the reference's `EVALUATE` at `app/cbl/COTRN02C.cbl` L173-L181, so the sentence and the cursor
+       * position are identical either way, and blank is the state the field is actually in -- the
+       * operator answered an overlay, not this control. Writing `'N'` into a control nobody keyed into
+       * was measured, and it left the next Enter carrying an answer the operator never gave.
+       * @param {TransactionAddValues} previous - The values as the surface was raised over them.
+       * @returns {TransactionAddValues} The same values with the confirmation blanked.
+       */
+      (previous: TransactionAddValues): TransactionAddValues => ({ ...previous, confirmation: '' }),
+    );
+    setFieldErrors([]);
+    /*
+     * WHY : Assumptions: the severity is the same one every other sentence on this screen carries, and
+     *       it is not a report of failure. `app/bms/COTRN02.bms` declares ONE message field -- `ERRMSG`
+     *       at row 23, painted `COLOR=RED` -- and `COTRN02C` never overrides that colour, so the
+     *       reference paints this question in exactly the colour it paints a refusal. The thing a
+     *       decline must not do is report the add as having FAILED, and it does not: the sentence is the
+     *       reference's own request to answer the confirmation, not `Unable to Add Transaction...`.
+     */
+    setSeverity('error');
+    setMessage(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
+    focusField('confirmation');
+  }
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: `Escape` withdraws the confirmation, and controlling the overlay is
+   *       what took that away. An UNCONTROLLED `Popconfirm` closes on `Escape` for itself; an overlay
+   *       opened by state and declaring `trigger={[]}` does not, so without this listener the only ways
+   *       out of a raised confirmation are its own two controls -- and a keyboard operator who wanted
+   *       neither would be trapped in front of a surface offering to write a record. AAP section 0.4.4
+   *       makes keyboard fidelity a requirement rather than a nicety, because the screen this replaces
+   *       is operated entirely from the keyboard. `ui/src/screens/cardUpdate/index.tsx` records the same
+   *       measurement for the same idiom, so this is that screen's remedy applied here rather than a
+   *       second invention.
+   * WHY : Assumptions: `Escape` DECLINES and can never accept. It routes to the same withdrawal the
+   *       overlay's own declining control uses, so no key press on this surface can commit a write.
+   * WHY : Assumptions: the listener is installed only while the overlay stands, so `Escape` is left to
+   *       the browser and to any other overlay on every other turn of this screen.
+   * WHY : Alternatives Considered: registering `Escape` through `usePfKeys` beside the four attention
+   *       identifiers this screen binds. Rejected because `KEYBOARD_KEY_TO_AID` maps only `Enter` and the
+   *       function keys -- `Escape` is deliberately not an attention identifier, since the 3270 `CLEAR`,
+   *       `PA1` and `PA2` keys it might stand for carry meanings `COTRN02C` never uses. Widening that
+   *       shared map to serve one screen's overlay would put a browser concern into the hook that
+   *       transcribes the reference's key contract.
+   */
+  useEffect(
+    /**
+     * Listens for `Escape` only while the confirmation stands, and withdraws it.
+     * @returns {(() => void) | undefined} The listener's removal, or `undefined` on the turns where no
+     *   listener was installed because no confirmation is open.
+     */
+    (): (() => void) | undefined => {
+      if (!confirming) {
+        return undefined;
+      }
+
+      /**
+       * Withdraws the confirmation when `Escape` is pressed, leaving every other key alone.
+       * @param {KeyboardEvent} event - The key press as the document saw it.
+       * @returns {void} Completion is represented by the screen's own state.
+       */
+      function withdrawOnEscape(event: KeyboardEvent): void {
+        if (event.key !== 'Escape') {
+          return;
+        }
+        event.preventDefault();
+        declineLocally();
+      }
+
+      document.addEventListener('keydown', withdrawOnEscape);
+      /**
+       * Removes the `Escape` listener when the confirmation is no longer standing.
+       *
+       * Assumptions: the SAME function reference is removed that was added, which is what makes this a
+       * removal rather than a leak. The handler is declared inside the effect body for that reason: a
+       * handler re-created between add and remove would leave the first one listening for the lifetime
+       * of the document, and every subsequent raised overlay would add another.
+       * @returns {void} Completion is represented by the document having no listener from this effect.
+       */
+      return (): void => {
+        document.removeEventListener('keydown', withdrawOnEscape);
+      };
+    },
+    // Assumptions: the dependency list names only `confirming`, not `declineLocally`. The handler is
+    // re-created on every render along with the component body, and the listener is installed for the
+    // lifetime of one raised overlay -- during which nothing this handler reads can change, because the
+    // gate refuses every other route while `confirming` holds. Naming the handler would reinstall the
+    // listener on every keystroke in the form for no behavioural difference.
+    [confirming],
+  );
+
+  /**
+   * The ONE gate every submitting surface passes through, and the only route to a write.
+   *
+   * Purpose: reproduce `PROCESS-ENTER-KEY` (`app/cbl/COTRN02C.cbl` L162-L191) as a single decision so
+   * that no surface can submit a turn another surface would not. ⚠️ Refactoring Rationale: there were
+   * TWO independent submitting paths before this existed. The legend's Enter called the turn directly
+   * with whatever the confirmation field held -- so it committed nothing, asked nothing and omitted the
+   * `confirmation` member from the request body entirely -- while the in-content control opened a
+   * popover whose two answers each submitted a turn of their own, including the declining one. A runtime
+   * sweep found both: one path that never asked, and one that mutated when told not to.
+   *
+   * The arms, in the reference's own order, and every one of them behind {@link localRefusal}:
+   * - `'N'`/`'n'` is a dismissal and is handled locally by {@link declineLocally}. No request.
+   * - `'Y'`/`'y'` is the operator's own affirmative and commits at once, which is the reference's
+   *   `ADD-TRANSACTION` arm at L189-L191. Typing the character the mapset's `(Y/N)` field names IS the
+   *   confirmation, so demanding a second one through an overlay would refuse a keyboard workflow the
+   *   source supports.
+   * - blank raises the ONE asking surface, locally, through {@link requestConfirmation}. No request.
+   * - anything else non-blank is refused locally with `Invalid value. Valid values are (Y/N)...`, which
+   *   is the reference's `WHEN OTHER` arm at L182-L187. No request.
+   *
+   * So exactly ONE of the four arms reaches the wire, and it is the one carrying the operator's
+   * affirmative. ⚠️ Refactoring Rationale: two of them used to. The blank arm ran a "resolving turn"
+   * -- `POST /api/v1/transactions` with the `confirmation` member ABSENT, because
+   * {@link buildCreateRequest} attaches it only for the four letters the contract admits -- and the
+   * `WHEN OTHER` arm dispatched the same confirmation-less body, on the ground that the service is the
+   * authority on which non-answer it is. A browser sweep measured the consequence with a read-only
+   * `MutationObserver`: a filled form with a blank confirmation, the footer legend `ENTER=Continue`
+   * activated once and nothing else, produced a request on the WRITE endpoint at t0+3212ms with
+   * `popEverVisible === false` -- no confirmation surface had ever been on the screen. The pointer
+   * control on the same filled form asked first and issued nothing until answered. One screen, one
+   * action, two confirmation idioms, and only one of them asked.
+   *
+   * ⚠️ Assumptions: the reference's blank arm is a LOCAL re-display and not a wire turn, which is what
+   * makes the local ask the faithful reading rather than merely the safe one. L176-L181 moves a sentence
+   * into `WS-MESSAGE`, moves `-1` into `CONFIRML` and performs `SEND-TRNADD-SCREEN`; L182-L187 does the
+   * same with a different sentence. Neither touches a file. The reads the reference DOES perform on that
+   * turn belong to `VALIDATE-INPUT-KEY-FIELDS` at L166, which resolves the key pair through
+   * `READ-CXACAIX-FILE` or `READ-CCXREF-FILE` -- and the service performs exactly those two reads for
+   * itself on the confirming turn, per `transaction-api.yaml`'s own account-precedence description, so
+   * nothing is lost by not asking for them a turn early.
+   *
+   * ⚠️ Alternatives Considered: keeping the resolving turn and expressing it as a READ rather than as a
+   * POST to the mutation endpoint, so the key pair could still be named on the asking surface. Rejected
+   * because no such operation exists to call: `services/transaction-service/src/main/resources/openapi/
+   * transaction-api.yaml` L470-L474 states that "splitting the unconfirmed turn into its own operation
+   * would invent an endpoint the baseline does not have", and the contract is not this checkpoint's to
+   * edit. The consequence is bounded and visible: the surface names the resolved pair only after a PF5
+   * copy has resolved one, which is what {@link requestConfirmation} already documents and what
+   * `offersNoSummaryBeforeAPreview` in `ui/src/screens/transactionAdd/transactionAddTurns.test.tsx`
+   * already requires.
+   *
+   * ⚠️ Alternatives Considered: keeping the resolving turn on the ground that two of the reference's
+   * steps live on it -- the amount's canonical re-render at L383-L386 and the two `CSUTLDTC` calendar
+   * evaluations at L389-L427. That was the standing rationale and it has expired: {@link
+   * canonicalValues} re-renders the amount through the same `+99999999.99` mask before any answer is
+   * read, and {@link namesARealCalendarDate} decides both calendar verdicts inside
+   * {@link dataFieldFailure}, so an unreal date is now refused BEFORE the operator is asked, which is
+   * where L389-L427 refuses it. Sending a turn to obtain verdicts the screen already has would be a
+   * round trip for nothing.
+   *
+   * ⚠️ Assumptions: validation cannot be skipped by any path to a write. {@link requestConfirmation} is
+   * the pointer route and applies the same {@link localRefusal} in the same place, so no surface can
+   * reach an answer over a form the screen already knows is refusable -- which is the state the previous
+   * popover trigger opened from.
+   * @returns {void} Nothing; every outcome is published through this screen's own state.
+   */
+  function requestSubmit(): void {
+    /*
+     * WHY : Assumptions: a submission arriving while the overlay stands is dropped as well as one
+     *       arriving mid-request. The overlay's two controls call {@link declineLocally} and
+     *       {@link confirmAndCommit} directly, so nothing legitimate reaches here while it is open --
+     *       but the key bindings listen on the document, so without this an Enter keystroke would start a
+     *       second resolving turn behind the surface Enter had just raised. Refusing it here is also what
+     *       makes "a bare Enter never commits" true: with the overlay open, Enter reaches neither arm.
+     */
+    if (inFlight.current || confirming) {
+      return;
+    }
+
+    const refusal = localRefusal();
+    if (refusal !== null) {
+      reportFieldFailure(refusal);
+      return;
+    }
+
+    const answer = values.confirmation.trim();
+
+    if (DECLINING_ANSWER.test(answer)) {
+      declineLocally();
+      return;
+    }
+
+    /*
+     * WHY : Assumptions: `'Y'` and `'y'` are the ONLY answers that reach the wire, which is the
+     *       reference's `ADD-TRANSACTION` arm at `app/cbl/COTRN02C.cbl` L189-L191 and nothing else.
+     *       Typing the character the mapset's `(Y/N)` field names IS the confirmation, so demanding a
+     *       second one through an overlay would refuse a keyboard workflow the source supports.
+     */
+    if (CONFIRMING_ANSWER.test(answer)) {
+      submitTurn(answer);
+      return;
+    }
+
+    if (answer === '') {
+      /*
+       * WHY : ⚠️ Refactoring Rationale: a BLANK answer raises the ONE asking surface, locally, by
+       *       calling the pointer route's own function. It used to run a "resolving turn" instead --
+       *       `POST /api/v1/transactions` carrying the whole capture with the `confirmation` member
+       *       absent -- on the reading that the reference's L176-L181 arm asks in row 23 and that the
+       *       turn "writes nothing". Two things were wrong with that. The reference's arm performs no
+       *       I/O at all: it moves a sentence into `WS-MESSAGE`, moves `-1` into `CONFIRML` and
+       *       performs `SEND-TRNADD-SCREEN`, so translating it into a request to the mutation endpoint
+       *       invents a wire turn the source does not have. And it left the screen with two
+       *       confirmation idioms for one action, only one of which asked: a browser sweep measured the
+       *       footer legend `ENTER=Continue` putting a confirmation-less body on the write endpoint
+       *       with no surface ever having been visible, while the pointer control on the same filled
+       *       form asked and issued nothing. Calling {@link requestConfirmation} -- rather than
+       *       duplicating what it does -- is what makes "one gate" a property of the code.
+       * WHY : Assumptions: re-entering that function repeats the two guards and {@link localRefusal},
+       *       and that repetition is deliberate. All three are pure over state this task has not
+       *       changed, so the repeat costs no request and cannot disagree with what was just judged,
+       *       while a private "raise it now" helper called from both would be a second place the
+       *       raising conditions are stated.
+       */
+      requestConfirmation();
+      return;
+    }
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: an answer that is neither confirming nor declining is refused
+     *       HERE, with no request, which is the reference's `WHEN OTHER` arm at
+     *       `app/cbl/COTRN02C.cbl` L182-L187: `Invalid value. Valid values are (Y/N)...` into the
+     *       message line, `-1` into `CONFIRML`, `SEND-TRNADD-SCREEN`, and no file touched. It used to be
+     *       dispatched as keyed, on the ground that the service is the authority on which non-answer it
+     *       is -- but {@link buildCreateRequest} attaches the `confirmation` member only for the four
+     *       letters the contract admits, so a keyed `Q` did not reach the service AS a `Q`: it arrived
+     *       as the same confirmation-less body the blank arm sent, which is a request asking to be
+     *       asked, over a screen the operator had just answered. The verdict is local, unambiguous and
+     *       cheap, and the reference reaches it without a turn.
+     * WHY : Assumptions: the sentence comes from {@link unconfirmedSentence} rather than being named
+     *       here, so the one function that decides which of the two non-confirming sentences an answer
+     *       earns keeps deciding it for every route.
+     * WHY : Assumptions: the refusal is reported as `NOT_OK` and not `BLANK`. `app/cpy/CSSETATY.cpy`
+     *       L17-L27 nests the `MOVE '*'` inside the blank test alone, and this field is not blank --
+     *       it holds a character the reference rejects, so it earns the colour and not the marker.
+     */
+    reportFieldFailure({
+      field: 'confirmation',
+      message: unconfirmedSentence(answer),
+      state: 'NOT_OK',
+    });
+  }
+
+  /**
+   * Raises the confirmation overlay from a pointer, issuing NO request.
+   *
+   * Purpose: the pointer operator's route to the same gate. It applies the same two edits in the same
+   * order and then opens the overlay locally, so a pointer and a keystroke cannot disagree about whether
+   * a submission is admissible.
+   *
+   * ⚠️ Assumptions: opening issues NO request, and that is a contract rather than an optimisation.
+   * `ui/src/screens/transactionAdd/transactionAdd.test.tsx` clears the confirmation, opens the overlay,
+   * confirms, and asserts that exactly ONE capture reached the service carrying a body identical to the
+   * keyed answer's -- so an opening turn would be a second, differing dispatch. The consequence is
+   * accepted deliberately: a surface raised before any resolving turn has no service-resolved pair to
+   * name, and it names NOTHING rather than repeating the keyed values with a service's authority.
+   *
+   * Assumptions: the edits are re-applied here rather than trusted from an earlier turn, because the
+   * operator may have edited a field since one. They are pure functions over the current values, so
+   * honouring the reference's order costs no request.
+   * @returns {void} Nothing; the raised surface is published through this screen's own state.
+   */
+  function requestConfirmation(): void {
+    if (inFlight.current || confirming) {
+      return;
+    }
+
+    const refusal = localRefusal();
+    if (refusal !== null) {
+      reportFieldFailure(refusal);
+      return;
+    }
+
+    /*
+     * WHY : ⚠️ Assumptions: the band is emptied as the surface is raised. The overlay's title is the
+     *       reference's confirmation sentence, so leaving the band's copy of it in place would put one
+     *       verbatim string on the screen twice at once -- which is exactly what a runtime sweep measured
+     *       between the previous overlay's title and the on-screen prompt. `declineLocally` re-publishes
+     *       it the moment the surface closes, which is the reference's own post-decline state, so the
+     *       sentence is deferred rather than lost.
+     */
+    /*
+     * WHY : ⚠️ Assumptions: the canonical values are stored BEFORE the surface is raised, so the amount the
+     *       surface names is the amount the control shows and the amount the write will carry. Without
+     *       this the surface could name `+00000100.00` over a control still reading `100.00`, which is the
+     *       shape of defect the cross-screen umbrella names outright: no outcome may be presented while a
+     *       contradicting value is displayed beside it.
+     */
+    setValues(canonicalValues());
+    setMessage('');
+    setFieldErrors([]);
+    /*
+     * WHY : ⚠️ Assumptions: the anchor is brought onto the display BEFORE the surface is raised, and the
+     *       order is the whole of it. The overlay measures its anchor when it opens, so scrolling
+     *       afterwards would leave it positioned against where the anchor used to be. `block: 'nearest'`
+     *       is the least movement that can work and is a no-op when the anchor is already fully visible,
+     *       which is the pointer operator's case -- they just clicked it -- so a route that never had the
+     *       defect is not given a jolt to fix it. See {@link confirmationAnchor} for the measurement.
+     *       Trade-offs: the form scrolls under the operator on a legend-taken turn. That is the intended
+     *       effect rather than a side effect: the question names the record about to be written and both
+     *       of its answers must be reachable and whole, which is worth moving the view for.
+     */
+    confirmationAnchor.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    setConfirming(true);
+  }
+
+  /**
+   * Commits the capture the overlay described, which is the reference's confirming turn.
+   *
+   * Assumptions: the overlay is dismissed BEFORE the turn is dispatched, so the busy state and any
+   * refusal land on the form the operator is returned to rather than behind a raised surface.
+   *
+   * ⚠️ Assumptions: the affirmative is dispatched through {@link submitTurn} -- the SAME function a keyed
+   * `'Y'` uses -- rather than through a request this handler composes. That is what makes the pointer
+   * route and the keyed route produce byte-identical bodies, which is the property the previous two
+   * independent submitting paths could not have. `submitTurn` also records the answer in the
+   * confirmation field, which is correct here and not on a decline: the reference's confirming turn
+   * genuinely has `'Y'` in `CONFIRMI`, and a write that is then refused leaves it there for the retry,
+   * which is the state `app/cbl/COTRN02C.cbl` L189 evaluates.
+   * @returns {void} Nothing; the outcome is published through this screen's own state.
+   */
+  function confirmAndCommit(): void {
+    setConfirming(false);
+    submitTurn(CONFIRMATION_ANSWERS.CONFIRM);
   }
 
   /*
@@ -1994,7 +2904,7 @@ export function TransactionAddScreen(): ReactElement {
    *       onto PF01 through PF12, and `usePfKeys` already applies that table through `PF_KEY_ALIASES`, so
    *       re-implementing the aliasing in this screen would create a second copy of one mapping.
    * WHY : ⚠️ Refactoring Rationale: every binding declares `disabled` while a turn is in flight, where none
-   *       did. The controls and the modal already reflected the busy state, so the SCREEN said a turn was
+   *       did. The controls and the overlay already reflected the busy state, so the SCREEN said a turn was
    *       running while the legend's four controls stayed lit and a key press was accepted and then
    *       silently dropped by the guard inside the turn -- an operator pressing Enter twice saw nothing
    *       happen and no reason why. One declaration covers all three surfaces: `usePfKeys` refuses the
@@ -2004,14 +2914,40 @@ export function TransactionAddScreen(): ReactElement {
    *       operator navigate away or clear the form while a capture is in flight, and the settlement would
    *       then paint a message about a submission whose screen no longer exists -- the terminal has no such
    *       state, because its keyboard is locked until the region replies.
+   * WHY : ⚠️ Assumptions: every binding declares its `risk`, and the two that carry `mutating` are the
+   *       two the DISPATCH can write from rather than the two an attention identifier would suggest.
+   *       `PfKeyBar`'s `PRIMARY_ACTION_AIDS` fallback happens to emphasise the same pair here, so this
+   *       declaration changes no paint on this screen -- it states the reason the paint is right, which
+   *       the fallback cannot. `ENTER=Continue` reaches `ADD-TRANSACTION` at `app/cbl/COTRN02C.cbl`
+   *       L189-L191 whenever `CONFIRMI` holds an affirmative, and `F5=Copy Last Tran.` falls straight
+   *       through into `PROCESS-ENTER-KEY` at L495, so a copy pressed with an affirmative already keyed
+   *       copies AND writes in the one turn.
+   * WHY : ⚠️ Trade-offs: PF5's label names a COPY and its risk names a write, and the taxonomy asks for
+   *       the label's reading. The dispatch is the stronger evidence and it is cited rather than
+   *       glossed: L495 is an unconditional `PERFORM PROCESS-ENTER-KEY`, so the key genuinely can
+   *       commit. What the taxonomy forbids is inferring risk from WHICH key carries the action -- the
+   *       same `PFK05` is delete, save and browse on three other mapsets -- and this reads the program's
+   *       own dispatch for this mapset instead, which is the opposite of that mistake.
+   * WHY : Assumptions: `busy` is deliberately NOT substituted for `disabled` on these four entries.
+   *       `busy` declines a press SILENTLY while leaving the control present, enabled and focusable,
+   *       which is the right primitive for a key that is momentarily early; `disabled` additionally
+   *       states unavailability on the control itself, which is what the Refactoring Rationale above
+   *       was written to obtain and what this screen's own paint already reflects. Substituting it would
+   *       re-enable four controls during an in-flight turn, and no finding in this group asks for that
+   *       -- so the silent-decline half is kept through `onInvalidKey`'s `'disabled'` arm instead, which
+   *       reaches the same outcome for the keyboard without changing the legend.
    */
   const keyHandlers: PfKeyHandlerMap = {
     ENTER: {
       /**
        * Runs one turn with the confirmation as keyed, which is the reference's Enter arm.
        *
-       * Assumptions: it goes through {@link submitTurn}, the same function the modal's two controls go
-       * through, so a keyed answer and a clicked one cannot submit different turns.
+       * Assumptions: it goes through {@link requestSubmit}, the ONE gate every submitting surface passes
+       * through, so a keyed answer and a clicked one cannot take different arms. ⚠️ Refactoring
+       * Rationale: this arm used to call the turn DIRECTLY with whatever the confirmation field held,
+       * which made it a second submitting path that never asked -- a runtime sweep recorded it
+       * submitting immediately with no confirmation surface and with the `confirmation` member absent
+       * from the request body altogether.
        * Assumptions: this arm always submits the CAPTURE and never the copy, including the Enter that
        * confirms a copy. `PROCESS-ENTER-KEY` writes the map fields, and after a copy those fields hold the
        * copied record because the copy block put them there at `app/cbl/COTRN02C.cbl` L481 to L492 -- so
@@ -2019,11 +2955,10 @@ export function TransactionAddScreen(): ReactElement {
        * would resolve "the most recently stored transaction" a second time.
        * @returns {void} Completion is represented by the screen's own state.
        */
-      onInvoke: (): void => {
-        submitTurn(values.confirmation);
-      },
+      onInvoke: requestSubmit,
       label: TRANSACTION_ADD_KEY_LABELS.ENTER,
-      disabled: busy,
+      risk: 'mutating',
+      disabled: busy || confirming,
     },
     PFK03: {
       /**
@@ -2039,7 +2974,8 @@ export function TransactionAddScreen(): ReactElement {
         navigateSafely(navigate, MAIN_MENU_ROUTE);
       },
       label: TRANSACTION_ADD_KEY_LABELS.PFK03,
-      disabled: busy,
+      risk: 'read-only',
+      disabled: busy || confirming,
     },
     PFK04: {
       /**
@@ -2048,7 +2984,8 @@ export function TransactionAddScreen(): ReactElement {
        */
       onInvoke: clearScreen,
       label: TRANSACTION_ADD_KEY_LABELS.PFK04,
-      disabled: busy,
+      risk: 'read-only',
+      disabled: busy || confirming,
     },
     PFK05: {
       /**
@@ -2064,7 +3001,8 @@ export function TransactionAddScreen(): ReactElement {
         copyLastTurn(values.confirmation);
       },
       label: TRANSACTION_ADD_KEY_LABELS.PFK05,
-      disabled: busy,
+      risk: 'mutating',
+      disabled: busy || confirming,
     },
   };
 
@@ -2081,9 +3019,22 @@ export function TransactionAddScreen(): ReactElement {
      * sets no field's length to -1, and `SEND-TRNADD-SCREEN` sends with `CURSOR` and no value at
      * L522-L528, so symbolic positioning falls back to the mapset's single `IC` attribute -- which
      * `app/bms/COTRN02.bms` L85 declares on the account field and nowhere else.
+     * ⚠️ Assumptions: only an UNMAPPED key earns the sentence. A key this screen binds but has momentarily
+     * disabled -- every one of the four, while a request is in flight or the confirmation overlay stands
+     * -- arrives here too, and reporting it as invalid would be two separate lies: the reference binds
+     * that key, and the operator's press was refused by this screen's own state rather than by
+     * `COTRN02C`'s `WHEN OTHER` arm. It would also move the cursor, which is what makes it more than
+     * cosmetic: an Enter pressed while the overlay stands would publish `invalid key`, yank focus out of
+     * the overlay and into the account field, and leave a surface open that the operator could no longer
+     * reach from the keyboard. A disabled key is therefore absorbed silently, which is what a terminal
+     * with a task in flight does.
+     * @param {PfKeyRejection} rejection - Which key was refused, and whether it was unmapped or disabled.
      * @returns {void} Completion is represented by the screen's own state.
      */
-    onInvalidKey: (): void => {
+    onInvalidKey: (rejection: PfKeyRejection): void => {
+      if (rejection.reason === 'disabled') {
+        return;
+      }
       setSeverity('error');
       setMessage(INVALID_KEY_PRESSED);
       focusField('accountId');
@@ -2135,8 +3086,16 @@ export function TransactionAddScreen(): ReactElement {
   const fixedPitchStyle: CSSProperties = {
     fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData],
   };
-  const ruleStyle: CSSProperties = { ...neutralStyle, ...fixedPitchStyle };
+  /*
+   * WHY : Assumptions: the rule's colour is set through `borderColor` rather than `color`, because a
+   *       `Divider` draws itself with a border where the withdrawn `Typography.Text` drew itself with
+   *       glyphs. The measured source role is unchanged -- `COLOR=NEUTRAL` at `app/bms/COTRN02.bms`
+   *       L111-L116 -- and it resolves through the same text-grade map every other colour on this screen
+   *       reads, so the rule is painted the same shade as the labels it separates.
+   */
+  const ruleStyle: CSSProperties = { borderColor: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] };
   const blankMarkerStyle: CSSProperties = { color: cssVar[FIELD_ERROR_TOKENS.errorColor] };
+  const responsiveGridGutter = transactionAddGridGutter(token[SPACING_TOKENS.sectionGapMedium]);
 
   /**
    * Records one field's value.
@@ -2173,9 +3132,35 @@ export function TransactionAddScreen(): ReactElement {
        *       handler rather than at submission so the operator learns at the control instead of from a
        *       400. `retainPrintableText` carries the derivation of the domain.
        */
-      const edited = FREE_TEXT_FIELDS.includes(field)
+      const filtered = FREE_TEXT_FIELDS.includes(field)
         ? retainPrintableText(event.target.value)
         : event.target.value;
+      /*
+       * WHY : ⚠️ Assumptions: the value is CLAMPED to the field's declared width here, and the clamp is
+       *       the fix for a class of defect rather than defensive tidying. `maxLength` stops a keyboard
+       *       and a paste, but it does not stop a programmatic assignment, and browser validation reached
+       *       exactly that: fifteen characters were placed in the eleven-character account field and
+       *       thirteen in the twelve-character amount field. Two things followed. The control rendered
+       *       antd's `ant-input-out-of-range`, which recolours the VALUE and nothing else -- no border, no
+       *       `aria-invalid`, no help text, no band -- so the only signal was a colour, which WCAG 1.4.1
+       *       forbids as a sole carrier and assistive technology cannot see at all. And the refusals
+       *       never fired: every width predicate on this screen reads
+       *       `padToDeclaredWidth`, which TRUNCATES, so a thirteen-character amount was judged on its
+       *       first twelve characters, passed, and the thirteenth went to the service unexamined.
+       * WHY : Assumptions: the over-long characters are DROPPED rather than reported, which is the
+       *       reference's own physics rather than a convenience. `EXEC CICS RECEIVE MAP` moves at most a
+       *       field's declared length out of the inbound datastream, so a 3270 could not transmit a
+       *       thirteenth character into a twelve-position field -- there was no such state to report, and
+       *       `ui/src/messages/messages.ts` accordingly carries no over-length sentence for this program.
+       *       It is also the treatment `retainPrintableText` already documents for an inadmissible
+       *       character and that `maxLength` already gives an over-long paste, so all three agree.
+       * WHY : Alternatives Considered: leaving the value whole and adding an exact-width predicate to
+       *       `dataFieldFailure` so the operator saw a refusal. Rejected because there is no baseline
+       *       sentence to raise -- authoring one would put a string on this screen that no program
+       *       produces, which rule T8 forbids -- and because it would leave the control in the
+       *       colour-only state that V139 reports for as long as the value stood.
+       */
+      const edited = filtered.slice(0, TRANSACTION_ADD_FIELD_WIDTHS[field]);
       /*
        * WHY : Assumptions: editing either KEY field discards the resolved pair, and only a key field does.
        *       The pair states what the service resolved FROM those two values, so once one of them changes
@@ -2197,6 +3182,54 @@ export function TransactionAddScreen(): ReactElement {
           ...previous,
           [field]: edited,
         }),
+      );
+    };
+  }
+
+  /**
+   * Builds the handler that re-renders a field into its canonical form when the operator leaves it.
+   *
+   * ⚠️ Purpose: this is what makes a human spelling of an amount usable. `100.00` typed into a field
+   * whose form is `+99999999.99` becomes `+00000100.00` on the way out of the control, so the value the
+   * edits then judge is the value the reference would have received -- without the edits themselves being
+   * loosened, which would have been a parity divergence rather than a fix.
+   *
+   * ⚠️ Assumptions: the normalisation happens on BLUR and never on change. Rewriting on every keystroke
+   * would fight the operator: keying `1`, `0`, `0` would see the first digit expand to `+00000001.00` and
+   * the caret jump, so the second digit would land somewhere neither of them intended. Blur is also where
+   * the 3270 did its own equivalent -- the reference re-renders the amount on the TURN, at L383-L386,
+   * which is later still.
+   *
+   * Assumptions: a normalisation that changes nothing writes no state, so leaving an untouched or already
+   * canonical field cannot cause a render. The screen has fifteen controls and the operator tabs through
+   * all of them.
+   *
+   * Assumptions: the resolved pair is NOT discarded here, unlike an edit to a key field. Only the amount
+   * declares a normaliser and the resolution reads neither it nor any other data field -- L193-L229 reads
+   * the two keys alone -- so nothing the pair asserts can be invalidated by this.
+   * @param {TransactionAddField} field - The field whose control is being left.
+   * @param {(value: string) => string} normalise - The field's own canonical rendering.
+   * @returns {() => void} A blur handler for that control.
+   */
+  function normaliseHandler(
+    field: TransactionAddField,
+    normalise: (value: string) => string,
+  ): () => void {
+    /**
+     * Re-renders the field's stored value, when the rendering differs from what is stored.
+     * @returns {void} Completion is represented by the screen's own state.
+     */
+    return (): void => {
+      setValues(
+        /**
+         * Replaces the field's value with its canonical rendering, or leaves the values untouched.
+         * @param {TransactionAddValues} previous - Values as they stand.
+         * @returns {TransactionAddValues} The same object when nothing changed, so React skips the render.
+         */
+        (previous: TransactionAddValues): TransactionAddValues => {
+          const canonical = normalise(previous[field]);
+          return canonical === previous[field] ? previous : { ...previous, [field]: canonical };
+        },
       );
     };
   }
@@ -2257,7 +3290,14 @@ export function TransactionAddScreen(): ReactElement {
     const controlId = `${idPrefix}${field}`;
 
     return (
-      <Flex key={field} flex="1 1 0" vertical>
+      /*
+       * WHY : Assumptions: the wrapper no longer carries `flex: 1 1 0`, and dropping it is part of the
+       *       responsive fix rather than tidying. Every call site is now a `Col`, which is not a flex
+       *       container, so the term had no effect there -- and while the call sites WERE flex rows it was
+       *       the reason the arity never collapsed: a zero flex-basis makes every column fit at every
+       *       width, so `wrap` had nothing to act on and a three-up row stayed three-up at 375 pixels.
+       */
+      <Flex key={field} vertical>
         <Form.Item
           label={
             <Typography.Text style={labelStyle}>
@@ -2299,6 +3339,9 @@ export function TransactionAddScreen(): ReactElement {
             })}
             {...(presentation.numeric === true ? { inputMode: 'numeric' as const } : {})}
             {...(presentation.fixedPitch === true ? { style: fixedPitchStyle } : {})}
+            {...(presentation.normalise === undefined
+              ? {}
+              : { onBlur: normaliseHandler(field, presentation.normalise) })}
             {...(refusal?.state === 'BLANK'
               ? {
                   suffix: (
@@ -2353,131 +3396,189 @@ export function TransactionAddScreen(): ReactElement {
        * unaffected by the move.
        */}
       <Form layout="vertical">
-        <Flex gap="middle" wrap align="flex-start">
-          {renderField('accountId', { initialCursor: true, numeric: true, fixedPitch: true })}
+        <Row gutter={responsiveGridGutter}>
+          <Col {...KEY_FIELD_SPANS}>
+            {renderField('accountId', { initialCursor: true, numeric: true, fixedPitch: true })}
+          </Col>
           {/*
            * Assumptions: this word is NOT decorative and is therefore not hidden from assistive
-           * technology, unlike the rule below. It states that the two key fields are alternatives, which
-           * is the whole of the ordered branch at `app/cbl/COTRN02C.cbl` L195-L230, so an operator who
-           * cannot see it needs it read to them.
+           * technology, unlike the rule below it. It states that the two key fields are alternatives,
+           * which is the whole of the ordered branch at `app/cbl/COTRN02C.cbl` L195-L230, so an operator
+           * who cannot see it needs it read to them.
+           * Assumptions: it keeps a column of its own rather than being folded into either field's, so
+           * that when the row collapses to one field per line it stacks BETWEEN them and still reads as
+           * joining the two. Folded into the account field's column it would read as that field's hint.
            */}
-          <Typography.Text style={neutralStyle}>
-            {TRANSACTION_ADD_ALTERNATIVE_KEY_LABEL}
-          </Typography.Text>
-          {renderField('cardNumber', { numeric: true, fixedPitch: true })}
-        </Flex>
-        {/*
-         * Assumptions: the rule is hidden from assistive technology because it is the one piece of pure
-         * decoration on this screen -- seventy hyphens conveying a section boundary that the grouping
-         * already conveys structurally -- and announcing it would read seventy characters aloud. It is
-         * rendered in the fixed-pitch face so that its declared seventy characters occupy seventy
-         * character widths, which is the only sense in which its length means anything.
-         */}
-        <Typography.Text aria-hidden="true" style={ruleStyle}>
-          {TRANSACTION_ADD_RULE}
-        </Typography.Text>
-        <Flex gap="middle" wrap align="flex-start">
-          {renderField('typeCode', { numeric: true, fixedPitch: true })}
-          {renderField('categoryCode', { numeric: true, fixedPitch: true })}
-          {renderField('source')}
-        </Flex>
-        <Flex gap="middle" wrap align="flex-start">
-          {renderField('description')}
-        </Flex>
-        <Flex gap="middle" wrap align="flex-start">
+          <Col {...ALTERNATIVE_LABEL_SPANS}>
+            <Typography.Text style={neutralStyle}>
+              {TRANSACTION_ADD_ALTERNATIVE_KEY_LABEL}
+            </Typography.Text>
+          </Col>
+          <Col {...KEY_FIELD_SPANS}>
+            {renderField('cardNumber', { numeric: true, fixedPitch: true })}
+          </Col>
+        </Row>
+        <Divider style={ruleStyle} />
+        <Row gutter={responsiveGridGutter}>
+          <Col {...THREE_UP_SPANS}>
+            {renderField('typeCode', { numeric: true, fixedPitch: true })}
+          </Col>
+          <Col {...THREE_UP_SPANS}>
+            {renderField('categoryCode', { numeric: true, fixedPitch: true })}
+          </Col>
+          <Col {...THREE_UP_SPANS}>{renderField('source')}</Col>
+        </Row>
+        <Row gutter={responsiveGridGutter}>
+          <Col {...FULL_WIDTH_SPANS}>{renderField('description')}</Col>
+        </Row>
+        <Row gutter={responsiveGridGutter}>
           {/*
            * Assumptions: the amount carries the mapset's own format hint and is rendered in the
            * fixed-pitch face, and both follow from it being money. The hint is the reference's
            * `(-99999999.99)` at `app/bms/COTRN02.bms` L208-L212, and the face is what keeps the sign, the
            * eight integer digits and the two decimals in the same columns from one capture to the next.
            */}
-          {renderField('amount', {
-            hint: { text: TRANSACTION_ADD_FORMAT_HINTS.amount, tone: 'BLUE' },
-            fixedPitch: true,
-          })}
-          {renderField('originDate', {
-            hint: { text: TRANSACTION_ADD_FORMAT_HINTS.originDate, tone: 'BLUE' },
-            fixedPitch: true,
-          })}
-          {renderField('processDate', {
-            hint: { text: TRANSACTION_ADD_FORMAT_HINTS.processDate, tone: 'BLUE' },
-            fixedPitch: true,
-          })}
-        </Flex>
-        <Flex gap="middle" wrap align="flex-start">
-          {renderField('merchantId', { numeric: true, fixedPitch: true })}
-          {renderField('merchantName')}
-        </Flex>
-        <Flex gap="middle" wrap align="flex-start">
-          {renderField('merchantCity')}
-          {renderField('merchantZip')}
-        </Flex>
-        <Flex gap="middle" wrap align="flex-end">
           {/*
-           * Assumptions: the single-character control is RETAINED rather than replaced by the modal, and
-           * that is what keeps `Invalid value. Valid values are (Y/N)...` reachable. The modal can only
-           * produce the two answers its controls stand for, so a screen with no keyed field would have no
-           * way to submit a third character and the reference's `WHEN OTHER` sentence at
+           * WHY : ⚠️ Assumptions: the amount is the ONE control that declares a normaliser, and it needs
+           *       one because its field form is not a form anybody types. Browser validation drove
+           *       eighteen spellings through it and only `-` plus eight digits plus `.` plus two digits
+           *       was accepted, so `100.00`, `123.45` and `-100.00` were all refused and the tester
+           *       reported that no positive amount could be entered at all -- which made the transaction
+           *       add flow in AAP section 0.9.4 unrunnable. `canonicaliseKeyedAmount` carries the
+           *       derivation and the reason the predicate was not loosened instead.
+           */}
+          <Col {...THREE_UP_SPANS}>
+            {renderField('amount', {
+              hint: { text: TRANSACTION_ADD_FORMAT_HINTS.amount, tone: 'BLUE' },
+              fixedPitch: true,
+              normalise: canonicaliseKeyedAmount,
+            })}
+          </Col>
+          <Col {...THREE_UP_SPANS}>
+            {renderField('originDate', {
+              hint: { text: TRANSACTION_ADD_FORMAT_HINTS.originDate, tone: 'BLUE' },
+              fixedPitch: true,
+            })}
+          </Col>
+          <Col {...THREE_UP_SPANS}>
+            {renderField('processDate', {
+              hint: { text: TRANSACTION_ADD_FORMAT_HINTS.processDate, tone: 'BLUE' },
+              fixedPitch: true,
+            })}
+          </Col>
+        </Row>
+        <Row gutter={responsiveGridGutter}>
+          <Col {...TWO_UP_SPANS}>
+            {renderField('merchantId', { numeric: true, fixedPitch: true })}
+          </Col>
+          <Col {...TWO_UP_SPANS}>{renderField('merchantName')}</Col>
+        </Row>
+        <Row gutter={responsiveGridGutter}>
+          <Col {...TWO_UP_SPANS}>{renderField('merchantCity')}</Col>
+          <Col {...TWO_UP_SPANS}>{renderField('merchantZip')}</Col>
+        </Row>
+        <Row gutter={responsiveGridGutter}>
+          {/*
+           * Assumptions: the single-character control is RETAINED alongside the overlay, and that is what
+           * keeps `Invalid value. Valid values are (Y/N)...` reachable. The overlay can only produce the
+           * two answers its controls stand for, so a screen with no keyed field would have no way to
+           * submit a third character and the reference's `WHEN OTHER` sentence at
            * `app/cbl/COTRN02C.cbl` L182-L187 would become dead text.
            * Assumptions: the domain hint is `COLOR=NEUTRAL` at `app/bms/COTRN02.bms` L288-L292, unlike the
            * three blue format hints above, so it resolves to a different token and the difference is the
            * mapset's rather than an inconsistency here.
            */}
-          {renderField('confirmation', {
-            hint: { text: TRANSACTION_ADD_CONFIRM_DOMAIN_HINT, tone: 'NEUTRAL' },
-          })}
-          {/*
-           * WHY : Refactoring Rationale: the modal replaces the re-key-to-confirm convention, which exists
-           *       in the reference only because a 3270 had no modal to raise -- a whole screen turn plus a
-           *       keyed character was the cheapest confirmation the terminal could express. Its two
-           *       controls are labelled with the two characters the mapset's own `(Y/N)` field names, so
-           *       the modal introduces no text the baseline does not hold, and its question is the
-           *       reference's own row-21 prompt for the same reason: this screen has exactly one
-           *       confirmation sentence and inventing a second would breach the verbatim-text rule.
-           * WHY : ⚠️ Assumptions: both this control and the legend's ENTER control call `submitTurn`, one
-           *       function, so the two cannot diverge. That is now literally true and was not: this
-           *       control called `answerConfirmation`, which recorded the answer and then submitted, while
-           *       the legend called the turn directly with the confirmation field as it stood -- and the
-           *       two disagreed about which values were in play, because typing the answer cleared the
-           *       copy state the modal's path kept. The legend control exists because the reference paints
-           *       the key; this one exists because a browser operator has a mouse and the re-key
-           *       convention has no mouse analogue.
-           * WHY : Trade-offs: the primary emphasis is deliberate and `okType="danger"` is NOT used, though
-           *       the design-system mapping pairs it with `Popconfirm` for a destructive confirmation.
-           *       This action adds a record rather than removing one, and the mapset agrees: it paints the
-           *       prompt `COLOR=TURQUOISE` and the field `COLOR=GREEN`, with no warning or error colour
-           *       anywhere near either, so danger emphasis would contradict the measured source.
-           */}
+          <Col {...FULL_WIDTH_SPANS}>
+            {renderField('confirmation', {
+              hint: { text: TRANSACTION_ADD_CONFIRM_DOMAIN_HINT, tone: 'NEUTRAL' },
+            })}
+          </Col>
+        </Row>
+        {/*
+         * WHY : Purpose: the pointer operator's route to the confirmation. It stands where the reference
+         *       has nothing, because the reference's confirmation IS the field above -- a 3270 had no
+         *       overlay to raise, so a whole screen turn plus a keyed character was the cheapest
+         *       confirmation the terminal could express.
+         * WHY : ⚠️ Refactoring Rationale: the overlay is CONTROLLED and the trigger opens it through
+         *       {@link requestConfirmation} rather than through the library's own `click` trigger, and
+         *       that single change is what removes this screen's write-on-decline. An uncontrolled
+         *       overlay opens on its trigger's click -- before anything is validated -- and BOTH of its
+         *       answers submitted a turn of their own, including the declining one: a runtime sweep
+         *       recorded one `POST /api/v1/transactions` carrying `"confirmation":"N"` per decline,
+         *       answered 200 with nothing written, and painted `Unable to Add Transaction...` at an
+         *       operator who had just prevented the write. Emptying `trigger` moves the decision to open
+         *       into the one gate, and `onCancel` is then a purely local dismissal with no wire turn --
+         *       which is what L176-L181 does.
+         * WHY : ⚠️ Assumptions: the trigger sits in its OWN row at the end of the form and is left-aligned
+         *       with the fields above it, and it is NOT `type="primary"`. The sweep measured it
+         *       bottom-RIGHT and solid-primary, which made it the third primary control in a frame that
+         *       already carries the legend's Enter and F5 and put the screen's own action on the opposite
+         *       side from every other screen's.
+         * WHY : Assumptions: `placement` opens the overlay BELOW its trigger and flush with its leading
+         *       edge. The sweep measured the previous overlay covering 179 pixels of the very
+         *       confirmation input it asked about and sitting four pixels from the viewport edge; opening
+         *       downward from a control that is itself below that input covers neither.
+         * WHY : Assumptions: the overlay's TITLE is `Confirm to add this transaction...`, the sentence
+         *       L176-L181 moves into the message line on exactly this turn, and NOT the on-screen prompt
+         *       beside the control above. The two were the same string before, which put one verbatim
+         *       sentence on the screen twice and made it both the overlay's name and the input's
+         *       accessible name; the sweep recorded both.
+         */}
+        <Flex gap="middle" wrap align="flex-start">
           <Popconfirm
-            title={TRANSACTION_ADD_FIELD_LABELS.confirmation}
+            open={confirming}
+            trigger={[]}
+            placement="bottomLeft"
+            title={ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION}
+            okText={CONFIRMATION_ANSWERS.CONFIRM}
+            cancelText={CONFIRMATION_ANSWERS.DECLINE}
+            /*
+             * WHY : ⚠️ Assumptions: the DECLINING control takes focus, so the keystroke an overlay trains
+             *       an operator to press -- a bare Enter on a freshly raised surface -- dismisses rather
+             *       than commits. This surface writes a money-bearing record, and a surface whose default
+             *       answer is the irreversible one turns a reflex keystroke into a write.
+             * WHY : Alternatives Considered: focusing the confirming control, which is antd's own default
+             *       and what an earlier draft relied on. Rejected for the reason above; the cost is one
+             *       extra keystroke on the affirmative path, which is the cheaper side of the trade.
+             */
+            cancelButtonProps={{ autoFocus: true, style: CONFIRMATION_CONTROL_STYLE }}
+            okButtonProps={{ style: CONFIRMATION_CONTROL_STYLE }}
+            /*
+             * WHY : ⚠️ Refactoring Rationale: a dismissed surface is DESTROYED rather than kept hidden,
+             *       which is what makes the `autoFocus` above true on every opening rather than only the
+             *       first. The platform applies that attribute when a control ENTERS the document, and
+             *       the design system keeps a dismissed overlay mounted, so a re-opening re-shows a
+             *       declining control that never left and no mount re-applies it. A browser pass caught
+             *       exactly this asymmetry on this screen: raised from the legend on a fresh mount the
+             *       focus was on the declining answer, and raised again by pointer after a dismissal it
+             *       stayed on the anchor -- so the two routes to one gate disagreed about where the next
+             *       keystroke would land, on the screen whose whole point is that they agree.
+             *       Trade-offs: one extra mount per question, on a path already behind a network write.
+             *       The dismissal still animates -- the flag reaches the leave motion as `removeOnLeave`
+             *       in `@rc-component/dialog/lib/Dialog/Content/index.js`, so removal waits for it.
+             */
+            destroyOnHidden
             {...(resolvedKeys === null
               ? {}
               : {
                   /*
-                   * WHY : ⚠️ Assumptions: the card number rendered here is the SERVICE'S masked rendering,
-                   *       adopted verbatim, and no masking is performed in this file. AAP section 0.4.1.9
-                   *       reduces a primary account number everywhere except the administrative
-                   *       card-detail endpoint, and a confirmation modal is not that endpoint, so the
-                   *       sixteen digits never reach this browser to be reduced. The card-number INPUT
-                   *       above still shows what the operator keyed, because masking a field an operator
-                   *       is editing would hide their own keystrokes and make a correction impossible.
-                   * WHY : Assumptions: the summary is composed from labels this module already publishes and
-                   *       from values already on the screen, so it introduces no string the baseline does not
-                   *       hold. It exists because the modal replaces a blind re-key: the reference's
-                   *       confirmation turn redisplays the whole populated map, so the operator confirming
-                   *       could see what they were committing, and a modal that showed only a question would
-                   *       take that away.
-                   * WHY : ⚠️ Assumptions: the pair is read from `resolvedKeys` and NOT from the two key
-                   *       controls, and the gate is that a service answer exists rather than that the card
-                   *       control is non-blank. Reading the controls would describe whatever is keyed --
-                   *       including a card the operator typed that the service will discard in favour of the
-                   *       account's own, which is exactly what L209 overwrites -- and would do so with the
-                   *       authority of a service answer. The state is discarded when either key is edited,
-                   *       so no summary outlives the values it was resolved from.
-                   * WHY : Assumptions: the ACCOUNT is named as well as the card, because the reference
-                   *       resolves in both directions and a summary reading only one of them is silent on
-                   *       the arm that matters: a turn keyed by card alone resolves the account at L221,
-                   *       and that account is the one the capture lands against.
+                   * WHY : Purpose: NAME the record being committed. The reference's confirming turn
+                   *       re-displays the whole populated map -- `VALIDATE-INPUT-KEY-FIELDS` has already
+                   *       written the resolved pair back into both key fields at L209 and L223 -- so an
+                   *       operator confirming could see what they were committing.
+                   * WHY : ⚠️ Assumptions: the pair is read from `resolvedKeys`, the SERVICE's answer, and
+                   *       never from the two key controls. Reading the controls would describe whatever
+                   *       is keyed, including a card the operator typed that the service discards in
+                   *       favour of the account's own -- which is exactly what L209 overwrites -- and
+                   *       would do so with the authority of a service answer.
+                   * WHY : Assumptions: the card number is the service's MASKED rendering, adopted
+                   *       verbatim; no masking happens in this file. AAP section 0.4.1.9 reduces a
+                   *       primary account number everywhere except the administrative card-detail
+                   *       endpoint, so the sixteen digits never reach this browser to be reduced.
+                   * WHY : Assumptions: this member is ABSENT rather than empty when no turn has resolved
+                   *       the pair, which a pointer can reach because opening issues no request. Naming
+                   *       the keyed values instead would present an unresolved card with a service's
+                   *       authority behind it.
                    */
                   description: (
                     <Flex vertical>
@@ -2493,33 +3594,31 @@ export function TransactionAddScreen(): ReactElement {
                     </Flex>
                   ),
                 })}
-            okText={CONFIRM_MODAL_OK}
-            cancelText={CONFIRM_MODAL_CANCEL}
-            disabled={busy}
-            onConfirm={
-              /**
-               * Submits a confirming answer, which writes the capture.
-               * @returns {void} Completion is represented by the screen's own state.
-               */
-              (): void => {
-                submitTurn(CONFIRM_MODAL_OK);
-              }
-            }
-            onCancel={
-              /**
-               * Submits a declining answer, which the reference answers by asking again.
-               * @returns {void} Completion is represented by the screen's own state.
-               */
-              (): void => {
-                submitTurn(CONFIRM_MODAL_CANCEL);
-              }
-            }
+            onConfirm={confirmAndCommit}
+            onCancel={declineLocally}
           >
-            <Button type="primary" loading={busy}>
+            <Button ref={confirmationAnchor} onClick={requestConfirmation} disabled={busy}>
               {TRANSACTION_ADD_TITLE}
             </Button>
           </Popconfirm>
         </Flex>
+        {/*
+         * WHY : ⚠️ Purpose: an in-flight turn is stated to an operator who cannot see the screen. This
+         *       screen already reports it VISUALLY and thoroughly -- every control and every key
+         *       binding carries `disabled` while `busy` -- and none of that is announced: a disabled
+         *       control reads as unavailable with no reason, and the reason is the whole message.
+         * WHY : Assumptions: the region is rendered on every turn and holds the empty string while
+         *       idle, which is what `busyAnnouncement` produces for an undefined announcement. A live
+         *       region has to be in the accessibility tree before its content changes for the change
+         *       to be announced, so rendering it only while busy would lose the transition into the
+         *       busy state, which is the one that matters.
+         * WHY : Assumptions: `busy` is the flag and `confirming` is deliberately NOT, even though the
+         *       controls are disabled for both. `confirming` means the screen is WAITING FOR THE
+         *       OPERATOR, and the overlay it raises is itself a dialog that takes focus and states its
+         *       question -- announcing "working on your request" over an unanswered question would be
+         *       false.
+         */}
+        {busyAnnouncement(busy ? REQUEST_IN_PROGRESS : undefined)}
       </Form>
       {/*
        * Assumptions: the legend the shell paints from this screen's delegated bindings dispatches through

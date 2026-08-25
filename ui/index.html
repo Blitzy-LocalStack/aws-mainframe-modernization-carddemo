@@ -143,6 +143,32 @@
     <title>CardDemo</title>
 
     <!--
+      Refactoring Rationale: this element was absent, and its absence was reported
+      by an automated audit as a missing description rather than as a decision. The
+      block below on progressive-web-app, Open Graph and card metadata argues that
+      this application is never a public, shareable or installable page and that
+      each of those tags would buy an asset request nothing consumes. That argument
+      does not extend to this tag, and the difference is what it costs: a
+      description is inert text in a document already being fetched, so it adds no
+      request, no script and no third party, and it is what a browser's history,
+      bookmark list and tab preview show when the title alone is one word.
+      Assumptions: the text is a plain statement of what the application is and
+      names nothing internal -- no module path, no route, no endpoint, no field
+      inventory. That constraint is the point rather than a nicety: this element
+      SURVIVES into the emitted bundle, unlike the commentary around it, which
+      ui/vite.config.ts strips from the served document precisely because it names
+      such things.
+      Trade-offs: the text duplicates nothing and so can agree with nothing
+      mechanically -- there is no baseline constant for "what this application is",
+      the way COTTL01Y.cpy holds the title above. It is therefore prose, and it is
+      kept to one sentence so a future reader has one sentence to keep true.
+    -->
+    <meta
+      name="description"
+      content="CardDemo credit card administration: account, card, transaction, bill payment, authorization and reporting screens."
+    />
+
+    <!--
       Alternatives Considered: no stylesheet is linked because antd 6 defaults to
       pure CSS variables theming and injects the styles it needs at run time, so
       unlike its earlier majors it publishes no stylesheet for an application to

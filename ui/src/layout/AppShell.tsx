@@ -178,7 +178,7 @@
 import { Button, Col, Flex, Layout, Row, Typography, theme } from 'antd';
 import { useCallback, useLayoutEffect, useState, useSyncExternalStore } from 'react';
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
-import { Outlet, useLocation } from 'react-router';
+import { Outlet, useLocation, useNavigate } from 'react-router';
 
 import { useAuth } from '../hooks/useAuth';
 // WHY : Assumptions: the sign-off control's label is the LOCAL SHELL_SIGN_OFF_LABEL below and not the
@@ -188,8 +188,19 @@ import { useAuth } from '../hooks/useAuth';
 //       catalog exists to draw -- and it is declared beside SKIP_TO_CONTENT_LABEL for the reason
 //       recorded there. The catalog's own entry stays where it is: it is exported, documented and
 //       reachable, and removing a published constant is not this file's decision to make.
-import { THANK_YOU_CARDDEMO } from '../messages/messages';
+import { MAIN_MENU_HEADINGS, SIGN_ON_SUBMIT_LABEL, THANK_YOU_CARDDEMO } from '../messages/messages';
 import type { MapsetName } from '../messages/messages';
+// WHY : Assumptions: the address is read from `../routes/navigation`, which imports nothing but
+//       react-router types, and NOT from `../routes/guards`, which re-exports it. The guards module
+//       imports this file, so importing it back would close a cycle; the constant's own doc block in
+//       `navigation.ts` records why the declaration lives there.
+import {
+  MAIN_MENU_ROUTE,
+  SIGN_OFF_ACKNOWLEDGED_REASON,
+  SIGN_ON_ROUTE,
+  navigateSafely,
+  signOnEntryReason,
+} from '../routes/navigation';
 import {
   BMS_TEXT_COLOR_TOKENS,
   BREAKPOINT_TOKENS,
@@ -201,7 +212,7 @@ import { MessageBand } from './MessageBand';
 import type { MessageBandSeverity } from './MessageBand';
 import { PfKeyBar } from './PfKeyBar';
 import type { PfKeyLegendColor } from './PfKeyBar';
-import { ScreenHeader } from './ScreenHeader';
+import { AppTitleHeading, ScreenHeader } from './ScreenHeader';
 import type { CicsAid, PfKeyBinding } from './usePfKeys';
 
 /*
@@ -226,6 +237,17 @@ import type { CicsAid, PfKeyBinding } from './usePfKeys';
  * their landmark roles; only the frame as a whole needs this.
  */
 export const APP_SHELL_TEST_ID = 'app-shell';
+
+/**
+ * Stable `data-testid` on the pinned zone that carries the row-22, row-23 and row-24 lines.
+ *
+ * Assumptions: a data attribute rather than a landmark query, because the zone is a layout
+ * primitive that deliberately carries NO role - adding one would put a fourth landmark in a
+ * frame whose landmark census is asserted elsewhere. It still needs a handle: the pinning
+ * that keeps rows 23 and 24 on the glass is declared on this element and nowhere else, so a
+ * regression to in-flow siblings is only observable by inspecting it.
+ */
+export const SHELL_PINNED_ZONE_TEST_ID = 'shell-pinned-zone';
 
 /**
  * `id` of the shell's content region, and the skip link's target.
@@ -323,6 +345,24 @@ export const SHELL_SIGN_OFF_CONTROL_TEST_ID = 'shell-sign-off-control';
 export const SHELL_SIGN_OFF_TEST_ID = 'shell-sign-off';
 
 /**
+ * Test handle for the control that leaves the sign-off acknowledgement for the sign-on screen.
+ *
+ * Assumptions: the surface needs a handle of its own because the acknowledgement replaces the frame,
+ * so none of the frame's handles resolve while it is shown and a query for the control cannot be
+ * scoped by them.
+ */
+export const SHELL_SIGN_OFF_CONTINUE_TEST_ID = 'shell-sign-off-continue';
+
+/**
+ * Test handle for the chrome control that crosses from the administrative surface to the main menu.
+ *
+ * Assumptions: the control is chrome rather than a menu option, so it carries its own handle instead
+ * of being found among the options of whichever menu is mounted. See its render site for why it is not
+ * a seventh administrative option.
+ */
+export const SHELL_MAIN_MENU_CROSSING_TEST_ID = 'shell-main-menu-crossing';
+
+/**
  * The two responsive breakpoints this shell reflows at, named as design-system tokens.
  *
  * Purpose: record which declared token each responsive `Col` prop below corresponds to,
@@ -376,7 +416,64 @@ export interface ShellMessageSlot {
   readonly severity?: MessageBandSeverity | undefined;
   /** Mapset the screen stands in for, which fixes the band's rendered display width. */
   readonly mapset?: MapsetName | undefined;
+  /**
+   * The row-22 INFORMATIONAL line, for the five mapsets that declare one above row 23.
+   *
+   * Refactoring Rationale: this member exists because the frame previously offered ONE
+   * channel and the reference declares TWO, so the five screens whose mapset carries
+   * `INFOMSG` had nowhere to put it and rendered a second band inside their own body
+   * instead. That is measurable and was measured: on `/account/update` and
+   * `/reference/transaction-types/:cd` the frame's row-23 band stands empty at its reserved
+   * height while the screen's real advisory paints roughly 200 pixels higher up the page,
+   * so an operator reads two message zones that the terminal showed as two adjacent rows.
+   * Publishing the second line here puts both bands back where `app/bms/COACTVW.bms`
+   * L356-L368 puts them - row 22 immediately above row 23, in the same pinned zone.
+   *
+   * Assumptions: the two channels are distinguished by WHAT THEY CARRY and not by severity.
+   * `INFOMSG` is `ATTRB=(PROT) COLOR=NEUTRAL` and carries standing guidance the operator did
+   * not ask for - `Enter or update id of account to display` on every turn of the account
+   * view - while `ERRMSG` is `COLOR=RED ATTRB=(ASKIP,BRT,FSET)` and carries the OUTCOME of
+   * the turn just taken. So advisory text belongs here and an outcome belongs in `text`,
+   * whatever colour either one ends up painted in.
+   *
+   * Assumptions: the member is optional and its absence means the mapset declares no row-22
+   * field, which is true of 16 of the 21. A screen that omits it gets exactly the frame it
+   * got before this member existed, so nothing has to opt out.
+   */
+  readonly information?: ShellInformationSlot | undefined;
 }
+
+/**
+ * The row-22 informational line a screen delegates to the frame.
+ *
+ * Assumptions: it carries no `mapset` of its own. The display width is a property of the
+ * MAPSET rather than of the line, and a screen stands in for exactly one mapset, so the
+ * width already published on {@link ShellMessageSlot.mapset} governs both bands. A second
+ * mapset member here would let one screen claim two widths.
+ */
+export interface ShellInformationSlot {
+  /** Advisory text, or `null`/`undefined` when the screen has none to show. */
+  readonly text?: string | null | undefined;
+  /**
+   * Severity governing the alert variant, colour and ARIA role. Defaults to `"neutral"`.
+   *
+   * Assumptions: the default is `"neutral"` and not the row-23 default of `"error"`, because
+   * `INFOMSG` is declared `COLOR=NEUTRAL` on the mapsets that have it, which the token bridge
+   * resolves to `colorTextSecondary`. A screen naming nothing therefore gets the colour its
+   * own mapset declares rather than the colour the other line declares.
+   */
+  readonly severity?: MessageBandSeverity | undefined;
+}
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: there is no `DEFAULT_INFORMATION_SEVERITY` constant here any more,
+ *       and the measurement it carried has not been dropped - it has moved to the module that owns the
+ *       band. `defaultMessageBandSeverity` in `ui/src/layout/MessageBand.tsx` answers it from
+ *       `MESSAGE_BAND_CHANNELS`, the table that records what each of the two BMS message lines carries
+ *       and which `COLOR=` operand it declares: `COLOR=NEUTRAL` for row 22 and `COLOR=RED` for row 23.
+ *       Holding a copy of the row-22 half here made the frame and the band two authorities on one
+ *       decision, and only one of them was beside the row-23 default it has to differ from.
+ */
 
 /**
  * The function-key legend and dispatcher the shell paints on the row-24 line.
@@ -552,10 +649,35 @@ function areScreensEquivalent(
 }
 
 /**
- * Reports whether two message slots would paint the same row-23 line.
+ * Reports whether two message slots would paint the same row-22 and row-23 lines.
+ *
+ * ⚠️ Refactoring Rationale: the nested row-22 line is part of this comparison, and it was left out
+ * when {@link ShellMessageSlot.information} was added. The omission is not a loose comparison, it is
+ * a DISCARD: the comparison is what decides whether the frame adopts a newly published slot at all,
+ * so a slot whose row-23 half is unchanged and whose row-22 half has advanced was judged identical
+ * to the one already rendered and thrown away. The operator then reads the PREVIOUS advisory beside
+ * the current outcome. The account-update sequence is exactly that shape — the row-22 line advances
+ * from `Changes validated.Press F5 to save` to `Changes committed to database`
+ * (`app/cbl/COACTUPC.cbl` L473 and L475, both `WS-INFO-MSG`) across a turn that leaves row 23
+ * untouched — so the stalest possible line is the one confirming a write.
+ *
+ * Assumptions: the nested slot is compared member by member rather than by object identity, for the
+ * same reason the row-23 members are: `useShellSlot` is called with an object literal in every
+ * screen's render body, so identity changes on every render while the rendered text usually does
+ * not. Comparing by identity would make the comparison always false and defeat its purpose.
+ *
+ * Assumptions: `severity` is compared as well as `text`, because the band resolves colour and ARIA
+ * role from it — `ui/src/layout/MessageBand.tsx` gives the band `alert` or `status` according to
+ * severity — so a screen that keeps its advisory wording and raises its severity has changed what is
+ * announced, not merely how it looks.
+ *
+ * Assumptions: an absent nested slot and a present one carrying no text are NOT collapsed here. They
+ * differ in what the frame paints — the band module decides that — and this function's only job is
+ * to report whether the two publications would paint the same thing, so it defers by comparing the
+ * members it was given rather than normalising them first.
  * @param {ShellMessageSlot | undefined} previous - Message currently rendered.
  * @param {ShellMessageSlot | undefined} next - Message just published.
- * @returns {boolean} `true` when text, severity and mapset all match.
+ * @returns {boolean} `true` when both lines' text, severity and the mapset all match.
  */
 function areMessagesEquivalent(
   previous: ShellMessageSlot | undefined,
@@ -567,8 +689,31 @@ function areMessagesEquivalent(
   return (
     previous.text === next.text &&
     previous.severity === next.severity &&
-    previous.mapset === next.mapset
+    previous.mapset === next.mapset &&
+    areInformationLinesEquivalent(previous.information, next.information)
   );
+}
+
+/**
+ * Reports whether two row-22 advisory slots would paint the same line.
+ *
+ * Refactoring Rationale: this is a function of its own rather than two more conjuncts inside
+ * {@link areMessagesEquivalent}, because the nested slot is optional and so needs the same
+ * absent-versus-present handling the outer slot already has at its head. Inlining it would have put
+ * a second `undefined` branch in the middle of a boolean expression, where the `previous ===
+ * undefined || next === undefined` case cannot be expressed as a conjunct at all.
+ * @param {ShellInformationSlot | undefined} previous - Advisory currently rendered.
+ * @param {ShellInformationSlot | undefined} next - Advisory just published.
+ * @returns {boolean} `true` when both slots are absent, or both carry the same text and severity.
+ */
+function areInformationLinesEquivalent(
+  previous: ShellInformationSlot | undefined,
+  next: ShellInformationSlot | undefined,
+): boolean {
+  if (previous === undefined || next === undefined) {
+    return previous === next;
+  }
+  return previous.text === next.text && previous.severity === next.severity;
 }
 
 /**
@@ -599,11 +744,23 @@ function areBindingListsEquivalent(
     if (before === undefined || after === undefined) {
       return before === after;
     }
+    // WHY : Refactoring Rationale: `busy` and `risk` are part of this comparison because they are
+    //       part of the RENDERED legend -- `ui/src/layout/PfKeyBar.tsx` paints the in-flight
+    //       affordance from the first and the control's emphasis from the second. A member left out
+    //       here is a member whose change never notifies a subscriber, so the shell would keep the
+    //       snapshot it already had and the new affordance would reach the screen only if some other
+    //       member happened to change in the same commit. That failure mode is worse than a stale
+    //       label: the whole point of the busy member is to appear the instant a turn starts, and
+    //       the screen that publishes it re-renders itself without re-rendering this frame, so
+    //       omitting it here would leave the affordance permanently invisible on all 21 screens
+    //       while every unit test of the bar in isolation kept passing.
     if (
       before.aid !== after.aid ||
       before.action !== after.action ||
       before.label !== after.label ||
-      before.enabled !== after.enabled
+      before.enabled !== after.enabled ||
+      before.busy !== after.busy ||
+      before.risk !== after.risk
     ) {
       return false;
     }
@@ -1107,11 +1264,38 @@ export function AppShell(props: AppShellProps): ReactElement {
    * closer to the baseline than the default was. The value written here is a token reference
    * rather than a colour, so the band still follows the theme.
    */
+  /*
+   * Refactoring Rationale: every zone of the frame now declares the SAME horizontal inset,
+   * and it is declared here because the four zones disagreed about it before. Measured in a
+   * browser across all 17 reachable routes: the design system insets its header and its
+   * footer by a fixed 50 pixels of its own, the content region had no inset at all, and the
+   * message line had none either - so at 375, 576 and 768 the content ran edge to edge with
+   * input borders flush against the literal viewport edge while the key legend sat 50 pixels
+   * in, at 992 the content column was inset LESS (41.3) than the legend (50), and the row-23
+   * band started at x=0 on every route and visibly hung off the left edge of the frame
+   * whenever it carried a sentence. One declaration applied to every zone is what makes the
+   * four left edges one left edge, at every width, which is the property the fixed 80-column
+   * grid had for free.
+   *
+   * Assumptions: the value is the spacing bridge's large step rather than the design system's
+   * own 50, and the difference is not cosmetic - 50 is a component-stylesheet constant that
+   * `ui/src/theme/tokens.ts` does not name, so matching it in the two zones that lack it
+   * would have meant writing a pixel literal into three more places. Naming a token instead
+   * moves all four zones onto one auditable value and keeps the zero-hardcoded-values rule
+   * intact. The inset shrinks from 50 to the large spacing step, which the baseline has no
+   * opinion about: the terminal's column 1 IS the display edge, so any browser gutter is
+   * additive and only its uniformity is a fidelity question.
+   */
+  const zoneInlinePadding: CSSProperties = {
+    paddingInline: cssVar[SPACING_TOKENS.controlPaddingLarge],
+  };
+
   const headerStyle: CSSProperties = {
     height: 'auto',
     lineHeight: cssVar.lineHeight,
     paddingBlock: cssVar[SPACING_TOKENS.controlPaddingCompact],
     background: cssVar[SURFACE_TOKENS.screen],
+    ...zoneInlinePadding,
   };
 
   /*
@@ -1121,6 +1305,170 @@ export function AppShell(props: AppShellProps): ReactElement {
    * default, against which the same text tokens measure lower than they do here.
    */
   const zoneStyle: CSSProperties = { background: cssVar[SURFACE_TOKENS.screen] };
+
+  /*
+   * Refactoring Rationale: the frame is now BOUNDED to one viewport and clips its own overflow,
+   * where it previously grew with its content. A browser measurement is what forced this: on a
+   * screen taller than the display the pinned zone was found painting OVER the screen body at
+   * `scrollY 0` - on the card update screen `document.elementFromPoint` at the middle of the
+   * information band returned an element the band did not contain, so the "Changes committed to
+   * database" confirmation was completely invisible until the operator scrolled a further 52
+   * pixels, and on the authorization summary the zone covered the first row of the table.
+   *
+   * Assumptions: the cause is not the zone's declaration but its containing block. A sticky
+   * element is shifted within its containing block to stay in the scrollport, and it OVERLAPS
+   * whatever shares that space rather than displacing it. While the frame grew with the content
+   * the containing block was the whole document, so the zone floated at the viewport's block end
+   * for the entire scroll and there was always body content underneath it. Bounding the frame to
+   * the viewport and moving the scroll INTO the content region makes the zone an ordinary flex
+   * item at the end of a column exactly one viewport tall: it can no longer be shifted anywhere,
+   * so there is no position from which it can overlap.
+   *
+   * Alternatives Considered: adding block-end padding to the content region was rejected because
+   * it only clears the zone at the very END of the scroll - the measured failures were at
+   * `scrollY 0`, where padding below the content is nowhere near the overlap. Making the zone
+   * `position: fixed` was rejected for the same reason it fails as sticky: fixed also takes the
+   * element out of flow, so it still has no reserved space. Publishing a spacer from each screen
+   * was rejected outright as a lie about where the geometry lives - eighteen screens would each
+   * have to know this frame's zone height.
+   *
+   * Trade-offs: the DOCUMENT no longer scrolls; the screen body does. That is the more faithful
+   * arrangement rather than merely an acceptable one - the reference display is exactly 24 rows
+   * with rows 22 to 24 fixed, and a terminal never scrolled its function-key legend off the
+   * glass. It does mean a caller measuring `window.scrollY` reads zero on a long screen and must
+   * read the content region's own `scrollTop` instead, which is why this is recorded here.
+   */
+  const frameStyle: CSSProperties = {
+    ...zoneStyle,
+    maxBlockSize: '100dvh',
+    overflow: 'hidden',
+  };
+
+  /*
+   * Assumptions: the content region carries the shared inset and the surface, and nothing
+   * else. Its vertical padding is the design system's own, because the reference says nothing
+   * about the distance between row 3 and row 4 that a browser could honour.
+   *
+   * ⚠️ Refactoring Rationale: it additionally carries the growth, the scroll and a zero block
+   * minimum, which together make it the frame's one scrolling region - see {@link frameStyle}
+   * for the measured defect that motivated it. `minBlockSize: 0` is not optional and is the part
+   * a reader is most likely to delete as redundant: a flex item's automatic minimum size is its
+   * content, so without the override this region would refuse to shrink below its own body, the
+   * frame would overflow its bound, and the zone would be pushed off the display entirely -
+   * trading an occluded confirmation for an unreachable legend. `1` and `0` are a flex factor
+   * and a floor rather than design values, so neither resolves to a token by nature.
+   */
+  const contentStyle: CSSProperties = {
+    ...zoneStyle,
+    ...zoneInlinePadding,
+    flex: 1,
+    minBlockSize: 0,
+    overflowY: 'auto',
+  };
+
+  /*
+   * Refactoring Rationale: the body column is BOUNDED and centred, where it used to be a
+   * responsive grid column - `span={24} lg={22}` - that was neither. Two measured
+   * consequences: at roughly 1848 pixels the content stayed anchored at x=78 and left the
+   * right half of the display empty, and because the 22-of-24 column is a PROPORTION its
+   * inset grew with the viewport (41.3 at 992, 50 at 1200, 53.3 at 1280, 66.7 at 1600) while
+   * the legend's inset stayed fixed - so the same frame had two different left edges that
+   * only agreed at one width. A maximum measure plus centring gives a constant gutter at
+   * every width above it and the full width below it.
+   *
+   * Assumptions: the bound is the design system's LARGE SCREEN token and not a chosen pixel
+   * count, so the widest line of a migrated record view is the width the bridge already
+   * nominates as the point at which a layout is "large". `ui/src/theme/tokens.ts` declares
+   * exactly two breakpoints, medium and large, and no third one is invented here.
+   *
+   * Assumptions: this token resolves to a NUMBER rather than to a `var(--…)` reference, and
+   * that is a property of the design system rather than an inconsistency here. Its theme keeps
+   * the whole `screen*` family on a preserve list - they have to be usable inside media
+   * queries, where a custom property cannot appear - so `cssVar.screenLG` hands back 992 and
+   * React appends the unit. Every other token this file reads is a reference; this one cannot
+   * be, and the difference is recorded so a reader does not "fix" it.
+   *
+   * Trade-offs: a bounded measure means a very wide display shows empty margins rather than a
+   * stretched record view. That is the intended trade: the alternative measured above puts a
+   * one-character input 723 pixels wide at 1600, which is the same defect the fixed grid
+   * avoided by construction. `maxInlineSize` rather than `inlineSize` keeps every width below
+   * the bound unchanged, so no narrow viewport pays for it.
+   */
+  const contentColumnStyle: CSSProperties = {
+    maxInlineSize: cssVar[BREAKPOINT_TOKENS.large],
+    inlineSize: '100%',
+  };
+
+  /*
+   * Refactoring Rationale: the message line and the key legend are PINNED to the bottom of
+   * the viewport, and this is the whole of the fix for the frame's largest measured defect.
+   * Both were ordinary in-flow siblings, so any screen taller than the viewport pushed them
+   * off the bottom of it: measured across 21 screens at six widths, the band and the legend
+   * were both below the fold on 8 screens at 768 and above and on 13 at 375, and on
+   * `/account/update` at 375 the legend sat 2,379 pixels below the fold. The reference cannot
+   * express that state at all - rows 23 and 24 exist on every one of the 17 base mapsets and
+   * a 24-row display has no scroll - so an operator could always see the outcome of a turn
+   * and the keys available for the next one. AAP section 0.4.4 states the same requirement.
+   *
+   * Alternatives Considered: `position: fixed`, which is the more familiar way to pin a bar.
+   * Rejected because a fixed element is out of flow, so it reserves no space and the last row
+   * of a screen's content renders UNDERNEATH it - which trades a band the operator cannot see
+   * for content they cannot see, and needs a hand-maintained spacer of exactly the pinned
+   * height to avoid. `position: sticky` keeps the element in flow, so its space is reserved by
+   * construction and the reservation cannot drift from the height it reserves for.
+   *
+   * Assumptions: sticky positioning needs a scrolling ancestor and a containing block taller
+   * than itself, and both hold here: `ui/index.html` sizes the mount point to one viewport and
+   * the design system's `.ant-layout { flex: auto }` stretches this frame to fill it, so the
+   * document is what scrolls and this element's containing block is the frame.
+   *
+   * Assumptions: the surface is painted on the pinned zone itself. A sticky element overlaps
+   * whatever is above it in flow while the page is scrolled, so a transparent zone would show
+   * the screen's own content sliding through the band - which is why the fill is stated here
+   * as well as on the footer inside it.
+   *
+   * Trade-offs: the stacking order is one below the design system's popup base rather than a
+   * value of its own. The zone has to paint above the screen body - including a table's own
+   * sticky columns, which the design system gives a low positive index - and below every
+   * overlay, because a dialog or a popconfirm that opened UNDER the pinned band would be the
+   * defect this fix introduced. Deriving it from the popup token in a `calc` keeps both
+   * relationships true if the theme moves the token, where a literal would fix only today's.
+   */
+  const pinnedZoneStyle: CSSProperties = {
+    ...zoneStyle,
+    ...zoneInlinePadding,
+    position: 'sticky',
+    insetBlockEnd: 0,
+    zIndex: `calc(${String(cssVar.zIndexPopupBase)} - 1)`,
+  };
+
+  /*
+   * Refactoring Rationale: the shared inset is declared on the PINNED ZONE rather than on the
+   * three lines it holds, and that is what finally makes the frame's left edge one edge. The
+   * row-22 and row-23 bands are children of this zone and declared no inset of their own -
+   * measured at x=0 on every one of the 17 reachable routes, so a populated row-23 band hung
+   * off the left edge of a frame whose heading sat at x=53, whose legend sat at x=50 and whose
+   * row-22 band sat at x=53. Insetting each line separately would have meant three more places
+   * to keep in step with {@link zoneInlinePadding}; insetting their common parent means the
+   * band, the advisory line and the legend cannot disagree by construction.
+   *
+   * Assumptions: the legend's own horizontal padding is therefore ZEROED rather than set to the
+   * shared value, because the zone already applies it - stating it twice would inset the legend
+   * by two gutters and put a fourth left edge in the frame. `0` is one of the values the
+   * zero-hardcoded-values rule exempts by name, so this is not a pixel literal creeping in; the
+   * design system's own `padding: 24px 50px` on `Layout.Footer` is what has to be displaced,
+   * and only an explicit declaration displaces a component stylesheet.
+   *
+   * Refactoring Rationale: the vertical half is the compact spacing step rather than the
+   * inherited 24. The zone is now pinned, so every pixel of its height is height the screen
+   * body gives up on every screen, and the reference gives row 24 one text row of the
+   * twenty-four.
+   */
+  const footerStyle: CSSProperties = {
+    ...zoneStyle,
+    paddingBlock: cssVar[SPACING_TOKENS.controlPaddingCompact],
+    paddingInline: 0,
+  };
 
   /*
    * Assumptions: the skip link is TEXT and therefore resolves through `BMS_TEXT_COLOR_TOKENS`
@@ -1137,10 +1485,96 @@ export function AppShell(props: AppShellProps): ReactElement {
    * Alternatives Considered: moving the link seed to the text-grade shade. Rejected because
    * the seed feeds a nine-shade ramp plus hover and active states that fills and borders also
    * read, so a change made for one sentence would move surfaces no measurement asked to move.
-   * Trade-offs: the underline and the focus ring still come from the component, which is
-   * correct - only the hue is overridden, and it is overridden to a shade of the same family.
+   * ⚠️ Refactoring Rationale: the trade-off recorded here said the underline still comes from the
+   * component and that only the hue is overridden. The second half was true and the first was not:
+   * the design system ships `linkHoverDecoration: none`, so there was no underline to inherit, and
+   * because an inline colour outranks a stylesheet rule the override also displaced the component's
+   * own hover and active colours. Measured consequence: on all fifteen rendered screens the link's
+   * hover and active renderings were byte-identical to its resting one, so the only state a pointer
+   * user could perceive was focus. The states are therefore declared here as well, since the
+   * declaration that broke them is the one that has to restore them.
    */
-  const skipLinkStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE] };
+  const [skipLinkState, setSkipLinkState] = useState<'rest' | 'hover' | 'press'>('rest');
+
+  /*
+   * Assumptions: the three states are held in React state because a CSS pseudo-class cannot be
+   * expressed in an inline style, and the inline style is what carries the contrast-safe hue. The
+   * handlers are pointer events rather than mouse events so a touch or pen contact reaches the same
+   * three states.
+   *
+   * Alternatives Considered: giving the link back to the design system by deleting the override,
+   * which is the smallest possible edit and was rejected on measurement. The component resolves the
+   * link anchor itself, which measures 4.10:1 against the surface this shell paints where WCAG AA
+   * asks 4.5:1 - a separate finding records that exact number as a violation - so restoring hover
+   * by deleting the hue would trade a missing state for an unreadable resting one.
+   *
+   * Alternatives Considered: hovering to a LIGHTER shade of the same ramp, which is the design
+   * system's own convention and what its link tokens do. Rejected because every lighter step
+   * measures worse than the resting shade against this surface, so the conventional direction is
+   * the one direction this element cannot take.
+   *
+   * Assumptions: hover therefore adds an UNDERLINE at the resting hue - a non-colour channel, so it
+   * costs no contrast and is perceptible to a reader who cannot distinguish the hue at all - and
+   * press moves to the base text grade, which is both the darkest token available and unmistakably
+   * different from the blue. Both values are token references, and `underline` and `none` are
+   * keywords rather than design values, so nothing here is a literal the theme cannot follow.
+   */
+  const skipLinkStyle: CSSProperties = {
+    color:
+      skipLinkState === 'press'
+        ? cssVar[BMS_TEXT_COLOR_TOKENS.DEFAULT]
+        : cssVar[BMS_TEXT_COLOR_TOKENS.BLUE],
+    textDecorationLine: skipLinkState === 'rest' ? 'none' : 'underline',
+  };
+
+  /**
+   * Marks the skip link hovered, so its hover rendering can differ from its resting one.
+   * @returns {void} Nothing; the recorded state drives {@link skipLinkStyle}.
+   */
+  const skipLinkHovered = useCallback(
+    /**
+     * Records the pointer state this handler stands for.
+     * @returns {void} Nothing; the recorded state drives {@link skipLinkStyle}.
+     */
+    function recordSkipLinkHovered(): void {
+      setSkipLinkState('hover');
+    },
+    [],
+  );
+
+  /**
+   * Returns the skip link to its resting rendering when the pointer leaves it.
+   * @returns {void} Nothing; the recorded state drives {@link skipLinkStyle}.
+   */
+  const skipLinkRested = useCallback(
+    /**
+     * Records the pointer state this handler stands for.
+     * @returns {void} Nothing; the recorded state drives {@link skipLinkStyle}.
+     */
+    function recordSkipLinkRested(): void {
+      setSkipLinkState('rest');
+    },
+    [],
+  );
+
+  /**
+   * Marks the skip link pressed while a pointer is held down on it.
+   *
+   * Assumptions: the pressed rendering is released by the hover handler on pointer up rather than by
+   * a handler of its own, because a pointer that is still over the element after a release is
+   * hovering it - and a release that happens elsewhere fires the leave handler instead.
+   * @returns {void} Nothing; the recorded state drives {@link skipLinkStyle}.
+   */
+  const skipLinkPressed = useCallback(
+    /**
+     * Records the pointer state this handler stands for.
+     * @returns {void} Nothing; the recorded state drives {@link skipLinkStyle}.
+     */
+    function recordSkipLinkPressed(): void {
+      setSkipLinkState('press');
+    },
+    [],
+  );
 
   /*
    * Assumptions: the sign-off surface takes the same fill and, unlike the frame, needs its own
@@ -1175,7 +1609,7 @@ export function AppShell(props: AppShellProps): ReactElement {
     // third argument.
     getShellSlotSnapshot,
   );
-  const { signedOn, signOut } = useAuth();
+  const { isAdmin, signedOn, signOut } = useAuth();
 
   /*
    * Assumptions: this record is NOT the session state the file overview forbids, and the
@@ -1189,21 +1623,31 @@ export function AppShell(props: AppShellProps): ReactElement {
    * below, and is discarded on reload - after which the operator is anonymous because the
    * token is gone, not because this value was remembered.
    *
-   * ⚠️ Refactoring Rationale: this holds the HISTORY ENTRY signed off at rather than a
-   * boolean, because the boolean was a one-way latch and this shell is the layout route
-   * above the sign-on route as well as above the guarded subtree -- `ui/src/router.tsx`
-   * declares `SIGN_ON_ROUTE` inside it. Once latched, the branch below returned before the
-   * outlet was reached, so every route nested under this frame stopped rendering: an
-   * operator who signed off could not sign on again, because the sign-on screen is one of
-   * the routes the latch was suppressing, and only a full reload cleared it. Recording the
-   * entry makes the surface terminal for the screen it replaced and no further -- the next
-   * navigation is a different entry, so the frame and its outlet come back.
+   * ⚠️ Refactoring Rationale: this holds the HISTORY ENTRY the acknowledgement belongs to
+   * rather than a boolean, because the boolean was a one-way latch and this shell is the
+   * layout route above the sign-on route as well as above the guarded subtree --
+   * `ui/src/router.tsx` declares `SIGN_ON_ROUTE` inside it. Once latched, the branch below
+   * returned before the outlet was reached, so every route nested under this frame stopped
+   * rendering: an operator who signed off could not sign on again, because the sign-on screen
+   * is one of the routes the latch was suppressing, and only a full reload cleared it.
+   * Recording the entry makes the surface terminal for that one entry and no further -- the
+   * next navigation is a different entry, so the frame and its outlet come back.
+   *
+   * ⚠️ Refactoring Rationale: the entry recorded is now the entry sign-off NAVIGATES TO,
+   * where it used to be the entry sign-off happened ON. Signing off replaced the frame
+   * without touching the address, so the location went on naming the screen the operator had
+   * just left -- measured as `location.pathname === '/admin'` while nothing administrative was
+   * mounted -- and a reload of that address bounced through the session guard to sign-on
+   * anyway. Sign-off now replaces the address with `SIGN_ON_ROUTE`, which is both truthful and
+   * the address the operator is actually going to next, and the acknowledgement is shown on
+   * arrival there. `replace` rather than `push`, so the signed-off screen is not left in
+   * history behind a discarded session.
    *
    * Assumptions: the ENTRY key is recorded rather than the pathname, because navigating to
    * the same path is a new entry with a new key while the pathname compares equal. The
-   * difference is not hypothetical here: sign-off happens most often at a menu, and an
-   * operator who signs on again and returns to that same menu would meet a thank-you for a
-   * session they had just established.
+   * difference is not hypothetical here: the destination IS the sign-on route, so an operator
+   * who signs on, is later bounced back to sign-on, would otherwise meet an acknowledgement
+   * for a session they had just established.
    *
    * Alternatives Considered: deriving the surface from `signedOn` alone, with no state at
    * all. Rejected because it cannot distinguish "signed off just now" from "never signed
@@ -1213,12 +1657,47 @@ export function AppShell(props: AppShellProps): ReactElement {
   const [signedOffAtEntry, setSignedOffAtEntry] = useState<string | null>(null);
 
   /*
+   * Purpose: record that a sign-off transition has been issued and has not yet arrived, so the
+   * session can be held across the one render between the two and released on arrival. See the
+   * refactoring rationale on `signOffFromShell` below for the measurement that made this
+   * necessary.
+   *
+   * Assumptions: this is not session state either, for the same reason as the field above -- it
+   * records that a transition is in flight and asserts nothing about who the operator is, grants
+   * no authority, and is not persisted, so a reload mid-transition simply lands on sign-on with
+   * whatever session the token store still holds.
+   */
+  const [signOffInFlight, setSignOffInFlight] = useState(false);
+
+  /*
    * Assumptions: the location is read for its ENTRY KEY and for nothing else. This shell
    * renders no navigation of its own and reports no route identity -- each screen publishes
    * its own title band and transaction identifier through the slot -- so the pathname is
    * deliberately not consulted.
    */
-  const { key: currentEntry } = useLocation();
+  const shellLocation = useLocation();
+  const currentEntry = shellLocation.key;
+
+  /*
+   * WHY : Assumptions: the state is read as a PROPERTY rather than destructured, and typed `unknown`
+   *       rather than taken as the router gives it. React Router types `location.state` as `any`,
+   *       because any page may write anything onto a history entry, and destructuring an `any` member
+   *       spreads that `any` into this file. `signOnEntryReason` is the only reader and narrows it
+   *       structurally, so nothing here ever reads a member off an untrusted value.
+   */
+  const historyEntryReason: string | undefined = signOnEntryReason(
+    (shellLocation as { readonly state?: unknown }).state,
+  );
+
+  /*
+   * Assumptions: the shell holds a navigator for exactly two moves, both of them session
+   * boundaries rather than screen navigation: signing off replaces the address with the
+   * sign-on route, and the acknowledgement's own control leaves that surface for the framed
+   * screen at the same address. Screen-to-screen navigation stays entirely with the screens,
+   * so the prohibition the file overview records -- that this frame reports no route identity
+   * and renders no navigation of its own -- is unchanged.
+   */
+  const navigate = useNavigate();
 
   const activeScreen = screen ?? delegated.screen;
   const activeMessage = message ?? delegated.message;
@@ -1241,10 +1720,117 @@ export function AppShell(props: AppShellProps): ReactElement {
      *   until the operator navigates or a session is established.
      */
     function endSession(): void {
-      signOut();
-      setSignedOffAtEntry(currentEntry);
+      /*
+       * Assumptions: the navigation is issued BEFORE the entry is recorded, and the entry
+       * recorded is the one the navigation produces rather than `currentEntry`. React Router
+       * mints a fresh key for the replacement entry, and it is not available synchronously
+       * here, so the destination is identified by its PATH and the key is captured on arrival
+       * by the effect below. Recording `currentEntry` instead would key the acknowledgement to
+       * the screen being left, which is the entry that is about to be replaced.
+       *
+       * ⚠️ Refactoring Rationale: the session is no longer discarded HERE, and the ordering is
+       * load bearing. Discarding it first left the guarded screen still mounted with no session,
+       * so `RequireSignOn` in `ui/src/routes/guards.tsx` re-rendered and issued a bounce of its
+       * own -- measured in a browser as a second history replacement 24 ms after this one,
+       * carrying `{ reason: 'session-required', attempted: '/admin' }` and minting a fresh entry
+       * key. That overwrote this transition's own reason, so the entry the effect below waits for
+       * never arrived and the acknowledgement never entered the DOM for a single frame; it also
+       * filed a deliberate sign-off as an interrupted access attempt, which is the opposite of
+       * what happened. The discard now happens on arrival, in that effect.
+       *
+       * Assumptions: the session therefore survives one further render of the screen being left,
+       * which grants nothing -- the operator was already authorised for it -- and nothing in
+       * between can reach a guarded route, because this transition is already in flight and
+       * `replace` leaves no entry behind to go back to.
+       */
+      setSignOffInFlight(true);
+      navigateSafely(
+        navigate,
+        SIGN_ON_ROUTE,
+        { reason: SIGN_OFF_ACKNOWLEDGED_REASON },
+        { replace: true },
+      );
     },
-    [currentEntry, signOut],
+    [navigate],
+  );
+
+  /*
+   * Assumptions: the acknowledgement is claimed from the history entry's own state on arrival,
+   * and the entry key is then recorded so the surface is bound to that one entry. Carrying the
+   * signal in navigation state rather than in a component field is what makes it survive the
+   * navigation that sign-off performs -- a `useState` value set before navigating would be read
+   * on the destination render too, but nothing would then distinguish the destination entry from
+   * any later visit to the same address.
+   *
+   * Trade-offs: the state stays on the history entry after it has been claimed, so a RELOAD of
+   * the sign-on address re-shows the acknowledgement. That is accepted rather than scrubbed: the
+   * alternative is a `replace` navigation from inside an effect purely to clear a field, which
+   * mints another entry on every arrival, and the acknowledgement is correct for a reload anyway
+   * because no session is held. It is never shown over a live session -- the render guard below
+   * requires `!signedOn` -- and its own control leaves it in one activation.
+   */
+  useLayoutEffect(
+    /**
+     * Binds the sign-off acknowledgement to the entry the sign-off navigation arrived at.
+     * @returns {void} Nothing; the entry key is recorded in place when the signal is present.
+     */
+    function claimSignOffAcknowledgement(): void {
+      if (!signOffInFlight || historyEntryReason !== SIGN_OFF_ACKNOWLEDGED_REASON) {
+        return;
+      }
+      /*
+       * Assumptions: the three statements are one step and React batches them into a single
+       * re-render, so no intermediate state is ever painted. The flag is lowered first so a
+       * later arrival at this same address -- a reload, or a guard bounce to sign-on -- cannot
+       * re-enter here, and the session is discarded last, on an address no guard protects.
+       *
+       * Assumptions: gating on the in-flight flag rather than on `signedOffAtEntry !==
+       * currentEntry` is what keeps this from firing on any OTHER arrival carrying the same
+       * reason, now that arriving here is what performs the discard.
+       */
+      setSignOffInFlight(false);
+      setSignedOffAtEntry(currentEntry);
+      signOut();
+    },
+    [currentEntry, historyEntryReason, signOffInFlight, signOut],
+  );
+
+  const crossToMainMenu = useCallback(
+    /**
+     * Moves an administrator from the administrative surface to the ordinary main menu.
+     * @returns {void} Nothing; the router renders the main menu.
+     */
+    function goToMainMenu(): void {
+      /*
+       * Assumptions: `push` rather than `replace`, unlike the two session-boundary moves in this
+       * file. Crossing between the two menus is ordinary navigation an operator may want to undo
+       * with Back, whereas signing off must not leave a signed-off screen reachable behind a
+       * discarded session.
+       */
+      navigateSafely(navigate, MAIN_MENU_ROUTE);
+    },
+    [navigate],
+  );
+
+  const leaveSignOffAcknowledgement = useCallback(
+    /**
+     * Leaves the sign-off acknowledgement for the framed sign-on screen at the same address.
+     * @returns {void} Nothing; the surface is dropped on the resulting re-render.
+     */
+    function continueToSignOn(): void {
+      /*
+       * Assumptions: the navigation is issued as well as the field being cleared, and both are
+       * needed. Clearing the field alone drops the surface but leaves the claimed acknowledgement
+       * on the history entry, so a re-render that re-ran the claim effect would restore it; the
+       * `replace` navigation to the same address mints a new entry WITHOUT the signal, which is
+       * what makes leaving the surface final. `replace` rather than `push`, so activating this
+       * control does not add a history step an operator would have to go back through.
+       */
+      setSignOffInFlight(false);
+      setSignedOffAtEntry(null);
+      navigateSafely(navigate, SIGN_ON_ROUTE, undefined, { replace: true });
+    },
+    [navigate],
   );
 
   /*
@@ -1330,12 +1916,41 @@ export function AppShell(props: AppShellProps): ReactElement {
         <Typography.Text strong role="status">
           {THANK_YOU_CARDDEMO}
         </Typography.Text>
+        {/*
+          ⚠️ Refactoring Rationale: this control did not exist. The acknowledgement rendered the
+          verbatim line and nothing else, so a document-wide query for `a, button, input,
+          [role=button], [tabindex]` returned an EMPTY list -- an operator had no in-page way
+          onward at all and had to use browser Back or retype an address. The surface still
+          replaces the frame, because `app/cbl/COSGN00C.cbl` L162-L172 sends the line with
+          `EXEC CICS SEND TEXT ... ERASE FREEKB` and the cleared display is what the reference
+          actually shows; what the reference then relies on is a terminal operator keying a new
+          transaction, and a browser has no equivalent of that. This control is the equivalent:
+          one activation returns to the framed sign-on screen at the address already showing.
+
+          Alternatives Considered: not replacing the frame at all, and painting the line into the
+          row-23 band of the sign-on screen instead. Rejected because `ERASE` is explicit in the
+          reference and the cleared display is the fidelity this surface exists to carry -- and
+          the band belongs to the screen that is mounted, which during a sign-off is none.
+
+          Assumptions: the label is the catalogue's own `SIGN_ON_SUBMIT_LABEL`, which is the exact
+          action this control performs, so the surface introduces no new operator-visible string.
+          `type="primary"` because it is the only action on the surface; AAP section 0.3.2 gives the
+          primary variant to the affirmative action of a screen, and there is nothing here to
+          out-rank it.
+        */}
+        <Button
+          data-testid={SHELL_SIGN_OFF_CONTINUE_TEST_ID}
+          type="primary"
+          onClick={leaveSignOffAcknowledgement}
+        >
+          {SIGN_ON_SUBMIT_LABEL}
+        </Button>
       </Flex>
     );
   }
 
   return (
-    <Layout data-testid={APP_SHELL_TEST_ID} style={zoneStyle}>
+    <Layout data-testid={APP_SHELL_TEST_ID} style={frameStyle}>
       <Layout.Header style={headerStyle}>
         <Flex vertical gap="small">
           {/*
@@ -1367,22 +1982,89 @@ export function AppShell(props: AppShellProps): ReactElement {
             a value of its own.
           */}
           <Flex align="center" justify="space-between" gap="small">
-            <Typography.Link href={`#${SHELL_CONTENT_ELEMENT_ID}`} style={skipLinkStyle}>
+            <Typography.Link
+              href={`#${SHELL_CONTENT_ELEMENT_ID}`}
+              style={skipLinkStyle}
+              onPointerEnter={skipLinkHovered}
+              onPointerLeave={skipLinkRested}
+              onPointerDown={skipLinkPressed}
+              onPointerUp={skipLinkHovered}
+            >
               {SKIP_TO_CONTENT_LABEL}
             </Typography.Link>
-            {signedOn ? (
-              <Button
-                data-testid={SHELL_SIGN_OFF_CONTROL_TEST_ID}
-                type="link"
-                size="small"
-                disabled={activeBusy}
-                onClick={signOffFromShell}
-              >
-                {SHELL_SIGN_OFF_LABEL}
-              </Button>
-            ) : null}
+            <Flex align="center" gap="small">
+              {/*
+                ⚠️ Refactoring Rationale: this control did not exist, and its absence left the two
+                roles on DISJOINT navigation graphs. An administrator reaches eight routes through the
+                interface and had no in-app path to any of the thirteen ordinary business screens: the
+                administrative menu lists only the six options of `app/cpy/COADM02Y.cpy`, and PF3 there
+                signs the operator off rather than stepping back, because `app/cbl/COADM01C.cbl`
+                L100-L102 genuinely returns to sign-on. The reference operator was not stranded by that,
+                because a terminal operator could key transaction `CM00` directly; a browser offers no
+                equivalent, so the crossing has to be a rendered control.
+
+                Alternatives Considered: adding a seventh option to the administrative menu. Rejected
+                because the six options ARE `app/cpy/COADM02Y.cpy` -- `ui/src/test/admin.test.tsx` pins
+                the option list against that copybook in both directions -- so a seventh would be an
+                invented menu entry rather than a migrated one. Placing it in the chrome keeps the
+                migrated menu exactly as the reference paints it.
+
+                Assumptions: it is rendered only for an administrator, and only while a session is
+                held. An ordinary operator needs no crossing -- their own menu already reaches every
+                screen they may enter, and the administrative surface refuses them -- so offering it
+                would advertise a destination that answers with a refusal. The label is the main-menu
+                mapset's own row-4 heading, so no operator-visible string is introduced;
+                `ui/src/routes/guards.tsx` already uses that constant as the label of the same
+                destination, which keeps the two crossings named identically. `type="link"` and
+                `size="small"` match the sign-off control beside it: both are additive browser chrome
+                rather than an action of whichever screen is mounted.
+              */}
+              {signedOn && isAdmin ? (
+                <Button
+                  data-testid={SHELL_MAIN_MENU_CROSSING_TEST_ID}
+                  type="link"
+                  size="small"
+                  disabled={activeBusy}
+                  onClick={crossToMainMenu}
+                >
+                  {MAIN_MENU_HEADINGS.SCREEN}
+                </Button>
+              ) : null}
+              {signedOn ? (
+                <Button
+                  data-testid={SHELL_SIGN_OFF_CONTROL_TEST_ID}
+                  type="link"
+                  size="small"
+                  disabled={activeBusy}
+                  onClick={signOffFromShell}
+                >
+                  {SHELL_SIGN_OFF_LABEL}
+                </Button>
+              ) : null}
+            </Flex>
           </Flex>
-          {activeScreen === undefined ? null : (
+          {/*
+            ⚠️ Refactoring Rationale: the brand heading is painted on BOTH branches now, and it used
+            to be reachable only through the identity branch. A browser measurement of the not-found
+            surface, which publishes no screen identity by design, read its heading outline as
+            `['H4:Screen not available']` -- no rank-one heading anywhere in the document, so an
+            operator navigating by heading level met a level-four heading as the highest thing on
+            the page. The brand is the identity of the APPLICATION rather than of any screen, so it
+            belongs on every surface the frame paints; what a surface may withhold is the
+            TRANSACTION identity beside it.
+
+            Assumptions: the withholding stays withheld. `ScreenHeader` paints the four status-line
+            prompts -- transaction, program, date and time -- and nothing here supplies a substitute
+            for them, so a surface that names no reference program still names none. That
+            distinction is the one `ui/src/routes/guards.tsx` records: a refusal painted by a
+            program in `app/**` on that program's own map delegates that program's identity, and a
+            mistyped address, which no program paints, delegates nothing.
+          */}
+          {activeScreen === undefined ? (
+            <Flex justify="center">
+              <AppTitleHeading />
+            </Flex>
+          ) : (
             <ScreenHeader
               transactionId={activeScreen.transactionId}
               programName={activeScreen.programName}
@@ -1400,18 +2082,21 @@ export function AppShell(props: AppShellProps): ReactElement {
         without inserting it into the tab sequence, so the DOM order below remains the tab
         order, which is what design gap G1 undertakes to preserve.
       */}
-      <Layout.Content id={SHELL_CONTENT_ELEMENT_ID} tabIndex={-1}>
+      <Layout.Content id={SHELL_CONTENT_ELEMENT_ID} tabIndex={-1} style={contentStyle}>
         {/*
-          Assumptions: the body is bounded by a responsive column rather than by a fixed
-          width. `span={24}` fills the row at every size and `lg` narrows it once the
-          viewport passes the `screenLG` breakpoint recorded in
-          {@link SHELL_BREAKPOINT_TOKENS}, which keeps line lengths readable on a wide
-          display without ever clipping - the failure the fixed 80-column grid could not
-          avoid. Only the two breakpoints the design bridge declares are used; no third one
-          is invented here.
+          ⚠️ Refactoring Rationale: the body is bounded by a MAXIMUM MEASURE and centred,
+          where it used to be a proportional grid column - `span={24} lg={22}`. The column
+          form was measured and fails two ways at once: a proportion has no upper bound, so
+          at roughly 1848 pixels the content stayed anchored at x=78 with the right half of
+          the display empty, and a proportional inset GROWS with the viewport, so the body's
+          left edge (41.3 at 992, 66.7 at 1600) walked away from the legend's fixed inset
+          and the frame had two left edges that agreed at no width. `Col` is kept - the row
+          still does the centring, so no raw element carries layout CSS - and only the bound
+          is added, from the `screenLG` token recorded in {@link SHELL_BREAKPOINT_TOKENS}.
+          No third breakpoint is invented here.
         */}
         <Row justify="center">
-          <Col span={24} lg={22}>
+          <Col span={24} style={contentColumnStyle}>
             {children ?? <Outlet />}
           </Col>
         </Row>
@@ -1445,36 +2130,94 @@ export function AppShell(props: AppShellProps): ReactElement {
         there is correct rather than tolerated: reserving a row for a screen that may never
         publish one would reintroduce the shift the reservation exists to prevent.
       */}
-      {activeMessage === undefined ? null : (
-        <MessageBand
-          message={activeMessage.text}
-          severity={activeMessage.severity}
-          mapset={activeMessage.mapset}
-        />
-      )}
-      <Layout.Footer style={zoneStyle}>
+      {/*
+        ⚠️ Refactoring Rationale: the message line and the key legend are wrapped in ONE
+        pinned zone, where they used to be two ordinary in-flow siblings of the content
+        region. The wrapper is what carries `position: sticky` for both at once, and pinning
+        them together rather than separately is deliberate: they are rows 23 and 24 of one
+        display, so a legend that stuck while the band above it scrolled away would separate
+        an outcome from the keys that answer it. The reasoning for sticky over fixed, for the
+        surface, and for the stacking order is at {@link pinnedZoneStyle}.
+
+        Assumptions: DOM ORDER IS UNCHANGED by the wrapper - header, content, row 22, row 23,
+        legend - so the reading order and the tab order design gap G1 undertakes to preserve
+        are exactly what they were. The wrapper is a layout primitive rendered as a plain
+        element and carries no role, so it adds no landmark and the frame still exposes one
+        banner, one main and one contentinfo.
+
+        Assumptions: the zone is rendered unconditionally, even on the first render pass of a
+        screen that has published nothing yet. Its two children each decide their own
+        presence - `MessageBand` is conditional on a delegated slot and `PfKeyBar` returns
+        `null` for an empty binding list - so an unpublished frame renders an empty pinned
+        zone rather than a zone that appears once a screen speaks, which would move the
+        content the reservation exists to hold still.
+      */}
+      <Flex vertical data-testid={SHELL_PINNED_ZONE_TEST_ID} style={pinnedZoneStyle}>
         {/*
-          Assumptions: the legend is rendered unconditionally and needs no guard of its own,
-          because `PfKeyBar` returns `null` for an empty binding list rather than an empty
-          landmark. So when neither a screen nor this shell has a key to offer, the footer is
-          simply empty instead of announcing a named region containing no control.
-          Assumptions: the two optional props are spread conditionally rather than passed as
-          possibly-undefined values. `PfKeyBarProps` declares them without `| undefined`, and
-          `exactOptionalPropertyTypes` in `ui/tsconfig.json` distinguishes an omitted property
-          from one explicitly set to `undefined`, so passing the absent case directly is a
-          type error. Spreading nothing lets the component apply its own documented defaults.
+          Assumptions: the row-22 line is painted ABOVE the row-23 line and inside the same
+          pinned zone, which is the measured arrangement: `app/bms/COACTVW.bms` declares
+          `INFOMSG` at `POS=(22,23)` and `ERRMSG` at `POS=(23,1)`, two adjacent rows at the
+          bottom of one display. Rendering it here rather than leaving each screen to paint
+          its own is what closes the gap measured on `/account/update` and on
+          `/reference/transaction-types/:cd`, where the frame's band stood empty at its
+          reserved height while the screen's real advisory sat roughly 200 pixels higher.
+          Assumptions: the guard tests the SLOT and not its text, exactly as the row-23 guard
+          below does, so a screen whose mapset declares row 22 reserves that row on every turn
+          and gets the same no-layout-shift guarantee for it.
+          Assumptions: the mapset comes from the row-23 slot because a screen stands in for one
+          mapset and the display width is the mapset's property, so both bands are sized alike.
         */}
-        <PfKeyBar
-          keys={legendKeys}
-          onInvoke={dispatchShellPfKey}
-          {...(activePfKeys?.legendColor === undefined
-            ? {}
-            : { legendColor: activePfKeys.legendColor })}
-          {...(activePfKeys?.regionLabel === undefined
-            ? {}
-            : { regionLabel: activePfKeys.regionLabel })}
-        />
-      </Layout.Footer>
+        {activeMessage?.information === undefined ? null : (
+          /*
+            ⚠️ Refactoring Rationale: the severity is passed STRAIGHT THROUGH, where this line used to
+            substitute a shell-local `DEFAULT_INFORMATION_SEVERITY` for an absent one. The band now
+            resolves an omitted severity from the channel itself - `defaultMessageBandSeverity` in
+            `ui/src/layout/MessageBand.tsx` reads it from the same measured table that documents what
+            each channel carries - so the constant here was a second copy of one decision, and the two
+            could have drifted with nothing to fail. Deleting it leaves the row-22 default stated once,
+            beside the row-23 default it has to differ from.
+            Assumptions: passing an explicitly `undefined` severity is permitted rather than a type
+            error, because `MessageBandProps` writes the `| undefined` arm out for exactly this case -
+            a caller holding an optional value can forward it without reconstructing the props object.
+          */
+          <MessageBand
+            channel="information"
+            message={activeMessage.information.text}
+            severity={activeMessage.information.severity}
+            mapset={activeMessage.mapset}
+          />
+        )}
+        {activeMessage === undefined ? null : (
+          <MessageBand
+            message={activeMessage.text}
+            severity={activeMessage.severity}
+            mapset={activeMessage.mapset}
+          />
+        )}
+        <Layout.Footer style={footerStyle}>
+          {/*
+            Assumptions: the legend is rendered unconditionally and needs no guard of its own,
+            because `PfKeyBar` returns `null` for an empty binding list rather than an empty
+            landmark. So when neither a screen nor this shell has a key to offer, the footer is
+            simply empty instead of announcing a named region containing no control.
+            Assumptions: the two optional props are spread conditionally rather than passed as
+            possibly-undefined values. `PfKeyBarProps` declares them without `| undefined`, and
+            `exactOptionalPropertyTypes` in `ui/tsconfig.json` distinguishes an omitted property
+            from one explicitly set to `undefined`, so passing the absent case directly is a
+            type error. Spreading nothing lets the component apply its own documented defaults.
+          */}
+          <PfKeyBar
+            keys={legendKeys}
+            onInvoke={dispatchShellPfKey}
+            {...(activePfKeys?.legendColor === undefined
+              ? {}
+              : { legendColor: activePfKeys.legendColor })}
+            {...(activePfKeys?.regionLabel === undefined
+              ? {}
+              : { regionLabel: activePfKeys.regionLabel })}
+          />
+        </Layout.Footer>
+      </Flex>
     </Layout>
   );
 }

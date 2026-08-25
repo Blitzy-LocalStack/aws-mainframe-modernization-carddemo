@@ -35,15 +35,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   API_PATH_PREFIX,
   CORRELATION_ID_LENGTH,
+  PUBLISHED_REQUEST_WIDTHS,
   WITHOUT_STORED_SESSION,
+  claimRetainedOutcome,
   correlationHeaders,
+  discardRetainedOutcomes,
   getApiClient,
   isApiRequestError,
+  isRepeatableFailure,
+  isTransientFailure,
   newCorrelationId,
   requestPath,
+  requireWithinPublishedWidths,
   resetApiClient,
+  retainOutcomeAcrossNavigation,
+  retainOutcomeIfAbandoned,
   setAccessToken,
   subscribeToAuthenticationRequired,
+  subscribeToRetainedOutcomes,
 } from './client';
 import type { ApiRequestError } from './client';
 import { resetServerClock, serverInstant } from './serverClock';
@@ -150,15 +159,47 @@ async function captureAdapter(config: AxiosRequestConfig): Promise<AxiosResponse
   } as AxiosResponse);
 }
 
+/** Every console entry the client announced during the current case, in the order it made them. */
+let announced: { label: unknown; record: unknown }[] = [];
+
+/**
+ * Holds the installed console spy so each case can put the real writer back.
+ *
+ * Assumptions: the type is the one member this file calls rather than the runner's mock type, so
+ * nothing here reads a value the runner types as `any`. `ui/eslint.config.js` refuses an unsafe member
+ * access, and the recorded entries below are read from {@link announced} -- a typed array this file
+ * owns -- instead of from the spy's own call log for that reason.
+ */
+let announcementSpy: { mockRestore: () => void } | undefined;
+
+/**
+ * Records one console entry instead of writing it, keeping the diagnostic observable and the run quiet.
+ *
+ * Purpose: the client announces an answer it cannot use, which is deliberate -- it is the only
+ * diagnostic channel this tree has. Several cases in this file drive exactly that condition on purpose,
+ * so without this the run's output would carry a structured record for each of them and the one a reader
+ * is looking for would be lost among them.
+ * @param {unknown} [label] - The sentence the client announced.
+ * @param {unknown} [record] - The structured record it announced alongside the sentence.
+ * @returns {void} Nothing; the entry is appended to {@link announced}.
+ */
+function captureAnnouncement(label?: unknown, record?: unknown): void {
+  announced.push({ label, record });
+}
+
 /** Supplies the build-time configuration the client validates before it is constructed. */
 function stubBuildConfiguration(): void {
   transmitted = [];
+  announced = [];
+  announcementSpy = vi.spyOn(console, 'error').mockImplementation(captureAnnouncement);
   vi.stubEnv('VITE_API_BASE_URL', API_BASE_URL);
   vi.stubEnv('VITE_CORRELATION_ID_HEADER', CORRELATION_HEADER);
 }
 
-/** Restores the environment so no later file inherits this file's configuration. */
+/** Restores the environment and the console so no later file inherits either. */
 function restoreBuildConfiguration(): void {
+  announcementSpy?.mockRestore();
+  announcementSpy = undefined;
   vi.unstubAllEnvs();
 }
 
@@ -1579,6 +1620,370 @@ async function keepsTheSessionOnAForbiddenRefusal(): Promise<void> {
   unsubscribe();
 }
 
+/** The exact body the QA sweep's `badjson` fault answers a 200 with: nine bytes that do not parse. */
+const UNPARSEABLE_BODY = '{not-json';
+
+/**
+ * Answers one request with the exact shape of the least diagnosable fault the QA sweep found.
+ *
+ * Assumptions: the response looks entirely ordinary apart from its body -- status 200, a JSON
+ * `content-type`, a `content-length` that matches, and an `etag` -- because that combination is what
+ * made this mode invisible: the browser's network panel lists it as a success and nothing rejects.
+ * @returns {Promise<Response>} A 200 whose body is nine bytes of malformed JSON.
+ */
+async function answerWithAnUnparseableBody(): Promise<Response> {
+  return Promise.resolve(
+    new Response(UNPARSEABLE_BODY, {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        etag: 'W/"qa-rev-1"',
+      },
+    }),
+  );
+}
+
+/**
+ * Asserts a 200 whose body is not a document reaches the caller as a classified failure.
+ *
+ * Purpose: this is the case the client had no path for. Axios's default response transform catches its
+ * own `JSON.parse` failure and returns the raw text, so the request settled SUCCESSFULLY with a string
+ * where a document was required; the screen's own validator then threw a local error and reported
+ * whichever subsystem that screen names in its catch arm. Measured on `/account/view`: `Error reading
+ * account card xref File` for a body that concerns no file.
+ *
+ * Assumptions: the STATUS asserted is 200 and not a fabricated 5xx. What arrived arrived, and a screen
+ * comparing the status against what the network panel shows must find them agreeing.
+ */
+async function classifiesAnUnusableSuccessBody(): Promise<void> {
+  answerFetchWith(answerWithAnUnparseableBody);
+
+  const failure = await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(failure.kind).toBe('RESPONSE');
+  expect(failure.status).toBe(200);
+  expect(failure.problem.code).toBe(PROBLEM_CODE_UNEXPECTED_BODY);
+  expect(failure.problem.message).toBeNull();
+  expect(failure.problem.path).toBe(MASKED_TARGET);
+  expect(failure.transient).toBe(false);
+  expect(failure.repeatable).toBe(false);
+}
+
+/**
+ * Asserts the unusable answer is announced exactly once, and that the announcement discloses nothing.
+ *
+ * Purpose: the QA sweep's finding was that this mode produced NO console output of any kind -- no
+ * syntax error, no framework warning, nothing -- with preserved messages enabled, so an operator's
+ * report named a subsystem picked by the screen rather than the condition that occurred. One line is
+ * what makes it diagnosable.
+ *
+ * Assumptions: the announcement's WORDING is not pinned, only its structure and its omissions. A
+ * console entry is a diagnostic and not an interface, and pinning the sentence would make a future
+ * rewording a test failure; what must hold is that the entry carries the classification and the
+ * correlation identifier, and carries neither the body nor the target.
+ */
+async function announcesAnUnusableAnswerWithoutDisclosingIt(): Promise<void> {
+  answerFetchWith(answerWithAnUnparseableBody);
+
+  const failure = await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(announced).toHaveLength(1);
+  const entry = announced[0];
+  expect(entry).toBeDefined();
+  expect(entry?.record).toMatchObject({
+    kind: 'RESPONSE',
+    status: 200,
+    code: PROBLEM_CODE_UNEXPECTED_BODY,
+    correlationId: failure.correlationId,
+  });
+  // Assumptions: the whole entry is serialised and searched, rather than each member being checked for
+  //   absence. A future edit that added the response body or the dispatched target as a new member would
+  //   pass a member-by-member check and fail this one, which is the direction the assertion has to fail
+  //   in. The masked template is searched for too: it discloses nothing, and asserting its absence keeps
+  //   the entry free of any target at all rather than free of one particular spelling.
+  const serialised = JSON.stringify(entry);
+  expect(serialised).not.toContain(UNPARSEABLE_BODY);
+  expect(serialised).not.toContain('00000000011');
+  expect(serialised).not.toContain('card-xrefs');
+}
+
+/**
+ * Asserts the announcement is made for an unusable answer and withheld for a described refusal.
+ *
+ * Assumptions: both halves are one property and are asserted in one case. A refused form field is a
+ * service describing something the screen is already showing, so announcing it would bury the line that
+ * matters in the noise it exists to cut through -- and a check of the announcement alone would be
+ * satisfied by announcing everything.
+ */
+async function announcesNothingForADescribedRefusal(): Promise<void> {
+  /**
+   * Answers with a refusal a service described in full.
+   * @returns {Promise<Response>} The 400 a service would have sent.
+   */
+  async function refuseWithAProblem(): Promise<Response> {
+    return Promise.resolve(
+      new Response(JSON.stringify(serviceProblem(400, 'CARDDEMO-0400')), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+  }
+  answerFetchWith(refuseWithAProblem);
+  const described = await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(described.kind).toBe('PROBLEM');
+  expect(announced).toHaveLength(0);
+
+  answerFetchWith(answerWithAnUnparseableBody);
+  await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(announced).toHaveLength(1);
+}
+
+/**
+ * Asserts every body that is legitimately not a parsed document still settles successfully.
+ *
+ * Purpose: this is the case that stops the check above from being a regression. Five bodies that are
+ * legitimately not a decoded document are asserted -- a 204 published by the account, auth and
+ * reference contracts, a deliberately empty 200, a document a service really did send, the undecoded
+ * bytes the two statement operations collect, and a caller that asked for text -- and rejecting any of
+ * them would break something that works today.
+ *
+ * Assumptions: the TEXT case is what makes the `responseType` exemption load-bearing, and it is here
+ * because of a measurement: the blob case alone does not exercise that exemption at all. A `'blob'`
+ * request produces a `Blob` rather than a string, so the type test admits it whether the exemption is
+ * present or not -- removing the exemption left every case green. A `'text'` request produces exactly
+ * the raw string the check treats as a defect everywhere else, so it is the only body that can tell the
+ * two apart.
+ */
+async function admitsEveryLegitimatelyUndecodedBody(): Promise<void> {
+  /**
+   * Answers with the empty 204 four published operations use to report a completed write.
+   * @returns {Promise<Response>} A 204 carrying no body.
+   */
+  async function answerWithNoContent(): Promise<Response> {
+    return Promise.resolve(new Response(null, { status: 204 }));
+  }
+  answerFetchWith(answerWithNoContent);
+  const noContent = await getApiClient().delete(TARGET_WITH_IDENTIFIERS);
+  expect(noContent.status).toBe(204);
+
+  /**
+   * Answers with a 200 that deliberately carries nothing.
+   * @returns {Promise<Response>} A 200 with an empty body.
+   */
+  async function answerWithAnEmptyBody(): Promise<Response> {
+    return Promise.resolve(new Response('', { status: 200 }));
+  }
+  answerFetchWith(answerWithAnEmptyBody);
+  const empty = await getApiClient().get(TARGET_WITH_IDENTIFIERS);
+  expect(empty.status).toBe(200);
+
+  /**
+   * Answers with an ordinary JSON document.
+   * @returns {Promise<Response>} A 200 carrying a document.
+   */
+  async function answerWithADocument(): Promise<Response> {
+    return Promise.resolve(
+      new Response(JSON.stringify({ items: [], hasNext: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+  }
+  answerFetchWith(answerWithADocument);
+  const document = await getApiClient().get<{ hasNext: boolean }>(TARGET_WITH_IDENTIFIERS);
+  expect(document.data.hasNext).toBe(false);
+
+  /**
+   * Answers with the undecoded bytes a statement download collects.
+   * @returns {Promise<Response>} A 200 carrying an opaque byte stream.
+   */
+  async function answerWithBytes(): Promise<Response> {
+    return Promise.resolve(
+      new Response('\u0000\u0001statement bytes', {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream' },
+      }),
+    );
+  }
+  answerFetchWith(answerWithBytes);
+  const bytes = await getApiClient().get(TARGET_WITH_IDENTIFIERS, { responseType: 'blob' });
+  expect(bytes.status).toBe(200);
+
+  /**
+   * Answers with plain text, which is what a caller asking for text is asking for.
+   * @returns {Promise<Response>} A 200 carrying a sentence rather than a document.
+   */
+  async function answerWithText(): Promise<Response> {
+    return Promise.resolve(
+      new Response('not a document, and not meant to be', {
+        status: 200,
+        headers: { 'content-type': 'text/plain' },
+      }),
+    );
+  }
+  answerFetchWith(answerWithText);
+  const text = await getApiClient().get<string>(TARGET_WITH_IDENTIFIERS, { responseType: 'text' });
+  expect(text.data).toBe('not a document, and not meant to be');
+}
+
+/**
+ * Dispatches one write expected to fail and returns the normalised failure it rejected with.
+ *
+ * Assumptions: this exists beside {@link failureFrom} because the two ask different questions of the
+ * same classifier. A read may always be repeated, so a read can never establish that a WRITE is
+ * withheld from a repeat -- which is the property the remedy cases below turn on.
+ * @param {Record<string, string>} [headers] - Extra request headers; used to send an idempotency key.
+ * @returns {Promise<ApiRequestError>} The failure this module raised.
+ * @throws {Error} If the request did not fail, or failed with something this module did not normalise.
+ */
+async function writeFailureFrom(headers?: Record<string, string>): Promise<ApiRequestError> {
+  try {
+    await getApiClient().post(
+      TARGET_WITH_IDENTIFIERS,
+      { amount: '10.00' },
+      headers === undefined ? {} : { headers },
+    );
+  } catch (raised: unknown) {
+    if (isApiRequestError(raised)) {
+      return raised;
+    }
+    throw new Error(`the module raised something it had not normalised: ${String(raised)}`);
+  }
+  throw new Error('the request settled successfully where a failure was required');
+}
+
+/**
+ * Answers every request with a refusal at the given status, carrying a problem document.
+ * @param {number} status - The status to refuse with.
+ * @returns {() => Promise<Response>} A transport answer for {@link answerFetchWith}.
+ */
+function refusalAt(status: number): () => Promise<Response> {
+  /**
+   * Answers one request with the refusal above.
+   * @returns {Promise<Response>} The refusal a service would have sent.
+   */
+  async function refuse(): Promise<Response> {
+    return Promise.resolve(
+      new Response(JSON.stringify(serviceProblem(status, `CARDDEMO-0${String(status)}`)), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+  }
+  return refuse;
+}
+
+/**
+ * Asserts a service that reports itself unavailable is reported as a condition that may clear.
+ *
+ * Purpose: the 503 transience signal reached the operator on two screens and was lost on the rest,
+ * because there was nothing on the failure to carry it. `transient` is that signal, and it is derived
+ * from the status rather than from each screen's reading of it.
+ */
+async function reportsAnUnavailableServiceAsTransient(): Promise<void> {
+  answerFetchWith(refusalAt(503));
+
+  const failure = await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(failure.kind).toBe('PROBLEM');
+  expect(failure.transient).toBe(true);
+  expect(failure.repeatable).toBe(true);
+}
+
+/**
+ * Asserts a service's own defect is NOT reported as something that may clear.
+ *
+ * Assumptions: 500 is the boundary case of the whole derivation and is asserted for that reason. It is
+ * the most common five-hundred and is often momentary in practice, and it is still withheld from
+ * `transient`, because a service that knows a condition is momentary says so with 503 -- and inviting
+ * an operator to repeat a recorded defect sends them into a loop the system cannot leave.
+ */
+async function reportsAServerDefectAsPermanent(): Promise<void> {
+  answerFetchWith(refusalAt(500));
+
+  const failure = await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(failure.transient).toBe(false);
+  expect(failure.repeatable).toBe(false);
+}
+
+/**
+ * Asserts a transient failure on an unkeyed write is transient and still not repeatable.
+ *
+ * Purpose: this is the safety property the two members exist to separate. The gateway gave up, so the
+ * condition may clear -- and the write may already have been applied before it did, so a repeat could
+ * take a payment twice. A single "retryable" flag would have to choose one of those two mistakes.
+ */
+async function withholdsARepeatFromAnUnkeyedWrite(): Promise<void> {
+  answerFetchWith(refusalAt(502));
+
+  const failure = await writeFailureFrom();
+  expect(failure.transient).toBe(true);
+  expect(failure.repeatable).toBe(false);
+}
+
+/**
+ * Asserts a write that carried an idempotency key is reported as safe to repeat.
+ *
+ * Assumptions: the header is the SENT one, spelled as the reporting contract publishes it, and the
+ * classification reads it back off the failed request's configuration. That is what makes the remedy a
+ * property of what the request actually carried rather than of what its caller intended.
+ */
+async function admitsARepeatForAKeyedWrite(): Promise<void> {
+  answerFetchWith(refusalAt(502));
+
+  const failure = await writeFailureFrom({ 'Idempotency-Key': 'CD0000000000000000000001' });
+  expect(failure.transient).toBe(true);
+  expect(failure.repeatable).toBe(true);
+}
+
+/**
+ * Asserts a real timeout on a read is both transient and repeatable, and an answerless failure is neither.
+ *
+ * Assumptions: the two are asserted together because they are the pair the module already separates for
+ * a different reason -- a request that timed out reached something and may succeed if repeated, one that
+ * resolved no host fails again identically -- and the remedy members must carry that same distinction
+ * rather than inventing a second, contradicting one.
+ */
+async function separatesATimeoutFromAnAnswerlessFailure(): Promise<void> {
+  answerFetchWith(neverAnswering);
+  const timedOut = await failureFrom(TARGET_WITH_IDENTIFIERS, TINY_TIMEOUT_MS);
+  expect(timedOut.kind).toBe('TIMEOUT');
+  expect(timedOut.transient).toBe(true);
+  expect(timedOut.repeatable).toBe(true);
+
+  /**
+   * Fails the request the way a browser's `fetch` fails when nothing answers.
+   * @returns {Promise<Response>} A rejected promise carrying the browser's own error type.
+   */
+  async function failWithoutAnswering(): Promise<Response> {
+    return Promise.reject(new TypeError('Failed to fetch'));
+  }
+  answerFetchWith(failWithoutAnswering);
+  const answerless = await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(answerless.kind).toBe('NETWORK');
+  expect(answerless.transient).toBe(false);
+  expect(answerless.repeatable).toBe(false);
+}
+
+/**
+ * Asserts the two published predicates agree with the members they narrow on.
+ *
+ * Purpose: the predicates are what a screen imports, and a screen that imported one while the member
+ * said the opposite would branch the wrong way with nothing failing. Asserting both directions on one
+ * transient failure and one permanent one fixes the agreement rather than the implementation.
+ */
+async function publishesPredicatesThatAgreeWithTheMembers(): Promise<void> {
+  answerFetchWith(refusalAt(503));
+  const transient = await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(isTransientFailure(transient)).toBe(true);
+  expect(isRepeatableFailure(transient)).toBe(true);
+
+  answerFetchWith(refusalAt(404));
+  const permanent = await failureFrom(TARGET_WITH_IDENTIFIERS);
+  expect(isTransientFailure(permanent)).toBe(false);
+  expect(isRepeatableFailure(permanent)).toBe(false);
+
+  expect(isTransientFailure(new Error('not one of ours'))).toBe(false);
+  expect(isRepeatableFailure(null)).toBe(false);
+}
+
 /** Prepares one failure-classification case: fresh configuration, no session, nothing recorded. */
 function stubFailureFixture(): void {
   stubBuildConfiguration();
@@ -1629,6 +2034,61 @@ function transportFailureContract(): void {
 }
 
 describe('transport failure contract', transportFailureContract);
+
+/**
+ * Groups the assertions that fix how an answer this client cannot use reaches a caller.
+ *
+ * WHY : Refactoring Rationale: these cases did not exist, and the mode they cover was the least
+ *       diagnosable one in the application -- a 200 whose body does not parse settled SUCCESSFULLY,
+ *       because Axios's default response transform catches its own parse failure and returns the raw
+ *       text. The screen's own validator then threw locally and the band named whichever subsystem that
+ *       screen mentions in its catch arm, with nothing written to the console. Every case here would
+ *       have passed vacuously before the check existed, because no rejection occurred at all.
+ *
+ * WHY : Measured: four mutations were run against these cases and every claim below is the observed
+ *       result rather than an expectation. Removing the `responseType` exemption fails
+ *       `admits every legitimately undecoded body` on its TEXT half only -- the blob half stays green,
+ *       because a blob body is not a string, which is why the text half exists. Removing the empty-body
+ *       exemption fails the same case on its 204 and empty-200 halves. Announcing every kind rather
+ *       than `RESPONSE` alone fails `announces nothing for a described refusal`. Reporting every string
+ *       body as unusable without the empty test fails two of the four cases here, which is what fixes
+ *       the check's boundary rather than merely its behaviour on the malformed body.
+ */
+function unusableAnswerContract(): void {
+  beforeEach(stubFailureFixture);
+  afterEach(restoreFailureFixture);
+  it('classifies a success whose body is not a document', classifiesAnUnusableSuccessBody);
+  it('announces it without disclosing it', announcesAnUnusableAnswerWithoutDisclosingIt);
+  it('announces nothing for a described refusal', announcesNothingForADescribedRefusal);
+  it('admits every legitimately undecoded body', admitsEveryLegitimatelyUndecodedBody);
+}
+
+describe('unusable answer contract', unusableAnswerContract);
+
+/**
+ * Groups the assertions that fix what a screen may OFFER after a failure, as distinct from what happened.
+ *
+ * WHY : Refactoring Rationale: these cases did not exist because the members did not. The QA sweep found
+ *       a timeout, a dropped connection and a 500 rendered identically on every route, and a 404
+ *       described as "temporarily unavailable" on one -- both because the only thing a screen could read
+ *       was the kind, which says what happened and not what to do about it. The two members are derived
+ *       here so no screen has to hold a copy of the status list.
+ */
+function failureRemedyContract(): void {
+  beforeEach(stubFailureFixture);
+  afterEach(restoreFailureFixture);
+  it('reports an unavailable service as transient', reportsAnUnavailableServiceAsTransient);
+  it('reports a server defect as permanent', reportsAServerDefectAsPermanent);
+  it('withholds a repeat from an unkeyed write', withholdsARepeatFromAnUnkeyedWrite);
+  it('admits a repeat for a keyed write', admitsARepeatForAKeyedWrite);
+  it('separates a timeout from an answerless failure', separatesATimeoutFromAnAnswerlessFailure);
+  it(
+    'publishes predicates that agree with the members',
+    publishesPredicatesThatAgreeWithTheMembers,
+  );
+}
+
+describe('failure remedy contract', failureRemedyContract);
 
 /** Prepares the build configuration and an unanchored clock for one case. */
 function stubClockFixture(): void {
@@ -2195,3 +2655,456 @@ function apiBaseUrlSchemeContract(): void {
 }
 
 describe('API base URL scheme contract', apiBaseUrlSchemeContract);
+
+/**
+ * Asserts one bound is applied per SCHEMA and not per member name.
+ *
+ * Purpose: this is the design decision the table embodies, and the one a smaller table would have got
+ * wrong. `description` is bounded at 100 characters on a transaction capture -- `TRAN-DESC PIC X(100)`
+ * -- and at 50 on all four reference request schemas. A guard keyed on the member name alone would have
+ * to pick one of those, and picking the smaller would refuse valid input on every capture while picking
+ * the larger would admit an unstorable reference description.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function boundsEachSchemaOnItsOwnWidths(): void {
+  const hundred = 'D'.repeat(100);
+  expect(
+    requireWithinPublishedWidths('TransactionCreateRequest', { description: hundred }),
+  ).toEqual({ description: hundred });
+
+  expect(
+    /**
+     * Offers the same hundred characters to the narrower published width.
+     * @returns {unknown} Never returns; the guard refuses before it can.
+     */
+    function offerHundredToTheNarrowerField(): unknown {
+      return requireWithinPublishedWidths('TransactionTypeCreateRequest', {
+        description: hundred,
+      });
+    },
+  ).toThrow(RangeError);
+  expect(
+    requireWithinPublishedWidths('TransactionTypeCreateRequest', { description: 'D'.repeat(50) }),
+  ).toEqual({ description: 'D'.repeat(50) });
+}
+
+/**
+ * Asserts the refusal names the member and both lengths, and reproduces nothing of the value.
+ *
+ * Assumptions: the value asserted absent is a recognisable run of one character, so the check would fail
+ * on a message that embedded any part of it. The guard runs on `password`, `refreshToken`, `cardNumber`
+ * and `governmentIssuedId` among others, and an exception message reaches consoles and bug reports.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function namesTheMemberAndTheWidthAndNotTheValue(): void {
+  const secret = 'S'.repeat(300);
+  let reported = '';
+  try {
+    requireWithinPublishedWidths('SignOnRequest', { userId: 'ADMIN001', password: secret });
+  } catch (raised: unknown) {
+    reported = raised instanceof Error ? raised.message : '';
+  }
+  expect(reported).toContain('SignOnRequest.password');
+  expect(reported).toContain('300');
+  expect(reported).toContain('256');
+  expect(reported).not.toContain(secret);
+  expect(reported).not.toContain('SSS');
+}
+
+/**
+ * Asserts members the contract does not bound by length are passed over rather than guessed at.
+ *
+ * Assumptions: three kinds are asserted together because each would break a different way if the guard
+ * tested them. A numeric member -- `version` on a card edit -- has no length at all and comparing one
+ * would compare against a coerced string. A member the contract publishes no bound for must not acquire
+ * one here, or this table would become a second, stricter contract. And the object is returned by
+ * IDENTITY, which is what lets a caller pass this call's result as the request body and makes it
+ * impossible to check one object while sending another.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function passesOverEveryMemberItHasNoBoundFor(): void {
+  const request = {
+    embossedName: 'PARITY CARDHOLDER',
+    version: 987654321,
+    somethingUnbounded: 'U'.repeat(5_000),
+  };
+
+  expect(requireWithinPublishedWidths('CardUpdateRequest', request)).toBe(request);
+}
+
+/**
+ * Asserts the table covers every schema whose members this package sends a bound-checked body for.
+ *
+ * Assumptions: this is the loud-failure check the narrow-scanner note in `./contracts.test.ts` argues
+ * for, applied to a table instead of a scanner. A table that lost an entry would leave the operation
+ * that names it failing to compile, so what needs asserting is the reverse: that the count has not
+ * drifted downward unnoticed while every call site still type-checks against a smaller union.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function declaresEverySchemaItIsConsultedFor(): void {
+  const schemas = Object.keys(PUBLISHED_REQUEST_WIDTHS);
+  expect(schemas).toHaveLength(23);
+  expect(schemas).toContain('MaintenanceAction');
+  expect(schemas).toContain('AccountUpdateRequest');
+  expect(Object.keys(PUBLISHED_REQUEST_WIDTHS.AccountUpdateRequest)).toHaveLength(43);
+}
+
+/**
+ * Groups the assertions that fix how a request body is bound-checked before it is dispatched.
+ *
+ * WHY : Refactoring Rationale: these cases did not exist because the check did not. The measured defect
+ *       was that an HTML `maxLength` attribute was the only guard on any request member -- eighteen
+ *       fields all accepted a value one character past their attribute when it was set programmatically
+ *       -- so a 10,000-character name was dispatched into a field 20 characters wide. The refusal-and-
+ *       nothing-dispatched half of that is asserted in `./auth.test.ts`, where a real request path can
+ *       observe that the transport saw nothing; what is asserted here is the guard's own boundary.
+ * @returns {void} Nothing; the cases are registered as a side effect.
+ */
+function publishedWidthContract(): void {
+  it('bounds each schema on its own widths', boundsEachSchemaOnItsOwnWidths);
+  it('names the member and the width and not the value', namesTheMemberAndTheWidthAndNotTheValue);
+  it('passes over every member it has no bound for', passesOverEveryMemberItHasNoBoundFor);
+  it('declares every schema it is consulted for', declaresEverySchemaItIsConsultedFor);
+}
+
+describe('published width contract', publishedWidthContract);
+
+/**
+ * Stands in for one screen's knowledge of whether it is still mounted.
+ *
+ * Assumptions: a mutable holder rather than a boolean argument, because the whole mechanism turns on the
+ * answer being read at SETTLEMENT and not at dispatch -- a test that passed `false` up front would prove
+ * nothing about the case that was measured, where the screen was present when the write left and gone
+ * 7 ms later when it landed.
+ */
+interface Presence {
+  /** Whether the notional screen is still there to handle its own outcome. */
+  mounted: boolean;
+}
+
+/**
+ * Builds a presence holder that starts out mounted.
+ * @returns {Presence} The holder, which a test flips before letting the work settle.
+ */
+function presentCaller(): Presence {
+  return { mounted: true };
+}
+
+/**
+ * Reports the presence reader a retention takes.
+ * @param {Presence} presence - The holder to read at settlement.
+ * @returns {() => boolean} The reader, asked once when the work settles.
+ */
+function readerFor(presence: Presence): () => boolean {
+  /**
+   * Reads the holder.
+   * @returns {boolean} Whether the notional screen is still mounted.
+   */
+  function stillPresent(): boolean {
+    return presence.mounted;
+  }
+  return stillPresent;
+}
+
+/**
+ * Discards anything a case left held, so no case can observe another's outcome.
+ * @returns {void} Nothing; nothing is retained afterwards.
+ */
+function clearRetainedOutcomes(): void {
+  discardRetainedOutcomes();
+}
+
+/**
+ * Asserts a write that lands after its screen has gone is retained rather than discarded.
+ *
+ * Purpose: this is the measured defect. Four writes answered 2xx -- `201` in 7 ms, `200` in 8 ms, `201`
+ * in 12 ms, `200` in 8 ms -- while the operator was already on another route, and each continuation set
+ * state on a component React had unmounted, which it discards without a word. One of the two `201`s had
+ * minted a one-time credential, so the value created and then dropped was the only copy of it.
+ *
+ * Assumptions: the resolved value is ALSO returned to the caller unchanged, asserted here in the same
+ * case. The retention must not be a diversion -- if it were, a caller that is still present would stop
+ * receiving its own result and every screen's success path would break at once.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function retainsAWriteThatLandsAfterItsScreenHasGone(): Promise<void> {
+  const presence = presentCaller();
+  const minted = { userId: 'ADMIN001', credentialSecretName: 'carddemo/dev/user/ADMIN001' };
+
+  const returned = await retainOutcomeIfAbandoned(
+    'users.new.created',
+    Promise.resolve(minted).then(
+      /**
+       * Abandons the caller at the moment the work settles, then hands the value on.
+       * @param {typeof minted} value - Whatever the completed work resolved to.
+       * @returns {typeof minted} The same value, so the caller's own resolution is unchanged.
+       */
+      function abandonThenResolve(value: typeof minted): typeof minted {
+        presence.mounted = false;
+        return value;
+      },
+    ),
+    readerFor(presence),
+  );
+
+  expect(returned, 'the work must still resolve to its own value').toBe(minted);
+  expect(claimRetainedOutcome<typeof minted>('users.new.created')).toEqual({
+    settled: 'COMPLETED',
+    value: minted,
+  });
+}
+
+/**
+ * Asserts nothing is retained when the screen that asked is still there to be told.
+ *
+ * Assumptions: this is the case that keeps the mechanism from becoming a second, stale notification.
+ * A wrapper that retained unconditionally would leave an outcome behind on every ordinary submission,
+ * and the next screen to collect that claim would report an action the operator had already seen
+ * completed -- indistinguishable, to them, from it having happened twice.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function retainsNothingWhileTheCallerIsStillThere(): Promise<void> {
+  const presence = presentCaller();
+
+  await retainOutcomeIfAbandoned('users.new.created', Promise.resolve('ok'), readerFor(presence));
+
+  expect(claimRetainedOutcome('users.new.created')).toBeUndefined();
+}
+
+/**
+ * Asserts a failure that settles after the screen has gone is retained and still re-thrown.
+ *
+ * Assumptions: a failure needs this as much as a success does, and arguably more. An operator who leaves
+ * a payment screen while the payment fails is told nothing at all under the measured behaviour, which is
+ * worse than not being told about one that succeeded -- they will assume it went through.
+ *
+ * Assumptions: the rejection is re-thrown as well as retained, so a caller still present reports it the
+ * way it always did. Swallowing it here would silence every existing error path.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function retainsAFailureThatSettlesAfterTheScreenHasGone(): Promise<void> {
+  const presence = presentCaller();
+  const raised = new RangeError('the field is narrower than that');
+
+  const rethrown: unknown = await retainOutcomeIfAbandoned(
+    'billpay.payment',
+    Promise.reject(raised).catch(
+      /**
+       * Abandons the caller at the moment the work fails, then re-raises the failure.
+       * @param {unknown} failure - Whatever the work rejected with.
+       * @returns {never} Never returns; the same failure is re-raised.
+       * @throws {unknown} The failure it was given, unchanged.
+       */
+      function abandonThenReject(failure: unknown): never {
+        presence.mounted = false;
+        throw failure;
+      },
+    ),
+    readerFor(presence),
+  ).catch(
+    /**
+     * Yields the failure as a value, so the case can assert on the identity it re-raised.
+     * @param {unknown} failure - Whatever the retained work re-raised.
+     * @returns {unknown} That same failure.
+     */
+    function yieldTheFailure(failure: unknown): unknown {
+      return failure;
+    },
+  );
+
+  expect(rethrown, 'the failure must still reach a caller that is present').toBe(raised);
+  expect(claimRetainedOutcome('billpay.payment')).toEqual({ settled: 'FAILED', failure: raised });
+}
+
+/**
+ * Asserts an outcome is delivered exactly once.
+ *
+ * Assumptions: collection REMOVES, which is what makes it safe for a screen to collect on every mount.
+ * A screen that could collect the same completed payment twice would report it twice, and an operator
+ * shown one payment twice cannot tell that from two payments.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function deliversARetainedOutcomeExactlyOnce(): void {
+  retainOutcomeAcrossNavigation('users.new.created', { settled: 'COMPLETED', value: 42 });
+
+  expect(claimRetainedOutcome<number>('users.new.created')).toEqual({
+    settled: 'COMPLETED',
+    value: 42,
+  });
+  expect(claimRetainedOutcome<number>('users.new.created')).toBeUndefined();
+}
+
+/**
+ * Asserts a screen already mounted is TOLD, rather than having to look.
+ *
+ * Purpose: collecting on mount alone does not resolve the finding, and the timings say why. The four
+ * abandoned writes landed 7 to 12 ms after the navigation, so the destination was already mounted when
+ * the outcome came into existence and a mount-time look would have found nothing. This is the signal
+ * that closes that window.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function tellsAScreenAlreadyMountedWhichClaimToCollect(): void {
+  const announced: string[] = [];
+  const stop = subscribeToRetainedOutcomes(
+    /**
+     * Records one announced claim.
+     * @param {string} claim - The claim name the registry announced.
+     * @returns {void} Nothing; the name is appended in place.
+     */
+    function recordAnnouncement(claim: string): void {
+      announced.push(claim);
+    },
+  );
+
+  retainOutcomeAcrossNavigation('users.new.created', { settled: 'COMPLETED', value: 1 });
+  stop();
+  retainOutcomeAcrossNavigation('cards.edit.saved', { settled: 'COMPLETED', value: 2 });
+
+  expect(announced).toEqual(['users.new.created']);
+  expect(claimRetainedOutcome('cards.edit.saved'), 'unsubscribing must not stop retention').toEqual(
+    {
+      settled: 'COMPLETED',
+      value: 2,
+    },
+  );
+}
+
+/**
+ * Asserts one subscriber that throws does not stop the next from being told.
+ *
+ * Assumptions: this mirrors the authentication-required registry's own guard, and for the same reason:
+ * the caller is a promise continuation nobody is awaiting, so a failure propagating out of it would be
+ * an unhandled rejection and would take the remaining listeners with it.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function keepsTellingTheOthersWhenOneSubscriberThrows(): void {
+  const told: string[] = [];
+  const stopFirst = subscribeToRetainedOutcomes(
+    /**
+     * Fails, standing for a subscriber whose own rendering raises.
+     * @returns {never} Never returns.
+     * @throws {Error} Always, which is the condition under test.
+     */
+    function failOnAnnouncement(): never {
+      throw new Error('a subscriber that fails');
+    },
+  );
+  const stopSecond = subscribeToRetainedOutcomes(
+    /**
+     * Records one announced claim, proving the failing subscriber did not suppress it.
+     * @param {string} claim - The claim name the registry announced.
+     * @returns {void} Nothing; the name is appended in place.
+     */
+    function recordAnnouncementAfterAFailure(claim: string): void {
+      told.push(claim);
+    },
+  );
+
+  retainOutcomeAcrossNavigation('users.new.created', { settled: 'COMPLETED', value: 1 });
+
+  expect(told).toEqual(['users.new.created']);
+  stopFirst();
+  stopSecond();
+}
+
+/**
+ * Asserts the store is bounded, and that it evicts the oldest uncollected outcome.
+ *
+ * Assumptions: the OLDEST is evicted rather than the newest, because an outcome uncollected across eight
+ * subsequent navigations is one the operator has stopped looking for, while the one that just landed is
+ * the one they are about to ask about. Bounding it at all is what stops a screen that retains and never
+ * collects from growing this without limit for as long as the tab is open.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function holdsABoundedNumberOfUncollectedOutcomes(): void {
+  for (let index = 0; index < 9; index += 1) {
+    retainOutcomeAcrossNavigation(`claim.${String(index)}`, {
+      settled: 'COMPLETED',
+      value: index,
+    });
+  }
+
+  expect(claimRetainedOutcome('claim.0'), 'the oldest must have been evicted').toBeUndefined();
+  expect(claimRetainedOutcome<number>('claim.1')).toEqual({ settled: 'COMPLETED', value: 1 });
+  expect(claimRetainedOutcome<number>('claim.8')).toEqual({ settled: 'COMPLETED', value: 8 });
+}
+
+/**
+ * Asserts a second retention under one claim supersedes the first rather than being evicted by it.
+ *
+ * Assumptions: two outcomes under one claim mean the later one is what happened -- a screen retrying a
+ * submission and leaving again produces exactly that -- so replacing is right and keeping both would
+ * hand the operator a superseded result. Replacing must also not consume a slot, which the second
+ * assertion checks by observing that nothing else was evicted.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function supersedesAnEarlierOutcomeHeldUnderTheSameClaim(): void {
+  retainOutcomeAcrossNavigation('billpay.payment', { settled: 'COMPLETED', value: 'first' });
+  retainOutcomeAcrossNavigation('billpay.payment', { settled: 'FAILED', failure: 'second' });
+
+  expect(claimRetainedOutcome('billpay.payment')).toEqual({
+    settled: 'FAILED',
+    failure: 'second',
+  });
+}
+
+/**
+ * Asserts a session ending and a client reset both discard everything uncollected.
+ *
+ * Assumptions: a retained outcome is session state, so it may not outlive one. The measured `201` minted
+ * a one-time credential; leaving it held past a sign-out would let the next operator at the same
+ * terminal collect a credential provisioned for the previous one. `resetApiClient` clears it for the
+ * same reason it discards the memoized client -- both belong to one loaded configuration, and in a test
+ * module both must not leak into the next case.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function discardsEverythingUncollectedOnAReset(): void {
+  retainOutcomeAcrossNavigation('users.new.created', { settled: 'COMPLETED', value: 'secret' });
+  resetApiClient();
+  expect(claimRetainedOutcome('users.new.created')).toBeUndefined();
+
+  retainOutcomeAcrossNavigation('users.new.created', { settled: 'COMPLETED', value: 'secret' });
+  discardRetainedOutcomes();
+  expect(claimRetainedOutcome('users.new.created')).toBeUndefined();
+}
+
+/**
+ * Groups the cases that fix how an outcome survives the screen that asked for it.
+ *
+ * WHY : Refactoring Rationale: these cases did not exist because the mechanism did not, and the finding
+ *       they answer is specific about the remedy: the write must be allowed to FINISH and its result
+ *       surfaced across the route change, not aborted. Every case here therefore lets the work settle
+ *       and asserts on what became of the outcome; none of them cancels anything, and the two
+ *       still-returns-its-value assertions are what prove the wrapper is not quietly a diversion.
+ * @returns {void} Nothing; the cases are registered as a side effect.
+ */
+function retainedOutcomeContract(): void {
+  afterEach(clearRetainedOutcomes);
+
+  it(
+    'retains a write that lands after its screen has gone',
+    retainsAWriteThatLandsAfterItsScreenHasGone,
+  );
+  it('retains nothing while the caller is still there', retainsNothingWhileTheCallerIsStillThere);
+  it(
+    'retains a failure that settles after the screen has gone',
+    retainsAFailureThatSettlesAfterTheScreenHasGone,
+  );
+  it('delivers a retained outcome exactly once', deliversARetainedOutcomeExactlyOnce);
+  it(
+    'tells a screen already mounted which claim to collect',
+    tellsAScreenAlreadyMountedWhichClaimToCollect,
+  );
+  it(
+    'keeps telling the others when one subscriber throws',
+    keepsTellingTheOthersWhenOneSubscriberThrows,
+  );
+  it('holds a bounded number of uncollected outcomes', holdsABoundedNumberOfUncollectedOutcomes);
+  it(
+    'supersedes an earlier outcome held under the same claim',
+    supersedesAnEarlierOutcomeHeldUnderTheSameClaim,
+  );
+  it('discards everything uncollected on a reset', discardsEverythingUncollectedOnAReset);
+}
+
+describe('retained outcome contract', retainedOutcomeContract);

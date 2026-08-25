@@ -99,7 +99,7 @@ const {
 const { REFERENCE_TYPE_LIST_ROUTE } = await import('../../routes/navigation');
 const { AppShell } = await import('../../layout/AppShell');
 const { PF_KEY_BAR_REGION_LABEL } = await import('../../layout/PfKeyBar');
-const { MESSAGE_BAND_TEST_ID } = await import('../../layout/MessageBand');
+const { MESSAGE_BAND_TEST_IDS } = await import('../../layout/MessageBand');
 const { PROGRAM_MESSAGES } = await import('../../messages/messages');
 const { STATUS_MESSAGES } = await import('../../messages/messages');
 const { fieldErrorId } = await import('../../layout/fieldHelp');
@@ -235,7 +235,22 @@ function typeFilter(): HTMLInputElement {
  * @returns {HTMLElement} The band element.
  */
 function messageBand(): HTMLElement {
-  return screen.getByTestId(MESSAGE_BAND_TEST_ID);
+  return screen.getByTestId(MESSAGE_BAND_TEST_IDS.error);
+}
+
+/**
+ * Returns the advisory line, which the shell paints one row above the outcome line.
+ *
+ * ⚠️ Assumptions: this screen publishes on TWO channels, and which one a sentence reaches is declared by
+ * the reference rather than chosen. `2500-SETUP-MESSAGE` at
+ * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L1504-L1579 sends `WS-INFO-MSG` to `INFOMSGO` and
+ * `WS-RETURN-MSG` to `ERRMSGO`, and `COTRTLI.bms` declares those two fields at `POS=(21,19)
+ * COLOR=NEUTRAL` and `POS=(23,1) COLOR=RED`. The arming prompts are `WS-INFO-MSG` sentences, so they are
+ * asserted here and a refusal is asserted on {@link messageBand}.
+ * @returns {HTMLElement} The advisory band element.
+ */
+function advisoryBand(): HTMLElement {
+  return screen.getByTestId(MESSAGE_BAND_TEST_IDS.information);
 }
 
 /**
@@ -521,7 +536,7 @@ async function confirmsADeleteWhileAZeroedFilterStands(): Promise<void> {
   await user.keyboard('{Enter}');
   await settle();
 
-  expect(within(messageBand()).getByText(DELETE_ARMED_SENTENCE)).toBeInTheDocument();
+  expect(within(advisoryBand()).getByText(DELETE_ARMED_SENTENCE)).toBeInTheDocument();
 
   await user.click(keyButton(REF_TYPE_LIST_KEY_LABELS.PFK10));
   await settle();

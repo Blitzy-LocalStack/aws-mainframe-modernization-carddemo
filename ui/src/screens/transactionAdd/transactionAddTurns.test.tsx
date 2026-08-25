@@ -573,6 +573,13 @@ async function honoursAConfirmationTakenWithoutEditing(): Promise<void> {
  * Assumptions: this guards the fix against having relaxed the wrong turn. The copy turn skips the data
  * chain; the capture turn must not, and it must still carry all eleven data members -- so a change that
  * skipped validation for both operations fails here rather than shipping.
+ *
+ * ⚠️ Refactoring Rationale: the second leg answers the ASKING SURFACE instead of expecting the legend's
+ * Enter to dispatch on its own, and the middle of the case is now an assertion rather than a gap. A
+ * filled form with a blank confirmation raises the surface and sends NOTHING -- browser validation
+ * measured the shape this replaces putting a `confirmation`-less body on the write endpoint with no
+ * surface ever having been visible -- so the body this case is about exists only after an affirmative,
+ * and asserting the zero-dispatch state before giving one is what keeps the fix from regressing.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function stillValidatesAndSendsTheFullCaptureBody(): Promise<void> {
@@ -613,6 +620,17 @@ async function stillValidatesAndSendsTheFullCaptureBody(): Promise<void> {
     await user.type(control(String(label)), String(value));
   }
   await user.click(within(legend).getByRole('button', { name: TRANSACTION_ADD_KEY_LABELS.ENTER }));
+  /*
+   * WHY : Assumptions: the surface is awaited through its own confirming control rather than through a
+   *       class query, because the control is what the next line clicks -- so the wait and the action
+   *       name the same element and cannot drift. `openSurfaceShows` exists for the cases that read the
+   *       surface's TEXT, where the hidden-and-leaving filter matters; here the control's presence is
+   *       the question.
+   */
+  const affirmative = await screen.findByRole('button', { name: 'Y' });
+  expect(vi.mocked(addTransaction)).not.toHaveBeenCalled();
+
+  await user.click(affirmative);
   await act(
     /**
      * Drains the microtask queue so the capture turn is recorded.

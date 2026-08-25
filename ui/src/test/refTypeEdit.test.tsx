@@ -75,11 +75,12 @@
  * follows an argument comma - which would move each explanation away from the code it explains.
  */
 
-import { screen, waitFor, within } from '@testing-library/react';
-import { Navigate, Route, Routes } from 'react-router';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
+import type { ReactElement } from 'react';
 
-import { ApiRequestError, isConflictFailure } from '../api/client';
+import { ApiRequestError, isConflictFailure, isTransientFailure } from '../api/client';
 import {
   createTransactionType,
   deleteTransactionType,
@@ -89,20 +90,31 @@ import {
 import type { TransactionType } from '../api/reference';
 import type { ApiError } from '../api/types';
 import { CARDDEMO_ADMIN_GROUP, CARDDEMO_USER_GROUP, COGNITO_GROUPS_CLAIM } from '../hooks/useAuth';
+import { SHELL_PINNED_ZONE_TEST_ID } from '../layout/AppShell';
+import {
+  BLANK_FIELD_MARKER_CHARACTERS,
+  BLANK_FIELD_MARKER_TEST_ID,
+  BUSY_ANNOUNCEMENT_TEST_ID,
+} from '../layout/fieldHelp';
 import { MESSAGE_BAND_TEST_IDS } from '../layout/MessageBand';
-import { PF_KEY_BAR_REGION_LABEL, PRIMARY_ACTION_AIDS } from '../layout/PfKeyBar';
+import { PF_KEY_BAR_REGION_LABEL } from '../layout/PfKeyBar';
 import { HEADER_DATE_FORMAT, HEADER_TIME_FORMAT } from '../layout/ScreenHeader';
 import {
+  ACCESS_DENIED_NOT_AUTHORIZED,
   APP_ORGANISATION_TITLE_DISPLAY,
   APP_TITLE_DISPLAY,
   COMMON_MESSAGES,
   FIELD_VALIDATION_SUFFIXES,
+  PERSISTENT_FAILURE_REPORT_IT,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
   formatFieldValidationMessage,
 } from '../messages/messages';
 import { REF_TYPE_EDIT_PATH, ROUTE_TABLE } from '../router';
+import { navigateSafely } from '../routes/navigation';
 import RefTypeEditScreen, {
   DESCRIPTION_CONTROL_ID,
   DESCRIPTION_WIDTH,
@@ -116,11 +128,13 @@ import RefTypeEditScreen, {
   REF_TYPE_NEW_SENTINEL,
   TYPE_CODE_CONTROL_ID,
   TYPE_CODE_WIDTH,
+  adoptRow,
+  holdInField,
   messageChannel,
   refTypeEditKeyMatrix,
 } from '../screens/refTypeEdit';
 import type { RefTypeEditKeyAid, RefTypeEditMode } from '../screens/refTypeEdit';
-import { FIELD_ERROR_TOKENS } from '../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS } from '../theme/tokens';
 import {
   apiError,
   conflictProblem,
@@ -178,6 +192,22 @@ const DESCRIPTION_FIELD_LABEL = SHARED_MESSAGES.TRANSACTION_DESC;
  */
 const STORED: TransactionType = { typeCd: '05', description: 'PAYMENT REVERSAL', version: 3 };
 
+/** Identifier the address probe publishes the current pathname under. */
+const RENDERED_ADDRESS_TEST_ID = 'rendered-address';
+
+/** Label on the harness control that navigates to the add sentinel. */
+const GO_TO_ADD_LABEL = 'go to the add sentinel';
+
+/**
+ * An address segment the two-character key field cannot hold as a key.
+ *
+ * Assumptions: two non-digits rather than a long digit run, because the field's WIDTH is not what makes
+ * this unusable -- `TRAN-TYPE PIC X(02)` at `app/cpy/CVTRA03Y.cpy` L5 and `CHAR(2)` at
+ * `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L2 both admit two characters -- its domain is. The
+ * reported reproduction used exactly this segment.
+ */
+const UNUSABLE_ROUTE_KEY = 'ZZ';
+
 /** A description that passes the alphanumeric edit and differs from the stored one. */
 const EDITED_DESCRIPTION = 'PAYMENT REVERSAL 2';
 
@@ -207,7 +237,54 @@ const ARRIVED = 'ARRIVED';
 const LAUNCH_PATH = '/originating-transition';
 
 /** Statuses the cases below hand the screen, named so no bare number appears at a call site. */
-const STATUS = { notFound: 404, conflict: 409, serverError: 500, unavailable: 503 } as const;
+const STATUS = {
+  /*
+   * WHY : Assumptions: 403 is an ORDINARY outcome of these operations and not a fault, which is why it
+   *       sits in this table beside the four the screen already answered.
+   *       `services/reference-service/src/main/resources/openapi/reference-api.yaml` declares
+   *       `x-required-authority: carddemo-admin` on the writes and `carddemo-user` on the read, so a
+   *       refusal says the token carries the wrong authority and says nothing about the service's health.
+   */
+  refusedAuthority: 403,
+  notFound: 404,
+  conflict: 409,
+  serverError: 500,
+  unavailable: 503,
+  /*
+   * WHY : ⚠ Assumptions: 502 earns its own member because it is the only transient status on the write
+   *       path with NO baseline sentence of its own. 503 carries `'Could not lock record for update'`,
+   *       the replacement for `SQLCODE -911` at `COTRTUPC.cbl` L1561-L1566, which deliberately outranks
+   *       the authored classification -- so a case that used 503 to exercise the classified arm would
+   *       exercise the lock arm instead and would pass while the classification was missing entirely.
+   */
+  badGateway: 502,
+} as const;
+
+/**
+ * The status the transport reports when no response arrived at all.
+ *
+ * Assumptions: this is not a member of {@link STATUS}, deliberately. Every entry there is a status a
+ * SERVICE answered with, and this is the absence of an answer -- `ui/src/api/client.ts` raises a dropped
+ * connection and a timeout with `status` 0 and a synthesised problem document, which is part of the
+ * published shape of `ApiRequestError` rather than a status the contract declares.
+ */
+const NO_TRANSPORT_STATUS = 0;
+
+/**
+ * The abend data a service carries when the reference program's abend routine ran.
+ *
+ * Assumptions: all four members are filled, because `ABEND-ROUTINE` at `COTRTUPC.cbl` L1684-L1697 sends
+ * the whole `ABEND-DATA` group declared at `app/cpy/CSMSG02Y.cpy` L21-L29 -- so a fixture omitting one
+ * would exercise a shape the service does not produce. The message member is deliberately BLANK: the
+ * heading then falls to the registered replacement, which keeps the cases below asserting about the
+ * SURFACE rather than about a sentence a service invented.
+ */
+const CARRIED_ABEND = {
+  abendCode: '9999',
+  abendCulprit: 'COTRTUPC',
+  abendReason: 'RESOURCE UNAVAILABLE',
+  abendMsg: '',
+} as const;
 
 /**
  * Finds the route the migration mounts for one reference program.
@@ -532,7 +609,12 @@ function errorBandText(): string {
 }
 
 /**
- * Reads the row-22 band the screen keeps in its own body.
+ * Reads the row-22 band the shell paints for this screen.
+ *
+ * Assumptions: the handle is unchanged although the band MOVED -- it was composed in the screen body and
+ * is now published on the shell slot. `MESSAGE_BAND_TEST_IDS.information` names the channel rather than
+ * the compositor, so every case reading this line held across the move, which is what makes the handle
+ * worth having.
  * @returns {string} The text on the information line.
  */
 function informationBandText(): string {
@@ -879,16 +961,21 @@ function transcribesTheKeyMatrixForEveryMode(): void {
 }
 
 /**
- * Asserts no key outside this mapset's six is bound, and that the two write keys take primary emphasis.
+ * Asserts no key outside this mapset's six is bound.
  *
  * Assumptions: the absent keys are named individually because each absence means something. There is no
  * PF7 or PF8 because this is a single-record screen with nothing to page - the sibling list screen is
- * where paging lives - and no PF6 or PF10 because the program has no arm for either.
+ * where paging lives - and no PF10 because the program has no arm for it.
  *
- * Assumptions: the emphasis mapping keys off the KEY and not off its per-screen meaning, which is why
- * PF4 takes the default weight here even though on this one screen it destroys a row. The visual weight
- * and the semantic therefore diverge, and the pointer confirmation is what carries the danger signal
- * instead - the delete control is rendered `danger` behind a confirmation with `okType="danger"`.
+ * ⚠️ Refactoring Rationale: the EMPHASIS half of this case has moved out to
+ * {@link paintsEachLegendControlFromItsRisk}, and it moved because it asserted the wrong thing rather
+ * than because it was in the wrong place. It read `PRIMARY_ACTION_AIDS` -- the bar's fallback table,
+ * keyed on the attention IDENTIFIER -- and recorded as a deliberate divergence that PF4 therefore
+ * rendered at default weight here even though it destroys a row. That divergence was a limitation of the
+ * mechanism: one table keyed on the identifier cannot serve `PFK04` deleting a row on this mapset and
+ * clearing a form on the mapsets that paint `'F4=Clear'`. `ui/src/layout/usePfKeys.ts` now carries a
+ * declared risk per handler, so the screen states what its own keys do and the divergence is closed.
+ * What remains here is the BINDING inventory, which is a property of the program rather than of the bar.
  * @returns {void} Nothing; failure is reported by the expectations.
  */
 function bindsNoKeyBeyondTheSixTheMapsetPaints(): void {
@@ -902,16 +989,249 @@ function bindsNoKeyBeyondTheSixTheMapsetPaints(): void {
   expect(bound).not.toContain('CLEAR');
   expect(bound).not.toContain('PA1');
   expect(bound).not.toContain('PA2');
+}
 
-  // WHY : Assumptions: AAP section 0.3.2 maps Enter and PF5 to `type="primary"` and PF3, PF4 and PF12
-  //       to `default`. The mapping keys off the KEY, not its per-screen meaning, so PF4 renders at
-  //       default weight here even though it deletes - see the Popconfirm case, which is what carries
-  //       the danger signal instead. Visual weight and semantic diverge, deliberately and once.
-  expect(PRIMARY_ACTION_AIDS).toContain('ENTER');
-  expect(PRIMARY_ACTION_AIDS).toContain('PFK05');
-  expect(PRIMARY_ACTION_AIDS).not.toContain('PFK03');
-  expect(PRIMARY_ACTION_AIDS).not.toContain('PFK04');
-  expect(PRIMARY_ACTION_AIDS).not.toContain('PFK12');
+/**
+ * Asserts each legend control renders the emphasis its own action's risk earns.
+ *
+ * ⚠️ Assumptions: the classification asserted here is the one this screen DECLARES in
+ * `REF_TYPE_EDIT_KEY_RISKS`, and it is read from the label rather than from the identifier. `'F4=Delete'`
+ * at `app/app-transaction-type-db2/bms/COTRTUP.bms` L116-L120 destroys a stored row, so its control is
+ * the dangerous one; `'F5=Save'` at L121-L125 writes, so it is the mutating one; and
+ * `'ENTER=Process'`, `'F3=Exit'` and `'F12=Cancel'` change no stored data, so they carry no emphasis at
+ * all. The identifier says nothing about any of that -- `PFK04` clears a form on other mapsets and
+ * `PFK05` deletes on `app/bms/COUSR03.bms` -- which is why the risk is per screen.
+ *
+ * ⚠️ Assumptions: the delete control is asserted dangerous while the row is merely SHOWN, before a
+ * confirmation exists. That is the property the retired assertion gave up: the danger signal used to
+ * live only on the confirmation, so the key that reaches the confirmation looked like the key that
+ * exits. An operator scanning row 24 for the destructive control now finds it before pressing anything.
+ *
+ * Assumptions: the labels are asserted verbatim alongside the emphasis, because the emphasis is only
+ * meaningful if the control still says what the mapset paints -- a control that gained emphasis and lost
+ * its literal would be a rule T8 violation this case would otherwise pass over.
+ *
+ * ⚠️ Assumptions: the save key is measured after a change has been VALIDATED, and not on arrival. The
+ * program reveals `'F5=Save'` only from `changesOkNotConfirmed` -- `1400-SEND-MAP` withholds the
+ * descriptor while a row is merely shown, which the key matrix above asserts from the other side -- so a
+ * query for it in the show-details mode fails against a screen that is behaving correctly. The two
+ * emphases are therefore read in the two modes that reveal them, rather than one mode being assumed to
+ * reveal both.
+ * @returns {Promise<void>} Resolves once every revealed control's emphasis has been asserted.
+ */
+async function paintsEachLegendControlFromItsRisk(): Promise<void> {
+  const rendered = await arriveAtStoredRow();
+
+  const unemphasised: readonly RefTypeEditKeyAid[] = ['ENTER', 'PFK03', 'PFK12'];
+
+  for (const aid of unemphasised) {
+    const control = legendControlFor(aid);
+    expect(control, `${aid} changes no stored data and must carry no emphasis`).not.toHaveClass(
+      'ant-btn-primary',
+    );
+    expect(control).not.toHaveClass('ant-btn-dangerous');
+    expect(legendTextOf(control)).toBe(REF_TYPE_EDIT_KEY_LABELS[aid]);
+  }
+
+  const destroys = legendControlFor('PFK04');
+  expect(destroys, 'the delete key destroys a stored row and must read as dangerous').toHaveClass(
+    'ant-btn-dangerous',
+  );
+  expect(legendTextOf(destroys)).toBe(REF_TYPE_EDIT_KEY_LABELS.PFK04);
+
+  await editDescriptionAndValidate(rendered);
+
+  const writes = legendControlFor('PFK05');
+  expect(writes, 'the save key writes and must read as the mutating action').toHaveClass(
+    'ant-btn-primary',
+  );
+  expect(writes, 'a save is not a destruction').not.toHaveClass('ant-btn-dangerous');
+  expect(legendTextOf(writes)).toBe(REF_TYPE_EDIT_KEY_LABELS.PFK05);
+}
+
+/**
+ * Stands in for a held call's resolver until the promise executor supplies the real one.
+ *
+ * Assumptions: this throws rather than doing nothing. A promise executor runs synchronously, so this
+ * value is replaced before any case can reach it -- reaching it means the held call was never
+ * constructed, and a silent no-op there would leave a case asserting against a call that had already
+ * settled.
+ * @returns {never} Never returns; it always throws.
+ * @throws {Error} Always, naming the condition.
+ */
+function refuseEarlySettle(): never {
+  throw new Error('the held call was released before its promise executor ran');
+}
+
+/**
+ * Asserts a withdrawal is declined while the delete it authorised is still running.
+ *
+ * ⚠️ Purpose: the confirmation's own controls are reached by pointer WITHOUT passing through the key
+ * hook, so the availability the key entries declare cannot cover them. The accept is inert through its
+ * own button props; CANCEL carries no such state, and it stays in the DOCUMENT after the confirming
+ * press because the design system keeps a closing panel mounted until its leave animation finishes.
+ * Two independent things have to hold for that window to be safe, and this case pins the second.
+ *
+ * ⚠️ Assumptions: what the defect produces is `'Invalid key pressed'` on row 23, not a cancellation.
+ * `0001-CHECK-PFKEYS` accepts PF12 in five modes and `TTUP-DELETE-IN-PROGRESS` is not among them
+ * (`COTRTUPC.cbl` L594-L601), so the press would be classified as an invalid key -- replacing the
+ * outstanding delete's own reporting with a sentence about a key, for a key the operator pressed on a
+ * control the screen had just shown them. The guard declines it silently instead, which is what the
+ * terminal did with a key pressed while the keyboard was inhibited.
+ *
+ * Assumptions: the delete is asserted to have been issued exactly ONCE and then allowed to settle, so
+ * the case proves the withdrawal neither reported anything nor cancelled the work -- a guard that
+ * swallowed the whole turn would pass the first assertion and fail the last.
+ * @returns {Promise<void>} Resolves once the declined withdrawal and the settled delete are asserted.
+ */
+async function declinesAWithdrawalWhileTheDeleteRuns(): Promise<void> {
+  /*
+   * WHY : ⚠ Assumptions: the holder is initialised with {@link refuseEarlySettle} rather than with `null`,
+   *       and the difference is a compile-time one. Initialised to `null`, TypeScript narrows the
+   *       variable to `null` for the whole body -- the assignment happens inside the executor, which its
+   *       control-flow analysis does not follow -- so the release below failed to compile with
+   *       `This expression is not callable. Type 'never' has no call signatures.` A callable initial
+   *       value keeps the declared type, and it also fails LOUDLY if the executor somehow never ran,
+   *       where a null check would have silently skipped the release and left the case asserting nothing.
+   */
+  let release: () => void = refuseEarlySettle;
+  vi.mocked(deleteTransactionType).mockReturnValue(
+    new Promise<void>(
+      /**
+       * Captures the resolver so the delete can be held and then settled.
+       * @param {() => void} resolve - The promise's own resolve function.
+       * @returns {void} Nothing; the call settles when the case releases it.
+       */
+      (resolve: () => void): void => {
+        release = resolve;
+      },
+    ),
+  );
+  const rendered = await arriveAtStoredRow();
+
+  await askToDelete(rendered);
+  await pressPfKey(rendered.user, 'PFK04');
+
+  await waitFor(
+    /**
+     * Waits until the delete has actually been issued.
+     * @returns {void} Nothing; throws until the call has been made.
+     */
+    (): void => {
+      expect(vi.mocked(deleteTransactionType)).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  /*
+   * WHY : ⚠ Assumptions: the click is dispatched with `fireEvent` and NOT through the keyboard-and-pointer
+   *       operator, and the difference is the whole design of this case. The operator refuses to click a
+   *       control the layout reports as non-interactive, and the closing panel's wrap is exactly that at
+   *       this version -- so driving it that way fails with `pointer-events: none` and measures the
+   *       design system's CSS rather than this screen. That CSS is the FIRST line of defence and it is
+   *       working; the guard in the screen is the second, and it is the one a version bump can silently
+   *       make load-bearing. `fireEvent` delivers the event the guard would see if the panel ever became
+   *       interactive while closing, which is what makes this an assertion about the screen.
+   *       Alternatives Considered: deleting the guard and relying on the wrap's `pointer-events`.
+   *       Rejected because a destructive path would then be protected by a style rule in a dependency,
+   *       with nothing in this repository stating the requirement or failing when it changes.
+   */
+  fireEvent.click(within(confirmationDialog()).getByRole('button', { name: 'Cancel' }));
+
+  expect(
+    errorBandText(),
+    'a key pressed while the delete runs must not be reported as an invalid key',
+  ).not.toContain(EDIT_STATUS.WS_INVALID_KEY_PRESSED.text);
+  expect(errorBandText()).not.toContain(EDIT_STATUS.WS_DELETE_WAS_CANCELLED.text);
+  expect(vi.mocked(deleteTransactionType)).toHaveBeenCalledTimes(1);
+
+  release();
+
+  await waitFor(
+    /**
+     * Waits for the delete to report its own success once released.
+     * @returns {void} Nothing; throws until the success sentence lands.
+     */
+    (): void => {
+      expect(informationBandText()).toContain(EDIT_STATUS.CONFIRM_DELETE_SUCCESS.text);
+    },
+  );
+}
+
+/**
+ * Asserts the key whose turn is outstanding reports busy while the others report unavailable.
+ *
+ * ⚠️ Purpose: this is the primitive's own contract, and the defect it replaces was reachable. A call in
+ * flight used to `disable` all six keys, and `ui/src/layout/usePfKeys.ts` classifies a disabled press
+ * with the baseline's `'Invalid key pressed'` text -- so a second press of a key during its own call was
+ * reported as an invalid key, which the reference would never say about a key it accepts. A busy entry
+ * stays present, enabled, focusable and named, and its second press is declined silently: the 3270
+ * keyboard-inhibit analogue, which a pseudo-conversational task got for free by holding the terminal.
+ *
+ * ⚠️ Assumptions: exactly ONE control is busy, and the case asserts the others are NOT. Marking every
+ * key busy would claim each of them is waiting on an answer, when they are different actions this screen
+ * genuinely cannot perform mid-call; `disabled` is the honest classification for those, and a case that
+ * only checked the pressed control would pass against a screen that marked all six.
+ *
+ * ⚠️ Assumptions: the READ is the call measured, and the delete is not, because the delete's own key is
+ * withdrawn from the legend while it runs -- the key matrix records `PFK04` as accepted only in
+ * `showDetails` and while confirming, so once the `DELETE` is issued the control is gone and no rendered
+ * key can carry the affordance. That is the reference's own asymmetry rather than a gap in the primitive,
+ * and the sentence below is what covers it: the live region says a request is outstanding whichever call
+ * it is. The read keeps `'ENTER=Process'` on the glass throughout, so it is the call that can prove the
+ * affordance lands on the right control.
+ *
+ * Assumptions: the state is asserted through `aria-busy` rather than through the spinner glyph, because
+ * that is the attribute the bar sets for the purpose -- its own rationale records that it supplies the
+ * loading icon with `aria-hidden` precisely so the control's accessible NAME does not change mid-turn. A
+ * case keyed on the glyph would pass while the state was unannounced.
+ *
+ * Assumptions: the call is held unresolved by a promise that never settles, so the assertions run while
+ * it is genuinely outstanding rather than after a resolution the runner raced.
+ * @returns {Promise<void>} Resolves once the outstanding and unavailable controls have been asserted.
+ */
+async function reportsTheOutstandingKeyAsBusy(): Promise<void> {
+  vi.mocked(getTransactionType).mockReturnValue(
+    new Promise<TransactionType>(
+      /**
+       * Holds the read outstanding for the duration of the case.
+       * @returns {void} Nothing; the promise is deliberately never settled.
+       */
+      (): void => {
+        // Assumptions: intentionally empty; the call must not settle while the assertions run.
+      },
+    ),
+  );
+  await renderInShellAt(STORED.typeCd);
+
+  await waitFor(
+    /**
+     * Waits until the read has been issued and the processing key reports itself busy.
+     * @returns {void} Nothing; throws until the outstanding state is on the control.
+     */
+    (): void => {
+      expect(vi.mocked(getTransactionType)).toHaveBeenCalledTimes(1);
+      expect(legendControlFor('ENTER')).toHaveAttribute('aria-busy', 'true');
+    },
+  );
+
+  const outstanding = legendControlFor('ENTER');
+  expect(
+    outstanding,
+    'a busy control stays usable, because the key works again the moment the answer arrives',
+  ).toBeEnabled();
+  expect(legendTextOf(outstanding), 'the legend text is verbatim while busy').toBe(
+    REF_TYPE_EDIT_KEY_LABELS.ENTER,
+  );
+  // WHY : ⚠️ Assumptions: the sentence is asserted in the same turn as the attribute, because the two
+  //       answer different questions -- `aria-busy` says a control cannot be used now, and the sentence
+  //       says why and that it is temporary. An earlier revision of this screen recorded that the
+  //       catalogue held no sentence for this condition; it now registers `REQUEST_IN_PROGRESS`, so the
+  //       shortfall is closed rather than restated.
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  const exit = legendControlFor('PFK03');
+  expect(exit, 'exit is not the outstanding turn and cannot run during one').toBeDisabled();
+  expect(exit).not.toHaveAttribute('aria-busy', 'true');
 }
 
 /**
@@ -1331,14 +1651,29 @@ async function refusesDeleteAndCancelDuringKeyEntry(): Promise<void> {
 }
 
 /**
- * Asserts Enter is refused while a delete is awaiting its confirmation, and the confirmation survives.
+ * Asserts Enter cannot process or commit while a delete awaits its confirmation, and that PF3 survives.
  *
- * Refactoring Rationale: the guard is the reason an absent-minded Enter cannot confirm a delete. L583
- * admits Enter for every mode EXCEPT `TTUP-CONFIRM-DELETE`, and L1400-L1404 darkens the field carrying
- * its label in that same one mode, so the terminal both withdrew the affordance and refused the key. The
- * migrated screen reproduces both halves: the descriptor leaves the legend and the press is refused. PF3
- * remains accepted throughout, because L582 admits it unconditionally - withdrawing the exit to match
- * its darkened label would make the confirmation a dead end the reference does not have.
+ * Refactoring Rationale: the reference withdraws BOTH halves of this affordance and refuses the key.
+ * L583 admits Enter for every mode EXCEPT `TTUP-CONFIRM-DELETE`, and L1400-L1404 darkens the single
+ * field carrying its label in that same one mode - `FKEY03` at `COTRTUP.bms` L111-L115 holds
+ * `'ENTER=Process F3=Exit'` as ONE literal, so the terminal could not darken one without the other. Both
+ * halves are asserted here: the two descriptors leave the legend, the key matrix refuses Enter, and PF3
+ * stays ACCEPTED because L582 admits it unconditionally - withdrawing the exit to match its darkened
+ * label would make the confirmation a dead end the reference does not have.
+ *
+ * ⚠ WHY : Trade-offs: what a bare Enter PRODUCES here is a documented divergence, and this case pins the
+ *       divergence rather than the sentence it replaced. The reference answers Enter-while-confirming
+ *       with `'Invalid key pressed'` and stays armed; this screen answers it by withdrawing the request,
+ *       because the confirmation is a real dialogue whose SAFE control holds focus and
+ *       `ui/src/layout/usePfKeys.ts` defers the ENTER identifier to any focused element the browser
+ *       activates itself - `ENTER_ACTIVATED_TARGET_SELECTOR` lists `button` first, and its own rationale
+ *       records that claiming Enter over a focused button was a defect it fixed. So the sentence is
+ *       unreachable in this mode by construction, and the two ways to reach it again are both worse:
+ *       leaving focus on the danger control means a bare Enter COMMITS the delete, and cancelling the
+ *       activation of a focused button breaks it for keyboard operators. The safety property the original
+ *       case existed for is strictly stronger here and is what is asserted - Enter neither processes nor
+ *       deletes - and the refusal itself is still pinned at the layer that transcribes L583, the key
+ *       matrix. The catalogued sentence remains reachable on this screen through PF10 and PF6.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function refusesEnterWhileADeleteAwaitsConfirmation(): Promise<void> {
@@ -1352,13 +1687,27 @@ async function refusesEnterWhileADeleteAwaitsConfirmation(): Promise<void> {
   //       against the gate at L582. The operator is never trapped in the confirmation, but the exit
   //       is no longer advertised while it is pending.
   expect(refTypeEditKeyMatrix('confirmDelete').PFK03.accepted).toBe(true);
+  // WHY : Assumptions: L583's refusal is asserted where it is transcribed. The matrix is what decides
+  //       whether the identifier reaches the screen at all, so this is the same fact the band sentence
+  //       used to stand for, read at the layer that owns it.
+  expect(refTypeEditKeyMatrix('confirmDelete').ENTER.accepted).toBe(false);
 
   await pressPfKey(rendered.user, 'ENTER');
-  await waitFor(awaitRefusedKeyReport);
-  // WHY : Assumptions: the prompt is STILL on the glass after the refused Enter, which is what shows
-  //       the confirmation survived the rejected key rather than being silently dismissed by it.
-  expect(informationBandText()).toContain(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text);
-  expect(vi.mocked(deleteTransactionType)).not.toHaveBeenCalled();
+
+  await waitFor(awaitCancelledDelete);
+  expect(
+    vi.mocked(deleteTransactionType),
+    'a bare Enter must never commit a delete',
+  ).not.toHaveBeenCalled();
+  /*
+   * ⚠ Refactoring Rationale: the withdrawal is proven by waiting for the DIALOGUE to leave rather than by
+   * counting the prompt and expecting none. The count assertion failed against the migrated surface with
+   * one occurrence left -- the closing dialogue's own title -- and that is not a stale prompt: the design
+   * system keeps a closing panel mounted until its leave animation reports finishing, which jsdom never
+   * runs. {@link waitForTheWithdrawalToSettle} ends the animation by hand, so the assertion measures the
+   * withdrawal instead of the absence of an animation frame.
+   */
+  await waitForTheWithdrawalToSettle();
 }
 
 /**
@@ -1423,6 +1772,18 @@ function awaitDeleteCommitted(): void {
  * catalogued sentence is on the glass twice - once on the row-22 band, where the mode put it, and once as
  * the confirmation's own title. That duplication is the assertion: it proves the dialogue reuses the
  * catalogued sentence instead of introducing a second wording for one question.
+ *
+ * ⚠ WHY : Refactoring Rationale: the tail of this case was REWRITTEN, because what it asserted was the
+ *       defect. It cancelled the confirmation and then clicked the same control twice more to commit
+ *       the delete -- a sequence that was only reachable because cancelling did nothing but close the
+ *       overlay, leaving the request armed. That is the destructive review's "cancel is genuinely
+ *       safe" failing: the press after a cancel committed, with no confirmation on the glass at the
+ *       moment it did. The reference cancels a pending delete back to key entry with
+ *       `'Delete was cancelled'` (`app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L1000-L1002), and
+ *       `0001-CHECK-PFKEYS` accepts PF4 only in `TTUP-SHOW-DETAILS` and `TTUP-CONFIRM-DELETE`
+ *       (L588-L593) -- so after a cancel the key is refused until the row is read again. The tail now
+ *       asserts that withdrawal and then reaches the delete the way the reference does: read the row,
+ *       arm, confirm.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function gatesThePointerDeleteBehindADangerousConfirmation(): Promise<void> {
@@ -1433,27 +1794,224 @@ async function gatesThePointerDeleteBehindADangerousConfirmation(): Promise<void
   const trigger = within(shellLandmark('screenBody')).getByRole('button', {
     name: REF_TYPE_EDIT_KEY_LABELS.PFK04,
   });
-  // WHY : Trade-offs: `okType="danger"` per AAP section 0.3.2 is asserted through the rendered class
-  //       rather than the React prop, so the check survives an antd internal rename; the trade is a
-  //       looser assertion for one that does not break on a minor version bump.
+  // WHY : Trade-offs: the dangerous emphasis AAP section 0.3.2 assigns to a destructive accept is
+  //       asserted through the RENDERED class rather than the React prop, so the check survives an antd
+  //       internal rename; the trade is a looser assertion for one that does not break on a minor
+  //       version bump.
+  //       ⚠️ Refactoring Rationale: the prop it stands for is now `okButtonProps={{ danger: true }}` and
+  //       not the legacy `okType="danger"` this comment used to name. `convertLegacyProps` maps that
+  //       operand to `danger` with the DEFAULT variant, which renders the destructive control as the
+  //       quieter of the two -- emphasis inverted against risk -- so the migration to a `Modal` took the
+  //       chance to state the pair explicitly. The class this asserts is unchanged either way, which is
+  //       exactly why the assertion is on the class.
   expect(trigger.className).toContain('dangerous');
-  // WHY : Assumptions: one occurrence closed, two open - the row-22 band plus the dialogue's own
-  //       title. Counting rather than merely finding it is what proves the dialogue REUSES the
-  //       catalogued sentence from `COTRTUPC.cbl` L151-L152 instead of inventing a second wording.
-  expect(screen.getAllByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toHaveLength(1);
+  // WHY : Assumptions: TWO occurrences the moment the delete is armed - the row-22 band plus the
+  //       dialogue's own title. Counting rather than merely finding it proves both halves at once: the
+  //       dialogue is on the glass without a pointer having to reveal it, and it REUSES the catalogued
+  //       sentence from `COTRTUPC.cbl` L151-L152 instead of inventing a second wording.
+  expect(screen.getAllByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toHaveLength(2);
 
-  await rendered.user.click(trigger);
-  expect(await screen.findAllByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toHaveLength(2);
   await rendered.user.click(screen.getByRole('button', { name: 'Cancel' }));
-  expect(vi.mocked(deleteTransactionType)).not.toHaveBeenCalled();
 
-  await rendered.user.click(trigger);
+  // The cancel is a withdrawal: the sentence says so and the key is no longer accepted, so the press
+  // that used to commit here cannot.
+  await waitFor(awaitCancelledDelete);
+  // ⚠ Assumptions: the declining CONTROL is held to the same withdrawal as the Escape key -- dialogue gone,
+  // prompt gone -- because the two routes reach one handler and a case that watched only one of them would
+  // pass against a screen that answered only one.
+  await waitForTheWithdrawalToSettle();
+  expect(vi.mocked(deleteTransactionType)).not.toHaveBeenCalled();
+  expect(bodyDeleteControl()).toBeDisabled();
+
+  // Reaching the delete again takes the route the reference takes: read the row, arm, then confirm.
+  await rendered.user.type(typeCodeControl(), STORED.typeCd);
+  await pressPfKey(rendered.user, 'ENTER');
+  await awaitStoredRow();
+
+  await rendered.user.click(bodyDeleteControl());
+  await waitFor(awaitDeleteConfirmationPrompt);
+
   const accept = await screen.findByRole('button', { name: 'OK' });
   expect(accept.className).toContain('dangerous');
   await rendered.user.click(accept);
 
   await waitFor(awaitDeleteCommitted);
   expect(vi.mocked(deleteTransactionType)).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * Returns text unchanged, so a query compares against exactly what is on the glass.
+ *
+ * ⚠ Purpose: Testing Library's default normaliser trims each end and folds every whitespace run to one
+ * space before comparing, which makes it blind to the one property these labels have to keep. Each
+ * `DFHMDF` label in `app/app-transaction-type-db2/bms/COTRTUP.bms` is padded to the column its value
+ * starts at -- `'Transaction Type  :'` at L79-L83 carries two spaces before its colon and
+ * `'Description       :'` at L90-L93 carries seven -- and rule T8 carries that padding character for
+ * character. Passing this as the normaliser makes the assertion fail if the padding is ever collapsed,
+ * where the default would pass against a label rendered with any spacing at all.
+ *
+ * Alternatives Considered: folding the EXPECTED string to match the default normaliser, which is what the
+ * retired anchoring case did to compare an accessible description. Rejected here because that direction
+ * throws away the padding on both sides of the comparison, so it can no longer tell a verbatim label from
+ * a re-spaced one -- acceptable when the value being compared was itself computed by the accessibility
+ * layer, misleading when it is the rendered text.
+ * @param {string} text - The node's text, exactly as rendered.
+ * @returns {string} The same text, unmodified.
+ */
+function verbatimText(text: string): string {
+  return text;
+}
+
+/**
+ * Locates the destructive confirmation by the role and the name it is announced with.
+ *
+ * ⚠ Refactoring Rationale: the confirmation is reached by ROLE where the retired geometry case reached it
+ * by walking up from a button to a `.ant-popover` surface, and the change is the whole point rather than a
+ * convenience. At the pinned version an anchored `Popconfirm` renders its overlay through the tooltip
+ * primitive, which writes `role: 'tooltip'` with no prop that overrides it, so the surface guarding a
+ * `DELETE` could not be found by the role a dialogue has -- and a query that cannot express the property
+ * cannot assert it. `Modal` renders through the dialog primitive
+ * (`ui/node_modules/@rc-component/dialog/lib/Dialog/Content/Panel.js` L113-L115), so the surface is a
+ * named `dialog` and this query fails if it ever stops being one.
+ *
+ * Assumptions: the name asserted is the catalogued row-22 sentence rather than an authored dialogue title,
+ * because `aria-labelledby` points at the title element and the title is that sentence -- one question,
+ * one wording, whether the operator reads the band or hears the dialogue.
+ * @returns {HTMLElement} The open confirmation dialogue.
+ * @throws {Error} If no dialogue with that accessible name is open, which Testing Library raises.
+ */
+function confirmationDialog(): HTMLElement {
+  return screen.getByRole('dialog', { name: EDIT_STATUS.PROMPT_DELETE_CONFIRM.text });
+}
+
+/**
+ * Waits until the destructive confirmation has left the accessibility tree.
+ *
+ * ⚠ Refactoring Rationale: two cases asserted a withdrawal by counting occurrences of the prompt and
+ * expecting none, and both failed against the migrated surface with one occurrence left -- the dialogue's
+ * own title, on a panel that had been told to close. That is not a stale prompt: the design system keeps a
+ * closing dialogue mounted until its leave animation reports finishing, and jsdom runs no animations, so
+ * the panel would never have been parked however long the case waited.
+ *
+ * ⚠ Assumptions: the leave animation is ended BY HAND, on every retry, and the event fired is
+ * `transitionend` rather than `animationend`. The animation library listens for a native end event on the
+ * panel (`ui/node_modules/@rc-component/motion/es/hooks/useDomMotionEvents.js` L21-L22) and resolves the
+ * names it listens for by probing for a constructor and a style property: jsdom exposes no
+ * `AnimationEvent`, so the animation name settles on a vendor-prefixed form Testing Library cannot emit,
+ * while `TransitionEvent` does exist and keeps the transition name unprefixed. Both reach the one handler,
+ * which does not inspect the event's type. Firing on every retry rather than once is required because the
+ * library discards an end event that arrives before its own scheduled active step, and re-firing costs
+ * nothing once the panel has gone because the query returns null.
+ *
+ * ⚠ Assumptions: the ROW-22 PROMPT is asserted gone alongside the dialogue, and the two together are what
+ * a withdrawal means. This half is a coverage repair rather than an addition: the assertion these call
+ * sites used to make counted every occurrence of the prompt on the glass, which covered the band and the
+ * dialogue at once, and replacing it with a dialogue-only check would have quietly stopped watching the
+ * band. A prompt reading `'Delete this record ? Press F4 to confirm'` over a request that is provably
+ * withdrawn is the defect this pair exists to prevent -- the sentence is the half an operator acts on.
+ *
+ * Assumptions: the band is expected to carry the KEY-ENTRY prompt rather than to be blank, because
+ * `2500-SETUP-MESSAGE`'s catch-all at `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L1216-L1218 puts a
+ * standing instruction on row 22 for every mode that has nothing more specific to say. A blank line here
+ * would be its own divergence.
+ *
+ * Trade-offs: this arrangement is duplicated from `ui/src/test/refTypeList.test.tsx`, whose shared home
+ * would be `ui/src/test/setup.ts` -- outside this change's file set. It is flagged here so the next change
+ * through `setup.ts` can lift it.
+ * @returns {Promise<void>} Resolves once no confirmation dialogue is reachable and no prompt survives it.
+ */
+async function waitForTheWithdrawalToSettle(): Promise<void> {
+  await waitFor(
+    /**
+     * Ends the leave animation if one is still running, then asserts the dialogue has gone.
+     * @returns {void} Nothing; the expectation throws until the dialogue is unreachable.
+     */
+    function theConfirmationIsClosed(): void {
+      const leaving = screen.queryByRole('dialog', {
+        name: EDIT_STATUS.PROMPT_DELETE_CONFIRM.text,
+      });
+
+      if (leaving !== null) {
+        fireEvent.transitionEnd(leaving);
+      }
+
+      expect(
+        screen.queryByRole('dialog', { name: EDIT_STATUS.PROMPT_DELETE_CONFIRM.text }),
+      ).not.toBeInTheDocument();
+      expect(
+        informationBandText(),
+        'the confirmation prompt must not outlive the confirmation',
+      ).not.toContain(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text);
+      expect(informationBandText()).toContain(EDIT_STATUS.PROMPT_FOR_SEARCH_KEYS.text);
+    },
+  );
+}
+
+/**
+ * Asserts the armed delete is presented as a dialogue that names the record it would destroy.
+ *
+ * ⚠ Refactoring Rationale: this case measured GEOMETRY -- it installed a fake layout, opened the
+ * confirmation, and proved the overlay resolved an inset inside a reported viewport, because the sibling
+ * list screen's confirmation had been measured mounting at `inset: -1000vh auto auto -1000vw` with no
+ * anchor resolved. Every one of those assertions is now unreachable AND unnecessary. Unreachable, because
+ * the surface is no longer an anchored overlay: it is a `Modal`, so `.ant-popover` does not exist and the
+ * case failed on its own locator. Unnecessary, because a modal is positioned against the VIEWPORT and has
+ * no trigger to align against -- the failure mode the geometry pinned cannot occur, so pinning it would
+ * assert nothing about anything. The scaffolding it needed (a patched `getBoundingClientRect`, a reported
+ * `documentElement` extent, a per-axis inset assertion and a description-folding helper) is retired with
+ * it rather than left measuring a surface that no longer moves.
+ *
+ * ⚠ Assumptions: what replaces it is the property the geometry was a proxy for -- that an operator arming
+ * a delete is actually ASKED, in a surface assistive technology announces as a dialogue, naming the row.
+ * Six things are asserted together because the confirmation is only safe when all six hold: it is a
+ * `dialog` (the role query is the assertion), it is MODAL so focus cannot wander behind it, its title is
+ * the catalogued prompt and is therefore on the glass twice with the row-22 band, it names the record
+ * under the mapset's own field labels rather than saying `this record`, focus starts on the DECLINING
+ * choice, and the accept is the dangerous control. Nothing has been deleted at this point.
+ *
+ * Assumptions: the naming is read as TEXT INSIDE the dialogue rather than as the focused control's
+ * accessible description, which is what the retired case asserted. The description existed because the
+ * overlay carried no role, so the record had to be attached to each button by hand or it was never
+ * announced; a dialogue's contents are announced on open, so the fact reaches the same operator through
+ * the surface's own semantics and the hand-maintained identifier is retired with the overlay.
+ *
+ * Assumptions: NOTHING is clicked to reveal the dialogue. `askToDelete` raises PF4, so this measures the
+ * surface an operator gets on the KEYBOARD path -- which is the path that had none.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function presentsTheArmedDeleteAsADialogNamingTheRecord(): Promise<void> {
+  vi.mocked(deleteTransactionType).mockResolvedValue(undefined);
+  const rendered = await arriveAtStoredRow();
+
+  await askToDelete(rendered);
+
+  const dialog = confirmationDialog();
+
+  expect(dialog).toHaveAttribute('aria-modal', 'true');
+  // WHY : Assumptions: TWO occurrences the moment the delete is armed -- the row-22 band plus the
+  //       dialogue's own title. Counting proves both halves at once: the dialogue is on the glass
+  //       without a pointer having to reveal it, and it REUSES the catalogued sentence from
+  //       `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L151-L152 rather than inventing a second
+  //       wording for one question.
+  expect(screen.getAllByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toHaveLength(2);
+
+  const named = within(dialog);
+
+  expect(
+    named.getByText(REF_TYPE_EDIT_FIELD_LABELS.typeCode, { normalizer: verbatimText }),
+  ).toBeInTheDocument();
+  expect(named.getByText(STORED.typeCd)).toBeInTheDocument();
+  expect(
+    named.getByText(REF_TYPE_EDIT_FIELD_LABELS.description, { normalizer: verbatimText }),
+  ).toBeInTheDocument();
+  expect(named.getByText(STORED.description)).toBeInTheDocument();
+
+  const cancel = named.getByRole('button', { name: 'Cancel' });
+  const accept = named.getByRole('button', { name: 'OK' });
+
+  expect(cancel).toHaveFocus();
+  expect(accept.className).toContain('ant-btn-dangerous');
+  expect(vi.mocked(deleteTransactionType)).not.toHaveBeenCalled();
 }
 
 /**
@@ -1542,6 +2100,134 @@ async function reportsADeleteTheTableRefused(): Promise<void> {
 function awaitDeleteRefused(): void {
   // WHY : Assumptions: `'Delete of record failed'` at `COTRTUPC.cbl` L189-L190, no trailing stop.
   expect(errorBandText()).toContain(EDIT_STATUS.RECORD_DELETE_FAILED.text);
+}
+
+/**
+ * Asserts a save that never reached the table is not reported as a save the table refused.
+ *
+ * ⚠️ Purpose: every failed write on this screen used to report a Db2 arm's sentence --
+ * `'Update of record failed'` at `COTRTUPC.cbl` L187-L188 or `'Changes unsuccessful. Please try again'`
+ * -- and both state that the TABLE refused the work. A throttle, a gateway failure, a timeout or a
+ * dropped connection did not get that far, so either sentence sends the operator, and whoever they call,
+ * to look for a database failure that never happened.
+ *
+ * ⚠️ Assumptions: 502 is the status chosen rather than 503, because 503 has a NAMED baseline sentence on
+ * this path -- `'Could not lock record for update'`, the replacement for `SQLCODE -911` at L1561-L1566 --
+ * which is tested separately and deliberately outranks the classification. Choosing 502 exercises the
+ * classified arm without disturbing that precedence, and the two cases together prove the order.
+ *
+ * Assumptions: the replaced sentence is asserted absent, because the defect is a MISREPORT rather than a
+ * missing sentence.
+ * @returns {Promise<void>} Resolves once the sentence has been asserted.
+ */
+async function reportsATransientSaveAsAConditionThatMayClear(): Promise<void> {
+  const refused = failureFrom(STATUS.badGateway, apiError({ status: STATUS.badGateway }));
+  vi.mocked(replaceTransactionType).mockRejectedValue(refused);
+  expect(isTransientFailure(refused)).toBe(true);
+
+  const rendered = await arriveAtStoredRow();
+  await editDescriptionAndValidate(rendered);
+  await pressPfKey(rendered.user, 'PFK05');
+
+  await waitFor(
+    /**
+     * Waits for the classified sentence to reach the row-23 line.
+     * @returns {void} Nothing; throws until the sentence lands.
+     */
+    (): void => {
+      expect(errorBandText()).toContain(TRANSIENT_FAILURE_TRY_AGAIN);
+    },
+  );
+  expect(
+    errorBandText(),
+    'a save that never reached the table must not be reported as one the table refused',
+  ).not.toContain(EDIT_STATUS.TABLE_UPDATE_FAILED.text);
+  expect(errorBandText()).not.toContain(EDIT_STATUS.COULD_NOT_LOCK_REC_FOR_UPDATE.text);
+}
+
+/**
+ * Asserts a delete that reached nothing at all is reported as a request that did not complete.
+ *
+ * ⚠️ Assumptions: this is the one path on this screen whose OUTCOME is genuinely unknown. The transport
+ * classifies a dropped connection as `NETWORK` with no status and `transient` false, so it is neither a
+ * condition to wait out nor a refusal `9800-DELETE-PROCESSING` issued at L1650-L1657 -- and the row may or
+ * may not be gone. `'That request did not complete. Report it if it happens again.'` invites the re-read
+ * that answers it, where `'Delete of record failed'` invites a second attempt at destroying a row that
+ * may already have been destroyed.
+ *
+ *       Trade-offs: the honest fix for the ambiguity is an idempotency key on the delete, which lives in
+ *       the service contract this change may not edit; it is reported to the dispatcher instead.
+ * @returns {Promise<void>} Resolves once the sentence has been asserted.
+ */
+async function reportsADeleteThatReachedNothingAsIncomplete(): Promise<void> {
+  vi.mocked(deleteTransactionType).mockRejectedValue(
+    new ApiRequestError(
+      'NETWORK',
+      NO_TRANSPORT_STATUS,
+      apiError({ status: NO_TRANSPORT_STATUS }),
+      'no response reached the browser',
+    ),
+  );
+  const rendered = await arriveAtStoredRow();
+
+  await askToDelete(rendered);
+  await pressPfKey(rendered.user, 'PFK04');
+
+  await waitFor(
+    /**
+     * Waits for the classified sentence to reach the row-23 line.
+     * @returns {void} Nothing; throws until the sentence lands.
+     */
+    (): void => {
+      expect(errorBandText()).toContain(PERSISTENT_FAILURE_REPORT_IT);
+    },
+  );
+  expect(errorBandText()).not.toContain(EDIT_STATUS.RECORD_DELETE_FAILED.text);
+  expect(errorBandText()).not.toContain(TRANSIENT_FAILURE_TRY_AGAIN);
+}
+
+/**
+ * Asserts a sentence the service supplied is shown verbatim in place of the authored classification.
+ *
+ * ⚠️ Assumptions: within the two classified arms the service's own sentence is the better one, because
+ * both authored sentences classify a TRANSPORT outcome and say nothing about what was asked. It is
+ * rendered exactly as received rather than paraphrased or prefixed.
+ *
+ * ⚠️ Assumptions: the preference is SCOPED to those two arms, and the scope was fixed by measurement
+ * rather than by preference. Preferring the member ahead of every arm made the sibling list screen's
+ * control case report its filtered-empty refusal for a genuine fault, because that screen classifies a
+ * 400 by the document's FIELD ENTRIES and not by its prose. The named arms on this screen -- the
+ * concurrency refusal, the lock refusal, the child-record instruction and the cursor's abend replacement
+ * -- keep their precedence for the same reason: each says something a general sentence cannot.
+ *
+ * Assumptions: the authored sentence is asserted absent, so the case cannot pass against a band showing
+ * both.
+ * @returns {Promise<void>} Resolves once the supplied sentence has been asserted.
+ */
+async function showsTheServicesOwnSentenceForAClassifiedFailure(): Promise<void> {
+  const supplied = 'The reference service is restarting.';
+  vi.mocked(deleteTransactionType).mockRejectedValue(
+    failureFrom(STATUS.unavailable, apiError({ status: STATUS.unavailable, message: supplied })),
+  );
+  const rendered = await arriveAtStoredRow();
+
+  await askToDelete(rendered);
+  await pressPfKey(rendered.user, 'PFK04');
+
+  await waitFor(
+    /**
+     * Waits for the supplied sentence to reach the row-23 line.
+     * @returns {void} Nothing; throws until the sentence lands.
+     */
+    (): void => {
+      expect(errorBandText()).toContain(supplied);
+    },
+  );
+  expect(
+    errorBandText(),
+    'a sentence the service supplied replaces the authored classification rather than joining it',
+  ).not.toContain(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(errorBandText()).not.toContain(EDIT_STATUS.RECORD_DELETE_FAILED.text);
 }
 
 /**
@@ -1828,6 +2514,178 @@ async function cancelsAPendingDeleteWithItsOwnSentence(): Promise<void> {
 }
 
 /**
+ * Locates this screen's own delete control, inside the screen body rather than on the key bar.
+ * @returns {HTMLElement} The danger-styled control carrying the delete legend.
+ */
+function bodyDeleteControl(): HTMLElement {
+  return within(shellLandmark('screenBody')).getByRole('button', {
+    name: REF_TYPE_EDIT_KEY_LABELS.PFK04,
+  });
+}
+
+/**
+ * Asserts the screen's own delete control arms the delete when it is clicked.
+ *
+ * ⚠ WHY : Purpose: this control was ENABLED, danger-styled, labelled `'F4=Delete'` and inert. Mounting
+ *       the confirmation only in the confirming mode -- which is what makes the two presses mean two
+ *       different things -- took away the design system's own trigger handler in every other mode and
+ *       put nothing in its place, so a click on it in `showDetails` did nothing whatsoever and the
+ *       pointer route to arming a delete ran through the key bar or nowhere. An operator who clicks a
+ *       destructive control and sees no change has been told the record cannot be deleted, which is
+ *       false.
+ *
+ *       Assumptions: the outcome asserted is the reference's, not an overlay. `2000-DECIDE-ACTION` at
+ *       `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L493-L498 answers the FIRST press by setting
+ *       the confirm mode and nothing else, and L151-L152 is the prompt it leaves on row 22 -- so the
+ *       arming click must produce that sentence and no deletion.
+ * @returns {Promise<void>} Resolves once the arming click has been asserted.
+ */
+async function armsTheDeleteFromThePointer(): Promise<void> {
+  vi.mocked(deleteTransactionType).mockResolvedValue(undefined);
+  const rendered = await arriveAtStoredRow();
+
+  await rendered.user.click(bodyDeleteControl());
+
+  await waitFor(awaitDeleteConfirmationPrompt);
+  expect(vi.mocked(deleteTransactionType)).not.toHaveBeenCalled();
+}
+
+/**
+ * Both of the confirmation's controls describe themselves with the record being destroyed.
+ *
+ * ⚠️ Purpose: the dialogue names the record in its body, and a browser pass measured focus landing on
+ * the DECLINING control the instant such a dialogue opens. A description carried only by the surface as
+ * a whole is therefore never read aloud: the operator is placed on a button called `Cancel` under a
+ * title asking them to confirm a deletion, and at that moment nothing says which record. Naming the
+ * record on both controls closes that. `ui/src/screens/cardUpdate/index.tsx` already wires its own
+ * confirmation this way and its note claimed THIS file did too -- a claim that was false when written,
+ * and is made true by the wiring this case guards rather than by deleting the sentence.
+ *
+ * ⚠️ Assumptions: the reference is RESOLVED through the document and its text inspected, rather than the
+ * attribute being compared to a constant. A dangling `aria-describedby` promises a description and
+ * delivers silence, which is worse than carrying none, so the assertion is that the identifier names an
+ * element that exists and that the element holds the record's own type code.
+ *
+ * ⚠️ Assumptions: BOTH controls are checked, because they are configured through separate props --
+ * wiring one and not the other is a single-line mistake that leaves exactly the case that matters, the
+ * focused control, silent.
+ * @returns {Promise<void>} Resolves once the assertions hold.
+ */
+async function describesBothChoicesWithTheRecordBeingDestroyed(): Promise<void> {
+  vi.mocked(deleteTransactionType).mockResolvedValue(undefined);
+  const rendered = await arriveAtStoredRow();
+
+  await rendered.user.click(bodyDeleteControl());
+  await waitFor(awaitDeleteConfirmationPrompt);
+
+  const named = within(confirmationDialog());
+  const undescribed: string[] = [];
+
+  for (const name of ['Cancel', 'OK']) {
+    const control = named.getByRole('button', { name });
+    const reference = control.getAttribute('aria-describedby') ?? '';
+    const described = reference === '' ? null : document.getElementById(reference);
+
+    if (described === null || !(described.textContent ?? '').includes(STORED.typeCd)) {
+      undescribed.push(name);
+    }
+  }
+
+  expect(
+    undescribed,
+    'both choices must name the record, and the identifier must resolve to an element that holds it',
+  ).toEqual([]);
+  expect(vi.mocked(deleteTransactionType)).not.toHaveBeenCalled();
+}
+
+/**
+ * Asserts the Escape key withdraws an armed delete instead of merely hiding its confirmation.
+ *
+ * ⚠ WHY : Purpose: Escape dismissed the confirmation and left the request ARMED, so the operator was
+ *       returned to a screen that looked ordinary while the next F4 -- from the key bar or the keyboard
+ *       -- was still the CONFIRMING press and deleted the record with no confirmation anywhere on the
+ *       glass. That is the worst shape this defect can take, because the dismissal itself is what
+ *       persuades the operator the request is gone.
+ *
+ *       ⚠️ Refactoring Rationale: this case and the cancel-button case used to exercise two genuinely
+ *       different library paths, and after the migration to a `Modal` they exercise ONE. While the
+ *       confirmation was an anchored `Popconfirm`, Escape never reached `onCancel` at all -- the portal
+ *       detected it (`ui/node_modules/@rc-component/portal/lib/useEscKeyDown.js` L25-L32), the trigger
+ *       took it as `onEsc` (`ui/node_modules/@rc-component/trigger/lib/index.js` L245-L250) and routed it
+ *       through `onOpenChange`, which is why the screen had to answer that callback and omit `onCancel`
+ *       to avoid a double dispatch. A `Modal` calls `onCancel` exactly once for its own Escape handling
+ *       and for its cancel button alike (`@rc-component/dialog/lib/Dialog/index.js` `onInternalClose`).
+ *       Both cases are KEPT regardless: they are the two ways an operator withdraws, the reference
+ *       answers both the same way, and a future revision that re-splits the paths is exactly what this
+ *       pair is here to catch.
+ *
+ *       Assumptions: the sentence asserted is the reference's own cancellation answer at
+ *       `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L1000-L1002, because the withdrawal is dispatched
+ *       as PF12 -- the transition L594-L601 already accepts while confirming. No wording is invented for
+ *       a key the terminal never had.
+ * @returns {Promise<void>} Resolves once the withdrawal has been asserted.
+ */
+async function withdrawsTheArmedDeleteOnEscape(): Promise<void> {
+  vi.mocked(deleteTransactionType).mockResolvedValue(undefined);
+  const rendered = await arriveAtStoredRow();
+
+  await askToDelete(rendered);
+  await waitFor(awaitDeleteConfirmationPrompt);
+
+  await rendered.user.keyboard('{Escape}');
+
+  await waitFor(awaitCancelledDelete);
+  // ⚠ Refactoring Rationale: as above -- the dialogue's departure is what a withdrawal looks like, and it
+  // needs its leave animation ended by hand under jsdom. Counting the prompt reported one occurrence for a
+  // panel that had already been told to close.
+  await waitForTheWithdrawalToSettle();
+
+  // The press that used to commit after an Escape now finds nothing armed.
+  await pressPfKey(rendered.user, 'PFK04');
+
+  expect(
+    vi.mocked(deleteTransactionType),
+    'a delete withdrawn by Escape must not be committed by the next press of the delete key',
+  ).not.toHaveBeenCalled();
+}
+
+/**
+ * Asserts abandoning the confirmation withdraws the armed delete rather than only closing the overlay.
+ *
+ * ⚠ WHY : Purpose: the confirmation carried no cancel handler, so saying no dismissed the overlay and
+ *       left the screen in `confirmDelete`. The next PF4 -- the key bar's button or the keyboard --
+ *       was therefore still the CONFIRMING press, and it deleted the record outright with no
+ *       confirmation shown. An operator who cancels has withdrawn the request; a cancel that leaves it
+ *       armed is not a cancel.
+ *
+ *       Assumptions: the case presses PF4 AGAIN after cancelling, because the absence of a delete on
+ *       the cancel itself was already true of the defect -- the overlay simply closed. What separates
+ *       the two is what the NEXT press means, so that is what is asserted.
+ *
+ *       Assumptions: the sentence asserted is `'Delete was cancelled'` at `COTRTUPC.cbl` L191-L192,
+ *       which its own cancel arm at L1000-L1002 leaves on row 23 while returning to key entry -- so
+ *       the mode this lands in is one where PF4 is refused, which is exactly why the second press is
+ *       harmless.
+ * @returns {Promise<void>} Resolves once the withdrawal has been asserted.
+ */
+async function disarmsTheDeleteWhenTheConfirmationIsAbandoned(): Promise<void> {
+  vi.mocked(deleteTransactionType).mockResolvedValue(undefined);
+  const rendered = await arriveAtStoredRow();
+
+  await askToDelete(rendered);
+  await rendered.user.click(await screen.findByRole('button', { name: 'Cancel' }));
+
+  await waitFor(awaitCancelledDelete);
+
+  await pressPfKey(rendered.user, 'PFK04');
+
+  expect(
+    vi.mocked(deleteTransactionType),
+    'a cancelled delete must not be committed by the next press of the delete key',
+  ).not.toHaveBeenCalled();
+}
+
+/**
  * Asserts the cancelled-update sentence has reached the row-23 band.
  * @returns {void} Nothing; the expectation either passes or fails the waiting case.
  */
@@ -1952,21 +2810,146 @@ async function marksARefusedControlAndLeavesTheOtherClean(): Promise<void> {
   // WHY : Assumptions: `app/cpy/CSSETATY.cpy` L17-L27 reddens ONLY the field whose flag is not-OK or
   //       blank, so a control absent from the error array must stay clean - asserting the marked one
   //       alone would pass against a screen that reddened both.
-  expect(typeCodeControl()).toHaveAttribute('aria-invalid', 'false');
+  // WHY : ⚠️ Refactoring Rationale: the clean control is asserted to carry NO `aria-invalid` attribute,
+  //       where this line required an explicit `"false"`. `fieldAriaProps` in
+  //       `ui/src/layout/fieldHelp.tsx` omits the member while the control is clean, and records why:
+  //       the attribute defaults to false in its own absence, so emitting `false` adds an attribute
+  //       change on every settle without adding a fact. The assertion still discriminates -- a screen
+  //       that reddened both controls would put `"true"` here.
+  expect(typeCodeControl()).not.toHaveAttribute('aria-invalid');
   // WHY : Assumptions: the literal `'*'` is moved in ONLY for the blank case, at `app/cpy/CSSETATY.cpy`
   //       L24 - a malformed value reddens without it, which the negative below pins.
   // WHY : Refactoring Rationale: the COBOL gates this highlight on `CDEMO-PGM-REENTER`
   //       (`app/cpy/COCOM01Y.cpy` L29-L31), but AAP section 0.7.1 establishes that discriminator
   //       disappears entirely - a stateless handler has no first-entry-versus-re-entry distinction to
   //       make, so the styling is driven purely by the response body.
-  expect(screen.getByText(FIELD_ERROR_TOKENS.blankMarker)).toBeInTheDocument();
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the marker is found by its own HANDLE and no longer by its glyph.
+   *       `BLANK_FIELD_MARKER_TEST_ID` exists because the design system's always-on required asterisk
+   *       is the SAME CHARACTER meaning something else -- "this field must be filled" rather than "this
+   *       field was left blank on the turn just taken" -- and a query on the character alone cannot
+   *       tell a screen that renders this marker from one that merely marks a field required.
+   *       Assumptions: the marker is additionally asserted to be hidden from assistive technology,
+   *       which is the property adopting the shared helper bought. A lone asterisk announced beside a
+   *       value conveys nothing to a listener; the same fact reaches a listener through `aria-invalid`
+   *       and the row-23 sentence.
+   */
+  const marker = screen.getByTestId(BLANK_FIELD_MARKER_TEST_ID);
+  expect(marker).toHaveTextContent(FIELD_ERROR_TOKENS.blankMarker);
+  expect(marker).toHaveAttribute('aria-hidden', 'true');
+  // WHY : Assumptions: the marker sits INSIDE the control's own box as its suffix, which is the
+  //       position the reference's asterisk occupied -- L24 writes it into the field's own columns.
+  //       antd renders a suffixed input inside `.ant-input-affix-wrapper`, so containment by that
+  //       wrapper is what "inside the field" reduces to in the DOM.
+  expect(marker.closest('.ant-input-affix-wrapper')).not.toBeNull();
 
   await rendered.user.type(descriptionControl(), 'BAD-VALUE!');
   await pressPfKey(rendered.user, 'ENTER');
   await waitFor(awaitMalformedDescriptionRefusal);
 
   expect(descriptionControl()).toHaveAttribute('aria-invalid', 'true');
-  expect(screen.queryByText(FIELD_ERROR_TOKENS.blankMarker)).not.toBeInTheDocument();
+  expect(screen.queryByTestId(BLANK_FIELD_MARKER_TEST_ID)).toBeNull();
+}
+
+/**
+ * Renders a design token's name as the custom-property fragment the design system emits for it.
+ *
+ * Assumptions: the fragment is derived rather than written out, so the case holds no design literal and
+ * still fails if the screen stops publishing the token. The design system hyphenates each capital, which
+ * is the whole of the transformation for a token carrying no digit run.
+ * @param {string} tokenName - The token's name as `ui/src/theme/tokens.ts` publishes it.
+ * @returns {string} The hyphenated fragment that appears inside the rendered `var(--ant-...)`.
+ */
+function cssVariableSegment(tokenName: string): string {
+  /**
+   * Replaces one capital with its hyphenated lower-case form.
+   * @param {string} upper - The matched capital letter.
+   * @returns {string} The replacement.
+   */
+  function hyphenate(upper: string): string {
+    return `-${upper.toLowerCase()}`;
+  }
+  return tokenName.replace(/[A-Z]/gu, hyphenate);
+}
+
+/**
+ * Asserts the protected key renders its value as data rather than as the design system's placeholder grey.
+ *
+ * ⚠ WHY : Purpose: regress a measured ambiguity. This screen's key control was rendered `disabled` while
+ *       protected, and the design system paints a disabled input's text at `rgba(0,0,0,0.25)` on an
+ *       `rgba(0,0,0,0.04)` fill -- so the REAL record key `01`, read straight from the service, read
+ *       exactly like placeholder text. On a screen whose only key is two characters wide, an operator
+ *       cannot tell a loaded record from an empty field.
+ *
+ *       Assumptions: the fix is the value's COLOUR and deliberately not the control's fill.
+ *       `3310-PROTECT-ALL-ATTRS` at `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L1368-L1371 moves
+ *       `DFHBMPRF` -- protected plus modified-data-tag -- and nothing anywhere moves a dark or
+ *       de-emphasising attribute to `TRTYPCDA`, while `TRTYPCD` at
+ *       `app/app-transaction-type-db2/bms/COTRTUP.bms` L84-L87 declares `ATTRB=(IC,UNPROT)` with no
+ *       `COLOR` operand. So the terminal painted this value at its default text colour whether the field
+ *       was protected or not, and the greyed fill stays as the only affordance separating an enterable
+ *       field from a protected one.
+ *
+ *       Assumptions: asserted on the INPUT element and not on the control's root, because with a suffix
+ *       present the design system puts `style` on the affix wrapper and `styles.input` on the input --
+ *       and `.ant-input` carries a text colour of its own, so a colour on the wrapper would be
+ *       overridden on the very element whose text it was meant to change.
+ * @returns {Promise<void>} Resolves once the protected key's colour has been asserted.
+ */
+async function paintsTheProtectedKeyAsData(): Promise<void> {
+  await arriveAtStoredRow();
+
+  const control = typeCodeControl();
+
+  expect(control).toBeDisabled();
+  expect(control).toHaveValue(STORED.typeCd);
+  expect(control.getAttribute('style') ?? '').toContain(
+    cssVariableSegment(BMS_TEXT_COLOR_TOKENS.DEFAULT),
+  );
+}
+
+/**
+ * Asserts a correction typed after a refusal reaches the control whole, character for character.
+ *
+ * ⚠ WHY : Refactoring Rationale: this is the case that pins the marker's SLOT rather than the marker.
+ *       Rendering the blank marker as the control's `suffix` -- which is how
+ *       `ui/src/layout/fieldHelp.tsx` publishes it -- changes the input's DOM shape when the marker
+ *       appears and again when it goes, because `@rc-component/input/lib/BaseInput.js` wraps the input
+ *       in a `<span>` only while an affix is present. antd warns about the consequence itself at
+ *       `antd/lib/input/Input.js` L116. Measured here before the fix: the operator typed ten
+ *       characters into a refused field and the field held ONE, because the first keystroke cleared the
+ *       refusal, the marker went, React replaced the input, and every later keystroke reached a node
+ *       whose `isConnected` was false.
+ *
+ *       Assumptions: the assertion is IDENTITY plus value, not value alone. A value check on its own
+ *       would pass on a screen that replaces the control and happens to re-focus it -- which is exactly
+ *       what masks the same defect on the sibling list screen, whose editor carries `autoFocus`. Asking
+ *       that the element be the same node is what tests the shape.
+ *
+ *       Assumptions: the correction is deliberately LONGER than one character and alphanumeric, so it
+ *       is accepted by `1210-EDIT-TTYPE` at `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L893 and
+ *       the case turns on the typing rather than on a refusal.
+ * @returns {Promise<void>} Resolves once the correction has been asserted intact.
+ */
+async function keepsEveryCharacterTypedAfterARefusal(): Promise<void> {
+  const rendered = await arriveAtStoredRow();
+
+  await rendered.user.clear(descriptionControl());
+  await pressPfKey(rendered.user, 'ENTER');
+  await waitFor(awaitBlankDescriptionRefusal);
+  expect(screen.getByTestId(BLANK_FIELD_MARKER_TEST_ID)).toBeInTheDocument();
+
+  const armed = descriptionControl();
+  const correction = 'RETAIL PURCHASE';
+  await rendered.user.type(armed, correction);
+
+  // WHY : Assumptions: the marker is asserted GONE as well, so the case proves the slot emptied while
+  //       the control survived it -- an implementation that kept the marker mounted throughout would
+  //       also keep the element and would pass an identity check alone.
+  expect(screen.queryByTestId(BLANK_FIELD_MARKER_TEST_ID)).toBeNull();
+  expect(descriptionControl()).toBe(armed);
+  expect(armed).toBeInTheDocument();
+  expect(armed).toHaveValue(correction);
 }
 
 /**
@@ -2105,6 +3088,536 @@ async function refusesAuthorityToAnOrdinaryOperator(): Promise<void> {
 }
 
 /**
+ * Publishes the address the router currently holds, so a case can assert about it.
+ *
+ * Assumptions: an `output` element rather than a `div`, matching the probe in
+ * `ui/src/test/refTypeList.test.tsx` -- the value is a computed result of the render rather than
+ * content, and using the same element keeps the two probes recognisable as the same device.
+ * @returns {ReactElement} A marker carrying the current pathname.
+ */
+function AddressProbe(): ReactElement {
+  const location = useLocation();
+  return <output data-testid={RENDERED_ADDRESS_TEST_ID}>{location.pathname}</output>;
+}
+
+/**
+ * Reports the address the router currently holds, as {@link AddressProbe} published it.
+ * @returns {string} The current pathname.
+ * @throws {Error} If no probe is mounted, which Testing Library raises.
+ */
+function renderedAddress(): string {
+  return screen.getByTestId(RENDERED_ADDRESS_TEST_ID).textContent ?? '';
+}
+
+/**
+ * Offers a control that navigates to the add sentinel, standing in for an operator's own address change.
+ *
+ * WHY : Assumptions: the probe exists because NO control on this screen navigates to the add sentinel,
+ *       and the arrival it produces is nonetheless real -- the address bar, a bookmark and the
+ *       administrative menu's option 6 all reach it, and the reported defect was an arrival from THIS
+ *       screen carrying a record. A probe is the only way to make that arrival happen inside one render.
+ *
+ *       Alternatives Considered: driving the reducer directly with the arrival action. Rejected because
+ *       it would assert about the reducer and not about the screen -- the defect was in the arrival
+ *       EFFECT, which returned without dispatching anything, so a reducer-level case would have passed
+ *       against the defect.
+ *
+ *       Trade-offs: a raw button rather than a design-system one. The zero-raw-HTML rule governs the
+ *       rendered application, and this control is harness scaffolding that no operator sees; the two
+ *       sibling probes in this repository's suites are raw elements for the same reason.
+ * @returns {ReactElement} A control that replaces the address with the add sentinel.
+ */
+function AddSentinelProbe(): ReactElement {
+  const navigate = useNavigate();
+
+  return (
+    <button
+      type="button"
+      onClick={
+        /**
+         * Navigates to the add sentinel, as a typed address or a menu option would.
+         * @returns {void} Completion is the router transition.
+         */
+        (): void => {
+          /*
+           * ⚠ Refactoring Rationale: the transition goes through the application's own
+           * `navigateSafely` rather than calling `navigate` directly, and this is a lint failure repaired
+           * rather than a preference. `navigate` returns `void | Promise<void>` at the pinned router
+           * version, so a bare call is a floating promise under the rule these files are linted with
+           * (`ignoreVoid: false`), a `.then` on the union is an unsafe call on the `void` arm, and making
+           * this handler `async` trips `no-misused-promises` for a click handler that returns a promise.
+           * `ui/src/routes/navigation.ts` L741-L782 narrows the union with an `instanceof Promise` check
+           * and supplies a rejection arm, which is exactly what every production call site uses -- so the
+           * probe navigates the way the screens it stands in for do.
+           */
+          navigateSafely(navigate, `${REFERENCE_LIST_PATH}/${REF_TYPE_NEW_SENTINEL}`);
+        }
+      }
+    >
+      {GO_TO_ADD_LABEL}
+    </button>
+  );
+}
+
+/**
+ * Asserts an authority refusal of the read reads as a refusal rather than as a task termination.
+ *
+ * WHY : Assumptions: the case asserts on BOTH surfaces, because the defect used one to stand in for the
+ *       other. Every read failure carrying abend data replaced the whole form with the fault surface and
+ *       painted `'UNEXPECTED ABEND OCCURRED.'` on row 23 -- so an operator whose token carried the wrong
+ *       authority was told the task had terminated abnormally, and lost the form as well. The fault
+ *       surface transcribes `ABEND-ROUTINE` at `COTRTUPC.cbl` L1684-L1697, which issues its send with
+ *       `ERASE` and then abends the task; a refusal is a turn the program never even entered, so it
+ *       leaves the form standing and reports on row 23 like any other rejection.
+ *
+ *       Assumptions: the refusal carries abend data deliberately, so the case proves the SURFACE is
+ *       withheld on the strength of the classification rather than because the document happened to
+ *       carry nothing to paint.
+ * @returns {Promise<void>} Resolves once both surfaces have been asserted.
+ */
+async function reportsARefusedReadAsARefusal(): Promise<void> {
+  vi.mocked(getTransactionType).mockRejectedValue(
+    failureFrom(
+      STATUS.refusedAuthority,
+      apiError({ status: STATUS.refusedAuthority, abend: CARRIED_ABEND }),
+    ),
+  );
+  await renderInShellAt(STORED.typeCd);
+
+  await waitFor(
+    /**
+     * Waits for the refusal to reach the row-23 line.
+     * @returns {void} Nothing; throws until the sentence lands.
+     */
+    (): void => {
+      expect(errorBandText()).toContain(ACCESS_DENIED_NOT_AUTHORIZED);
+    },
+  );
+  expect(errorBandText()).not.toContain(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED);
+  // WHY : Assumptions: the form standing IS the absence of the fault surface, because that surface
+  //       replaces the form rather than sitting beside it -- so this is the same assertion as querying
+  //       for the surface, made against the thing the operator needs rather than the thing they do not.
+  expect(typeCodeControl()).toBeInTheDocument();
+  // WHY : Assumptions: the REASON is the discriminator and the culprit is not, because the culprit is a
+  //       program name and the shell paints that name on every turn -- `COTRTUPC` at
+  //       `app/app-transaction-type-db2/bms/COTRTUP.bms` names the program in the title band, so
+  //       querying for it would match a header field on a screen with no fault at all.
+  expect(screen.queryByText(CARRIED_ABEND.abendReason)).toBeNull();
+}
+
+/**
+ * Asserts a transient failure reports without claiming the task terminated abnormally.
+ *
+ * WHY : Assumptions: a 503 is transient by the shared client's own derivation -- `ui/src/api/client.ts`
+ *       lists 408, 429, 502, 503 and 504 beside a timeout -- and a condition that may clear on its own is
+ *       the opposite of the state the fault surface reports. The reference has no analogue at all: a task
+ *       talking to Db2 does not time out and carry on, so nothing in `COTRTUPC` describes this and the
+ *       classification the client publishes is the only thing that can decide it.
+ *
+ *       ⚠️ Refactoring Rationale: this case now pins the SENTENCE as well as the surface, and the
+ *       trade-off it used to record is withdrawn. It said the row-23 line still had to carry the
+ *       registered abend replacement because the catalogue held no authored sentence for a transient
+ *       condition and a screen may not author one. The catalogue now registers
+ *       `TRANSIENT_FAILURE_TRY_AGAIN`, so a gateway that gave up says the condition may clear instead of
+ *       telling the operator the task terminated abnormally -- which is what the withheld surface
+ *       already implied and the sentence used to contradict.
+ * @returns {Promise<void>} Resolves once the withheld surface and the sentence have been asserted.
+ */
+async function withholdsTheFaultSurfaceFromATransientFailure(): Promise<void> {
+  vi.mocked(getTransactionType).mockRejectedValue(
+    failureFrom(STATUS.unavailable, apiError({ status: STATUS.unavailable, abend: CARRIED_ABEND })),
+  );
+  await renderInShellAt(STORED.typeCd);
+
+  await waitFor(
+    /**
+     * Waits for the failure to reach the row-23 line.
+     * @returns {void} Nothing; throws until the sentence lands.
+     */
+    (): void => {
+      expect(errorBandText()).toContain(TRANSIENT_FAILURE_TRY_AGAIN);
+    },
+  );
+  // WHY : ⚠️ Assumptions: the abend sentence is asserted ABSENT rather than merely unasserted, because
+  //       the defect this case guards is not a missing sentence -- it is the WRONG one, and a case that
+  //       only looked for the new text would pass against a band carrying both.
+  expect(errorBandText()).not.toContain(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED);
+  expect(typeCodeControl()).toBeInTheDocument();
+  expect(screen.queryByText(CARRIED_ABEND.abendReason)).toBeNull();
+}
+
+/**
+ * Asserts a read that reached nothing at all is reported as a request that did not complete.
+ *
+ * WHY : ⚠️ Assumptions: the transport raises a dropped connection as kind `NETWORK` with NO status, and
+ *       classifies it as neither transient nor repeatable -- `ui/src/api/client.ts` reserves `transient`
+ *       for a condition expected to clear and a dropped connection is not one. So this is the arm the
+ *       transient sentence must NOT capture, and the one the Db2 cursor's abend replacement must not
+ *       capture either: nothing was asked of the database, so reporting its abend sentence would send an
+ *       investigation to the reference service's logs for a request that never arrived there.
+ * WHY : Assumptions: both wrong answers are asserted absent alongside the right one, for the reason the
+ *       case above states -- the defect is a misreport, so the assertion has to exclude the sentence
+ *       being replaced.
+ * @returns {Promise<void>} Resolves once the sentence has been asserted.
+ */
+async function reportsAReadThatReachedNothingAsIncomplete(): Promise<void> {
+  vi.mocked(getTransactionType).mockRejectedValue(
+    new ApiRequestError(
+      'NETWORK',
+      NO_TRANSPORT_STATUS,
+      apiError({ status: NO_TRANSPORT_STATUS }),
+      'no response',
+    ),
+  );
+  await renderInShellAt(STORED.typeCd);
+
+  await waitFor(
+    /**
+     * Waits for the failure to reach the row-23 line.
+     * @returns {void} Nothing; throws until the sentence lands.
+     */
+    (): void => {
+      expect(errorBandText()).toContain(PERSISTENT_FAILURE_REPORT_IT);
+    },
+  );
+  expect(errorBandText()).not.toContain(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(errorBandText()).not.toContain(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED);
+  expect(typeCodeControl()).toBeInTheDocument();
+}
+
+/**
+ * Asserts a genuine fault still replaces the form with the abend data the service carried.
+ *
+ * WHY : Assumptions: this is the arm the two cases above must not have deleted, and it is asserted
+ *       against the baseline's own data names -- `ABEND-CULPRIT` and `ABEND-REASON` at
+ *       `app/cpy/CSMSG02Y.cpy` L21-L29 -- because those are what `ABEND-ROUTINE` fills and sends. A
+ *       plain 500 is neither a refusal nor transient by the client's derivation, so it is the one
+ *       condition left that the surface exists for.
+ * @returns {Promise<void>} Resolves once the surface has been asserted.
+ */
+async function surfacesAGenuineFaultWithItsAbendData(): Promise<void> {
+  vi.mocked(getTransactionType).mockRejectedValue(
+    failureFrom(STATUS.serverError, apiError({ status: STATUS.serverError, abend: CARRIED_ABEND })),
+  );
+  await renderInShellAt(STORED.typeCd);
+
+  expect(await screen.findByText(CARRIED_ABEND.abendReason)).toBeInTheDocument();
+  // WHY : Assumptions: the culprit is asserted through `getAllByText` rather than `getByText`, because
+  //       the shell paints the same program name in the title band on every turn -- so the surface's own
+  //       copy is the SECOND occurrence, and a single-match query would fail on a correct screen.
+  expect(screen.getAllByText(CARRIED_ABEND.abendCulprit).length).toBeGreaterThan(1);
+  expect(document.getElementById(TYPE_CODE_CONTROL_ID)).toBeNull();
+}
+
+/**
+ * Asserts an address the key field cannot hold is refused instead of being read.
+ *
+ * WHY : Assumptions: three properties are asserted together because the defect produced all three at
+ *       once. `normaliseTypeCode` is `Number.parseInt` followed by `padStart`, so a non-numeric segment
+ *       became the three characters `NaN`: the screen displayed a key nobody had typed in a field two
+ *       characters wide, and sent that key to the service. So the case pins that the glass carries what
+ *       the address carried, that `NaN` reaches neither the glass nor the transport, and that no read is
+ *       issued at all.
+ *
+ *       Assumptions: the sentence is the one a TYPED key of the same shape earns -- `'Tran Type code'`
+ *       at `COTRTUPC.cbl` L826 against the numeric suffix at L924 -- because an address is one more way
+ *       a key arrives and `1210-EDIT-TTYPE` is the program's only answer for a key that is not numeric.
+ * @returns {Promise<void>} Resolves once the refusal has been asserted.
+ */
+async function refusesAnAddressTheKeyFieldCannotHold(): Promise<void> {
+  await renderInShellAt(UNUSABLE_ROUTE_KEY);
+
+  await waitFor(
+    /**
+     * Waits for the refusal to reach the row-23 line.
+     * @returns {void} Nothing; throws until the sentence lands.
+     */
+    (): void => {
+      expect(errorBandText()).toContain(
+        `${KEY_FIELD_LABEL}${FIELD_VALIDATION_SUFFIXES.MUST_BE_NUMERIC}`,
+      );
+    },
+  );
+  expect(vi.mocked(getTransactionType)).not.toHaveBeenCalled();
+  expect(typeCodeControl()).toHaveValue(UNUSABLE_ROUTE_KEY);
+  expect(document.body.textContent ?? '').not.toContain('NaN');
+}
+
+/**
+ * Asserts a record loaded at the add sentinel becomes addressable at its own route.
+ *
+ * WHY : Assumptions: keying a code at the add sentinel loaded the record IN PLACE while the address
+ *       stayed on `new`, so a fetched record was not addressable -- a reload lost it, a bookmark could
+ *       not name it, and the browser's back control returned to an address that had never described what
+ *       was on the screen. `ui/src/routes/navigation.ts` records the repair as two halves and owns the
+ *       other one; this asserts the screen's half.
+ *
+ *       Assumptions: the read count is asserted as well, and it is the property that keeps the repair
+ *       from costing a second call. Replacing the address changes the route parameter, so the arrival
+ *       effect runs again -- and re-reading would clear the prompt and the sentence the first read
+ *       produced, which an operator would see as the screen forgetting what it had just told them.
+ * @returns {Promise<void>} Resolves once the address and the read count have been asserted.
+ */
+async function addressesTheRecordItLoadedFromTheAddSentinel(): Promise<void> {
+  vi.mocked(getTransactionType).mockResolvedValue(STORED);
+  const { user } = await renderInAppShell(
+    <>
+      <RefTypeEditScreen />
+      <AddressProbe />
+    </>,
+    {
+      initialEntries: [`${REFERENCE_LIST_PATH}/${REF_TYPE_NEW_SENTINEL}`],
+      routePath: REF_TYPE_EDIT_PATH,
+    },
+  );
+
+  await user.type(typeCodeControl(), STORED.typeCd);
+  await pressPfKey(user, 'ENTER');
+  await awaitStoredRow();
+
+  await waitFor(
+    /**
+     * Waits for the address to name the record on the glass.
+     * @returns {void} Nothing; throws until the entry is replaced.
+     */
+    (): void => {
+      expect(renderedAddress()).toBe(`${REFERENCE_LIST_PATH}/${STORED.typeCd}`);
+    },
+  );
+  expect(vi.mocked(getTransactionType)).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * Asserts arriving at the add sentinel from a shown record begins the screen afresh.
+ *
+ * WHY : Assumptions: the arrival effect used to RETURN at the sentinel without dispatching, so the turn
+ *       survived intact -- the address said a new record was being added while the glass still carried
+ *       the previous one, its before-image and its version, and the key field stayed locked to the old
+ *       code because the mode still said a record was shown. A save from that state would have replaced
+ *       a record the operator believed they were creating.
+ *
+ *       Assumptions: the mode is asserted through the LEGEND as well as through the two controls,
+ *       because the mode is what the legend, the prompt and the delete arm are all derived from. The
+ *       delete descriptor is `DRK` until a row is shown, at `COTRTUP.bms` L120, so its absence is the
+ *       mode having genuinely returned to key entry rather than the fields merely having been cleared.
+ * @returns {Promise<void>} Resolves once the fresh turn has been asserted.
+ */
+async function beginsAfreshWhenTheAddressReachesTheAddSentinel(): Promise<void> {
+  vi.mocked(getTransactionType).mockResolvedValue(STORED);
+  const { user } = await renderInAppShell(
+    <>
+      <RefTypeEditScreen />
+      <AddSentinelProbe />
+    </>,
+    {
+      initialEntries: [`${REFERENCE_LIST_PATH}/${STORED.typeCd}`],
+      routePath: REF_TYPE_EDIT_PATH,
+    },
+  );
+  await awaitStoredRow();
+
+  await user.click(screen.getByRole('button', { name: GO_TO_ADD_LABEL }));
+
+  await waitFor(
+    /**
+     * Waits for the key field to be released and emptied.
+     * @returns {void} Nothing; throws until the turn is reset.
+     */
+    (): void => {
+      expect(typeCodeControl()).toHaveValue('');
+    },
+  );
+  expect(typeCodeControl()).toBeEnabled();
+  expect(descriptionControl()).toHaveValue('');
+  expect(legendDescriptors()).not.toContain(REF_TYPE_EDIT_KEY_LABELS.PFK04);
+}
+
+/**
+ * Asserts the two message lines are adjacent, in the mapset's order, and both inside the pinned zone.
+ *
+ * WHY : ⚠️ Refactoring Rationale: the row-22 line was composed in the screen body while the row-23 line
+ *       was published on the shell, so the frame's own row-22 strip stood empty and `aria-hidden` at its
+ *       reserved height while the real advisory rendered roughly two hundred pixels lower, INSIDE
+ *       `<main>` and below the line it is declared above. The mapset declares them as two adjacent rows
+ *       at the bottom of one display -- `INFOMSG` at `POS=(22,23)` and `ERRMSG` at `POS=(23,1)` in
+ *       `app/app-transaction-type-db2/bms/COTRTUP.bms` -- so an operator reading down the screen met the
+ *       outcome before the prompt, and met an empty announced region between them.
+ *
+ *       Assumptions: the assertion is STRUCTURAL and not geometric, because jsdom performs no layout, so
+ *       a rectangle here would be fabricated. Shared containment in the shell's pinned zone plus document
+ *       order is what the arrangement reduces to once layout is removed: the zone is the element whose
+ *       height the shell reserves, and `Node.compareDocumentPosition` answers the order the two bands are
+ *       painted in.
+ *
+ *       Alternatives Considered: asserting the screen renders no second band by counting elements
+ *       carrying the information handle. Rejected because it would pass for a screen that published
+ *       nothing at all -- the defect was a MISPLACED band, not a duplicated one, and the frame's empty
+ *       strip carried the same handle.
+ * @returns {Promise<void>} Resolves once containment and order have been asserted.
+ */
+async function pinsBothMessageLinesTogetherInTheDeclaredOrder(): Promise<void> {
+  vi.mocked(getTransactionType).mockResolvedValue(STORED);
+  await renderInShellAt(STORED.typeCd);
+  await awaitStoredRow();
+
+  const zone = screen.getByTestId(SHELL_PINNED_ZONE_TEST_ID);
+  const information = screen.getByTestId(MESSAGE_BAND_TEST_IDS.information);
+  const error = screen.getByTestId(MESSAGE_BAND_TEST_IDS.error);
+
+  expect(zone).toContainElement(information);
+  expect(zone).toContainElement(error);
+  // WHY : Assumptions: `DOCUMENT_POSITION_FOLLOWING` is 4, and the bit is READ rather than compared for
+  //       equality, because the mask also carries containment bits when one node contains the other --
+  //       which these two do not, and asserting on the whole number would couple the case to that.
+  expect(
+    information.compareDocumentPosition(error) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeGreaterThan(0);
+  // WHY : Assumptions: the prompt's own text is asserted as well, so the case cannot pass against a
+  //       screen that publishes an EMPTY row-22 line -- which is precisely what the frame did before the
+  //       move, and it satisfied containment and order on its own.
+  // WHY : Assumptions: `showDetails` prompts with the SEARCH-KEY sentence, which reads oddly beside a
+  //       row on the glass and is nonetheless what the reference does -- `3250-SETUP-INFOMSG` reaches
+  //       that arm through the L1221 fall-through, which `modeInfoMessage` transcribes.
+  expect(informationBandText()).toContain(EDIT_STATUS.PROMPT_FOR_SEARCH_KEYS.text);
+}
+
+/**
+ * The key control's box holds its own value with the marker slot beside it, not instead of it.
+ *
+ * ⚠️ Purpose: a browser sweep measured this control clipping the record's own identity. Its
+ * `clientWidth` was 12 against a `scrollWidth` of 17, so the stored key `01` rendered as `0:` -- the
+ * first glyph and a sliver of the second -- and it did so identically at 375, 768, 1280 and 1920,
+ * because a fixed ceiling does not vary with the viewport. The key is authoritative data on this
+ * screen, so a key that cannot be read is a correctness failure rather than a cosmetic one.
+ *
+ * ⚠️ Assumptions: the cause is that the marker slot shares the box. This control carries a suffix on
+ * EVERY turn -- the reason is recorded on `MARKER_SLOT_UNOCCUPIED` in the screen -- and with a suffix
+ * present `@rc-component/input` puts the width on the affix WRAPPER (`BaseInput.js` L124, L137-L142)
+ * rather than on the input, so a ceiling measured for the value alone leaves the value short by
+ * whatever the slot takes. On two characters that was almost all of it.
+ *
+ * Assumptions: the expected reserve is stated as the declared width plus the marker's characters plus
+ * one, which is the contract `copybookFieldWidthStyle` documents: the marker's glyphs, and one further
+ * cell because `ch` on the wrapper resolves in the theme's proportional face while the value renders in
+ * the wider fixed-pitch one. It is asserted exactly rather than as a lower bound, so a ceiling widened
+ * by a comfortable guess instead of the slot still fails here.
+ *
+ * Assumptions: the affix allowance is asserted as a separate term, because the two halves answer
+ * different questions -- the cells cover the marker's glyph and the face difference, and the padding
+ * term covers the margin the design system puts around a suffix, which it derives from `paddingXXS`
+ * (`antd/lib/input/style/token.js` L11, applied at `index.js` L444-L447).
+ * @returns {Promise<void>} Resolves once the wrapper's ceiling has been measured.
+ */
+async function reservesTheMarkerSlotBesideTheKeyRatherThanInsideIt(): Promise<void> {
+  await arriveAtStoredRow();
+
+  const wrapper = typeCodeControl().closest<HTMLElement>('.ant-input-affix-wrapper');
+
+  if (wrapper === null) {
+    throw new Error('the key control rendered without the affix wrapper its marker slot requires');
+  }
+
+  expect(
+    wrapper.style.maxInlineSize,
+    'the ceiling must reserve the declared characters AND the marker slot beside them',
+  ).toContain(`${String(TYPE_CODE_WIDTH + BLANK_FIELD_MARKER_CHARACTERS + 1)}ch`);
+  expect(
+    wrapper.style.maxInlineSize,
+    'and must reserve the padding the design system puts around a suffix',
+  ).toContain('padding-xxs');
+  expect(
+    wrapper.style.maxInlineSize,
+    'the pre-fix ceiling reserved the declared width alone, which is what clipped the key',
+  ).not.toContain(`calc(${String(TYPE_CODE_WIDTH)}ch`);
+}
+
+/**
+ * Asserts a value is held in canonical form and cut on a character boundary to the declared width.
+ *
+ * WHY : ⚠️ Refactoring Rationale: `maxLength` on the control is the only width guard the screen used to
+ *       have, and it counts UTF-16 units -- so `'🎉'` spends two of them for one character and a
+ *       decomposed `'é'` spends two for one as well, which halves the visible capacity of the field. It
+ *       is also a TYPING guard and does nothing whatsoever to a value assigned from a response body. A
+ *       fixed-width record cares about neither unit it counts: `TRAN-TYPE-DESC PIC X(50)` at
+ *       `app/cpy/CVTRA03Y.cpy` L6 and `CHAR(50)` at `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L4
+ *       are fifty BYTES.
+ *
+ *       Assumptions: the emoji case is the one that proves the cut walks code points rather than UTF-16
+ *       units. `'🎉'` is one code point stored as a surrogate PAIR, so a cut that indexed units could
+ *       leave half of it behind -- a lone surrogate, which is not text and which encodes to a
+ *       replacement character. The assertion is on the code-point count, and it is deliberately not on
+ *       the string length, because the length is the wrong unit and is what the defect counted.
+ *
+ *       Assumptions: the composed and decomposed spellings of one letter are asserted to arrive at the
+ *       SAME value, which is the normalisation half. Two spellings of `'Café'` are two different byte
+ *       sequences of two different lengths, and a fixed-width record that accepted both would hold two
+ *       rows that read identically and compare unequal.
+ * @returns {void} Nothing; the assertions either hold or throw.
+ */
+function holdsAValueToWhatItsFieldCanCarry(): void {
+  const composed = 'Caf\u00e9';
+  const decomposed = 'Cafe\u0301';
+
+  expect(holdInField(decomposed, DESCRIPTION_WIDTH)).toBe(composed);
+  expect(holdInField(composed, DESCRIPTION_WIDTH)).toBe(composed);
+
+  // WHY : Assumptions: fifty-one ASCII characters is one over the field, so exactly one is dropped.
+  const overByOne = 'A'.repeat(DESCRIPTION_WIDTH + 1);
+  expect(holdInField(overByOne, DESCRIPTION_WIDTH)).toBe('A'.repeat(DESCRIPTION_WIDTH));
+
+  // WHY : Assumptions: an emoji costs four bytes, so the BYTE budget binds long before the character
+  //       budget does -- twelve of them fit fifty bytes and the thirteenth does not.
+  const emoji = '\u{1F389}'.repeat(20);
+  expect([...holdInField(emoji, DESCRIPTION_WIDTH)]).toHaveLength(
+    Math.floor(DESCRIPTION_WIDTH / 4),
+  );
+
+  /*
+   * WHY : Assumptions: SEVEN is the width that discriminates a code-point cut from a UTF-16-unit cut,
+   *       and no wider width does. Two of these emoji are four units and eight bytes; dropping one
+   *       UTF-16 unit leaves one whole emoji plus a LONE HIGH SURROGATE, which is two code points and --
+   *       because a lone surrogate encodes to a three-byte replacement character -- seven bytes. So a
+   *       unit-indexed cut FITS at seven and stops there, returning a string that is not text. A
+   *       code-point cut drops the whole character and returns one emoji. At the field's real width of
+   *       fifty the two cuts happen to agree, which is why this assertion carries its own width rather
+   *       than reusing the field's.
+   */
+  const twoEmoji = '\u{1F389}\u{1F389}';
+  const surrogateTrap = 7;
+  expect(holdInField(twoEmoji, surrogateTrap)).toBe('\u{1F389}');
+
+  // WHY : Assumptions: a value that already fits is returned untouched, so the helper is inert on the
+  //       path every typed value takes.
+  expect(holdInField('PAYMENT', DESCRIPTION_WIDTH)).toBe('PAYMENT');
+  expect(holdInField('', DESCRIPTION_WIDTH)).toBe('');
+}
+
+/**
+ * Asserts a response row wider than its fields is adopted as only what those fields can carry.
+ *
+ * WHY : ⚠️ Refactoring Rationale: a row was adopted WHOLE, so an over-wide description was displayed in
+ *       a field that cannot hold it and was offered straight back on the next save to a `CHAR(50)`
+ *       column. `maxLength` does not retro-enforce on an assigned value, so nothing in the screen
+ *       noticed. This is the seam where a response becomes screen state, so it is the seam that has to
+ *       hold the width.
+ *
+ *       Assumptions: the key is asserted as well as the description. A service answering a three-digit
+ *       code is out of contract -- `TR_TYPE` is `CHAR(2)` at `TRNTYPE.ddl` L2 -- and adopting it would
+ *       put a key in the field that no subsequent read or write could match.
+ * @returns {void} Nothing; the assertions either hold or throw.
+ */
+function adoptsOnlyWhatTheDeclaredFieldsCarry(): void {
+  const adopted = adoptRow({
+    typeCd: '011',
+    description: 'B'.repeat(DESCRIPTION_WIDTH + 10),
+    version: 1,
+  });
+
+  expect(adopted.typeCode).toBe('01');
+  expect(adopted.description).toBe('B'.repeat(DESCRIPTION_WIDTH));
+}
+
+/**
  * Registers every case for the transaction-type maintenance screen.
  *
  * Assumptions: the contract cases come first and the rendered cases after, because a rendered case
@@ -2126,9 +3639,16 @@ function refTypeEditHarnessCases(): void {
   it('composes every refusal from the catalog halves', composesEveryRefusalFromTheCatalogHalves);
   it('transcribes the key matrix for every mode', transcribesTheKeyMatrixForEveryMode);
   it('binds no key beyond the six the mapset paints', bindsNoKeyBeyondTheSixTheMapsetPaints);
+  it('paints each legend control from its risk', paintsEachLegendControlFromItsRisk);
+  it('reports the outstanding key as busy', reportsTheOutstandingKeyAsBusy);
+  it('declines a withdrawal while the delete runs', declinesAWithdrawalWhileTheDeleteRuns);
   it('declares the maintenance route administrative', declaresTheMaintenanceRouteAdministrative);
   it('publishes no way to grant admin from the client', publishesNoWayToGrantAdminFromTheClient);
   it('bounds both controls to their declared widths', boundsBothControlsToTheirDeclaredWidths);
+  it(
+    'reserves the marker slot beside the key rather than inside it',
+    reservesTheMarkerSlotBesideTheKeyRatherThanInsideIt,
+  );
   it('paints both labels with their padding intact', paintsBothLabelsWithTheirPaddingIntact);
   it('paints its caption inside the shared title band', paintsItsCaptionInsideTheSharedBand);
   it("paints the clock in the mapset's own shapes", paintsTheClockInTheMapsetsOwnShapes);
@@ -2153,8 +3673,34 @@ function refTypeEditHarnessCases(): void {
     'gates the pointer delete behind a dangerous confirmation',
     gatesThePointerDeleteBehindADangerousConfirmation,
   );
+  it(
+    'presents the armed delete as a dialogue naming the record',
+    presentsTheArmedDeleteAsADialogNamingTheRecord,
+  );
+  it('arms the delete from the pointer', armsTheDeleteFromThePointer);
+  it(
+    'describes both choices with the record being destroyed',
+    describesBothChoicesWithTheRecordBeingDestroyed,
+  );
+  it(
+    'disarms the delete when the confirmation is abandoned',
+    disarmsTheDeleteWhenTheConfirmationIsAbandoned,
+  );
+  it('withdraws the armed delete on Escape', withdrawsTheArmedDeleteOnEscape);
   it('reports a delete refused by the child constraint', reportsADeleteRefusedByTheChildConstraint);
   it('reports a delete the table refused', reportsADeleteTheTableRefused);
+  it(
+    'reports a transient save as a condition that may clear',
+    reportsATransientSaveAsAConditionThatMayClear,
+  );
+  it(
+    'reports a delete that reached nothing as incomplete',
+    reportsADeleteThatReachedNothingAsIncomplete,
+  );
+  it(
+    "shows the service's own sentence for a classified failure",
+    showsTheServicesOwnSentenceForAClassifiedFailure,
+  );
   it(
     'adds through the not-found mode with five then five',
     addsThroughTheNotFoundModeWithFiveThenFive,
@@ -2187,6 +3733,33 @@ function refTypeEditHarnessCases(): void {
     paintsNoValidationAlphabetAndNoSensitiveValue,
   );
   it('refuses authority to an ordinary operator', refusesAuthorityToAnOrdinaryOperator);
+  it('reports a refused read as a refusal', reportsARefusedReadAsARefusal);
+  it(
+    'withholds the fault surface from a transient failure',
+    withholdsTheFaultSurfaceFromATransientFailure,
+  );
+  it(
+    'reports a read that reached nothing as incomplete',
+    reportsAReadThatReachedNothingAsIncomplete,
+  );
+  it('surfaces a genuine fault with its abend data', surfacesAGenuineFaultWithItsAbendData);
+  it('refuses an address the key field cannot hold', refusesAnAddressTheKeyFieldCannotHold);
+  it(
+    'addresses the record it loaded from the add sentinel',
+    addressesTheRecordItLoadedFromTheAddSentinel,
+  );
+  it(
+    'begins afresh when the address reaches the add sentinel',
+    beginsAfreshWhenTheAddressReachesTheAddSentinel,
+  );
+  it(
+    'pins both message lines together in the declared order',
+    pinsBothMessageLinesTogetherInTheDeclaredOrder,
+  );
+  it('keeps every character typed after a refusal', keepsEveryCharacterTypedAfterARefusal);
+  it('paints the protected key as data', paintsTheProtectedKeyAsData);
+  it('holds a value to what its field can carry', holdsAValueToWhatItsFieldCanCarry);
+  it('adopts only what the declared fields carry', adoptsOnlyWhatTheDeclaredFieldsCarry);
 }
 
 describe(

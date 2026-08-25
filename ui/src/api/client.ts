@@ -202,6 +202,51 @@ const SERVER_ERROR_STATUS = 500;
 const CLIENT_ERROR_STATUS = 400;
 
 /**
+ * The statuses that mean "ask again later" rather than "this request is wrong".
+ *
+ * Assumptions: five members, and each is here because repeating the identical request could plausibly
+ * succeed with nothing changed by the operator. `503` is published by the services themselves --
+ * `CARDDEMO-0503` is declared in
+ * `services/common-lib/src/main/java/com/carddemo/common/error/ApiError.java` -- and the other four
+ * are answered by the layers in front of them: `408` and `504` when a hop's own read bound expires,
+ * `429` when the API Gateway stage throttles, and `502` when the gateway or the load balancer cannot
+ * reach a task. A deployed browser sees `502` most often of the five, because
+ * `ui/nginx.conf` turns a closed upstream connection into one -- which is why the QA sweep observed
+ * no `NETWORK` classification at all in the container deployment.
+ *
+ * Alternatives Considered: including `500`, which is the most common failure of the five hundreds and
+ * is often momentary in practice. Refused because it is the status a service answers for a defect it
+ * has already recorded, and telling an operator that a defect may clear if they press the key again
+ * sends them into a loop the system cannot leave. A service that knows a condition is momentary says
+ * so with `503`, and that distinction is the whole value of this set.
+ */
+const TRANSIENT_STATUSES: readonly number[] = [408, 429, 502, 503, 504];
+
+/**
+ * The request methods that may be repeated without changing what the services hold.
+ *
+ * Assumptions: the three HTTP methods defined as idempotent that this package actually issues or
+ * could issue. `PUT` and `DELETE` are idempotent by the same definition and are deliberately NOT
+ * here: a repeat is safe only if the FIRST attempt's outcome is known, and the failures this set is
+ * consulted for are exactly the ones where it is not -- a timeout or a gateway failure may have been
+ * raised after the service committed the write. An `Idempotency-Key` is what makes a repeat of those
+ * safe, which is why {@link remedyFor} accepts either signal rather than the method alone.
+ */
+const REPEATABLE_METHODS: readonly string[] = ['get', 'head', 'options'];
+
+/**
+ * The header that lets a service recognise a repeated attempt at one unit of work.
+ *
+ * Assumptions: the spelling is the published one -- `IdempotencyKeyHeader` in the reporting service's
+ * OpenAPI document -- and it is declared HERE rather than in `./reporting` because two independent
+ * concerns now read it: the operation that sends it, and the failure classification below that reports
+ * a repeat as safe because it was sent. A second copy of the string in this file would let the two
+ * drift, and the drift would be invisible: the classification would simply stop recognising the header
+ * the request carried.
+ */
+export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
+
+/**
  * The status a normalised failure reports when no response arrived at all.
  *
  * Assumptions: zero rather than an absent member, and the choice is forced rather than preferred:
@@ -685,16 +730,158 @@ function headerValue(bag: unknown, name: string): string | undefined {
 }
 
 /**
- * Anchors the server clock from a successful response and returns it unchanged.
+ * Anchors the server clock from a successful response, then admits it only if its body can be used.
  *
- * Assumptions: the response is returned as-is, so this interceptor is observational only. A response
- * interceptor that altered its input would make every caller's parsing depend on this module.
- * @param {AxiosResponse} response - Response whose `Date` header anchors the clock.
- * @returns {AxiosResponse} The same response, unmodified.
+ * Assumptions: the response is returned UNMODIFIED on the admitting path, so this interceptor stays
+ * observational: it never rewrites a body, which is what keeps every caller's parsing independent of
+ * this module and keeps a monetary amount the string it arrived as.
+ *
+ * Refactoring Rationale: ⚠️ this function used to do nothing but anchor the clock, and the failure it
+ * now raises closes the least diagnosable mode the QA sweep found. A 2xx whose body is not JSON --
+ * measured as `HTTP 200`, `content-length: 9`, body `{not-json`, with an ordinary `etag` -- reaches
+ * here as a raw STRING rather than as a parsed document, because Axios's default response transform
+ * catches its own `JSON.parse` failure and silently returns the text (`silentJSONParsing` is on and
+ * `strictJSONParsing` requires an explicit `responseType: 'json'`, which this client deliberately does
+ * not set). Nothing rejected, so the request looked successful: the screen's own validator then threw
+ * a local `RangeError`, the band reported whichever subsystem that screen names in its catch arm --
+ * `/account/view` said `Error reading account card xref File` for a body that concerns no file at all
+ * -- and the console stayed empty. Classifying it here makes one unusable answer produce one
+ * {@link ApiRequestError} of kind `RESPONSE`, which is the same shape a gateway's HTML already
+ * produces, so no screen needs a new branch to be no worse off and every screen gains the correct kind.
+ *
+ * Trade-offs: a fulfilled interceptor that throws is how the rejection is raised, rather than returning
+ * `Promise.reject`. Axios chains its interceptors as `then(fulfilled, rejected)` pairs, so a throw here
+ * settles the caller's promise as a rejection carrying exactly this reason, and `prefer-promise-reject-errors`
+ * refuses the explicit-reject form anyway. The cost is that this failure does NOT pass through
+ * {@link normaliseFailureAndThrow} -- a single interceptor's rejected handler does not see its own
+ * fulfilled handler's throw -- which is why the announcement and the remedy are applied here too rather
+ * than being left to that one place.
+ * @param {AxiosResponse} response - Response whose `Date` header anchors the clock and whose body is
+ *   checked for usability.
+ * @returns {AxiosResponse} The same response, unmodified, when its body can be used.
+ * @throws {ApiRequestError} Of kind `RESPONSE`, when a body that had to be a JSON document is not one.
  */
 function anchorClockFromResponse(response: AxiosResponse): AxiosResponse {
   recordServerDate(response.headers['date'] as string | undefined);
-  return response;
+  if (!unusableSuccessBody(response)) {
+    return response;
+  }
+  throw unusableAnswerFailure(response);
+}
+
+/**
+ * Reports whether a successful response's body cannot be used as the document it had to be.
+ *
+ * Assumptions: a body reaching here as a STRING is the whole test, and the reason is a property of
+ * Axios's default response transform rather than a heuristic. That transform attempts `JSON.parse` on
+ * any non-empty string body when no `responseType` was named, and on failure it returns the text
+ * unchanged -- `silentJSONParsing` is on by default and `strictJSONParsing` requires an explicit
+ * `responseType: 'json'`, which this client deliberately does not set. So a string surviving to this
+ * point is a body the transform could not parse: nine bytes of truncated JSON, or a gateway's HTML, or
+ * a proxy's plain text. Every parsed document arrives as an object, an array, a number or a boolean.
+ *
+ * Assumptions: TWO exemptions, and each carries real traffic.
+ *
+ * - A request that named its own `responseType` asked for something other than a decoded document, so
+ *   a string body is what it wanted. The two statement operations in `./reporting` pass `'blob'` for
+ *   exactly that reason, and a `'text'` request would be asking for the raw string this check treats as
+ *   a defect everywhere else.
+ * - An empty or blank body is admitted at any status. This is what covers the deliberate empty
+ *   responses the account, auth and reference contracts publish: measured, a `204` arrives with `data`
+ *   as the empty string, so no separate status test is needed and a redundant one was withdrawn from
+ *   here rather than left to imply that the two conditions differ.
+ *
+ * Assumptions: the declared media type is deliberately NOT consulted. A gateway answering `text/html`
+ * under `200` and a service answering `application/json` with truncated JSON are the same thing from a
+ * caller's point of view: this client sends `Accept: application/json` on every request and every
+ * operation it publishes returns a document, so a string that is not a document is an answer no screen
+ * can render.
+ *
+ * Trade-offs: the residual false positive is a service answering a top-level JSON SCALAR -- a bare
+ * `"OK"` -- which the transform decodes to a bare string that is then indistinguishable from an
+ * unparsed one. Re-parsing the decoded value was tried and does not separate the two, because the
+ * decoded scalar no longer carries its quotes; that attempt is recorded here rather than left in place
+ * as a guard that reads as though it worked. Measured against all seven published OpenAPI documents,
+ * each at `src/main/resources/openapi` under its own service: no operation declares a scalar
+ * `application/json` response schema, so the case is unrepresentable. If one were ever added, the
+ * failure it produces here is loud and correlated rather than silent, which is the better direction to
+ * be wrong in.
+ * @param {AxiosResponse} response - The successful response, read for its configuration and its body.
+ * @returns {boolean} `true` when the body cannot be used and the request must be reported as failed.
+ */
+function unusableSuccessBody(response: AxiosResponse): boolean {
+  const requested = response.config.responseType;
+  if (requested !== undefined && requested !== 'json') {
+    return false;
+  }
+  const body: unknown = response.data;
+  return typeof body === 'string' && body.trim().length > 0;
+}
+
+/**
+ * Builds and announces the failure for a successful response whose body cannot be used.
+ *
+ * Assumptions: the document is SYNTHESISED with the same `CARDDEMO-UI-BODY` code a proxy's HTML earns
+ * on the failure path, because the two conditions are the same one: an answer arrived and it is not a
+ * document. Minting a separate code for the 2xx variant was considered and rejected -- a screen has the
+ * same nothing to do about either, and a second code would have to be added to every consumer that
+ * recognises the first.
+ *
+ * Assumptions: the target is masked by {@link maskedTarget} for the reason recorded there, and the
+ * status carried is the one the response actually had -- `200`, not a fabricated `502`. A screen
+ * comparing `status` against `200` and finding a failure is being told the truth about what arrived.
+ * @param {AxiosResponse} response - The response whose body could not be used.
+ * @returns {ApiRequestError} The failure to throw, already announced to the console.
+ */
+function unusableAnswerFailure(response: AxiosResponse): ApiRequestError {
+  const correlationId = correlationIdBetween(response.headers, response.config.headers);
+  const target = maskedTarget(response.config.url ?? '');
+  const failure = new ApiRequestError(
+    'RESPONSE',
+    response.status,
+    synthesisedProblem(CODE_UNEXPECTED_BODY, response.status, correlationId, target),
+    diagnosticFor('RESPONSE', response.status, CODE_UNEXPECTED_BODY, correlationId),
+    remedyFor('RESPONSE', response.status, response.config),
+  );
+  announceUnusableAnswer(failure);
+  return failure;
+}
+
+/**
+ * Records one console entry for an answer that arrived and could not be used.
+ *
+ * Purpose: this is the only diagnostic channel this tree has -- there is no client-side telemetry sink,
+ * and the reasoning for using `console` rather than inventing one is the same as at
+ * `reportUnrevokedToken` in `ui/src/hooks/useAuth.ts`. It exists because the QA sweep established that
+ * an unusable answer produced NO console output of any kind, which left the operator's report ("it says
+ * the card cross-reference file failed") pointing at a subsystem that had nothing to do with it.
+ *
+ * Assumptions: only kind `RESPONSE` is announced, and the other three are deliberately silent.
+ * `PROBLEM` is a service describing a refusal the screen is already showing, and announcing every
+ * rejected form field would bury this line in the noise it exists to cut through. `TIMEOUT` and
+ * `NETWORK` are already visible as failed entries in the browser's own network panel, whereas an
+ * unusable `200` appears there as a success -- which is exactly what made it undiagnosable.
+ *
+ * Assumptions: the record carries the classification and NOTHING from the answer itself. No body, no
+ * request target -- not even the masked one -- no header value and no bearer state, because a console
+ * entry is copied verbatim into bug reports and the QA sweep's leakage verdict across all fifteen fault
+ * modes was clean. The correlation identifier is what turns this line into a search key against the
+ * service's own log, and it is a value the services already publish for that purpose.
+ * @param {ApiRequestError} failure - The normalised failure to announce.
+ * @returns {void} Nothing; at most one console entry is written.
+ */
+function announceUnusableAnswer(failure: ApiRequestError): void {
+  if (failure.kind !== 'RESPONSE') {
+    return;
+  }
+  console.error('carddemo: a service answer could not be used', {
+    kind: failure.kind,
+    status: failure.status,
+    code: failure.problem.code,
+    correlationId: failure.correlationId,
+    transient: failure.transient,
+    repeatable: failure.repeatable,
+  });
 }
 
 /**
@@ -718,6 +905,84 @@ type TransportFailure = AxiosError<unknown, unknown>;
  * signal, and a member nothing can produce reads to a screen author as a case they must handle.
  */
 export type ApiFailureKind = 'PROBLEM' | 'RESPONSE' | 'TIMEOUT' | 'NETWORK';
+
+/**
+ * What a screen may OFFER after a failure, separated from what it may SHOW.
+ *
+ * Purpose: {@link ApiFailureKind} names what happened and this names what can be done about it, and
+ * the two are deliberately not the same judgement. A screen rendering a failure has to answer one
+ * question the kind alone cannot: is pressing the key again a remedy, or is it a loop? Measured
+ * consequence of the two being fused: the QA sweep found a timeout, a dropped connection and a 500
+ * indistinguishable on every screen, and a 404 presented as "temporarily unavailable" on `/cards`
+ * because there was nothing on the failure to say which of the two it was.
+ *
+ * Assumptions: `transient` is about the CONDITION and `repeatable` is about the REQUEST, which is why
+ * both members exist rather than one. A gateway failure on a `POST` is transient -- the condition may
+ * clear -- and is still not repeatable, because the write may already have been applied. Fusing them
+ * would force one of the two mistakes: withholding the "try again later" wording from a condition that
+ * really is momentary, or offering a re-submit for a payment that may have been taken.
+ */
+export interface ApiFailureRemedy {
+  /**
+   * Whether the CONDITION could clear on its own, so that the same request may later succeed.
+   *
+   * Assumptions: `true` for a timeout and for the five statuses in {@link TRANSIENT_STATUSES}; `false`
+   * for everything else, including a plain 500 and every 4xx a service described. A screen may use
+   * this to say "not available at the moment" instead of "that did not work".
+   */
+  readonly transient: boolean;
+
+  /**
+   * Whether repeating this exact request is safe, given what it was and what it carried.
+   *
+   * Assumptions: `true` only when the condition is transient AND the request either used a method
+   * that changes nothing ({@link REPEATABLE_METHODS}) or carried an {@link IDEMPOTENCY_KEY_HEADER} the
+   * service recognises a second attempt by. A screen may put a repeat control behind this member and
+   * behind nothing else.
+   */
+  readonly repeatable: boolean;
+}
+
+/**
+ * Classifies whether a failure's condition may clear and whether the request may be repeated.
+ *
+ * Assumptions: a `NETWORK` failure is NOT transient, and that is the one member of this derivation
+ * that could reasonably be read the other way. It keeps the distinction {@link normaliseFailure}
+ * already documents: a request that timed out reached something, whereas one that resolved no host,
+ * was refused by CORS or found no route fails again identically, and offering a repeat for it sends
+ * the operator into a loop with no exit. A momentary loss of connectivity is the case this treats
+ * conservatively, and the cost is accepted: the operator is told the service could not be reached
+ * rather than invited to try again, and pressing the key again is still available to them.
+ *
+ * Assumptions: the method is read from the request configuration and lower-cased, because Axios stores
+ * whatever spelling the caller used and this package issues both `get` and `GET` through different
+ * helpers. An ABSENT configuration -- which is what a failure constructed by hand in a test has --
+ * reads as "the request is not described", so no method is recognised and nothing is reported
+ * repeatable. That is the safe direction: a screen offering no repeat is a smaller defect than one
+ * offering a repeat for a write whose first attempt may have landed.
+ * @param {ApiFailureKind} kind - Which of the four distinguishable failures this is.
+ * @param {number} status - HTTP status received, or `0` when none was.
+ * @param {AxiosRequestConfig | undefined} request - The failed request's configuration, read for its
+ *   method and for the idempotency header it may carry; absent when the failure was not produced by a
+ *   dispatched request.
+ * @returns {ApiFailureRemedy} The two independent judgements, each derived and neither guessed.
+ */
+function remedyFor(
+  kind: ApiFailureKind,
+  status: number,
+  request: AxiosRequestConfig | undefined,
+): ApiFailureRemedy {
+  const transient = kind === 'TIMEOUT' || TRANSIENT_STATUSES.includes(status);
+  if (!transient) {
+    return { transient: false, repeatable: false };
+  }
+  const method = typeof request?.method === 'string' ? request.method.toLowerCase() : '';
+  const carriedIdempotencyKey = headerValue(request?.headers, IDEMPOTENCY_KEY_HEADER) !== undefined;
+  return {
+    transient: true,
+    repeatable: REPEATABLE_METHODS.includes(method) || carriedIdempotencyKey,
+  };
+}
 
 // WHY : Assumptions: a problem code minted in the BROWSER carries a `CARDDEMO-UI-` prefix, which no
 //       service can produce.
@@ -811,6 +1076,16 @@ export class ApiRequestError extends Error {
   readonly correlationId: string;
 
   /**
+   * Whether the condition that caused this failure may clear on its own; see {@link ApiFailureRemedy}.
+   */
+  readonly transient: boolean;
+
+  /**
+   * Whether repeating the exact request that failed is safe; see {@link ApiFailureRemedy}.
+   */
+  readonly repeatable: boolean;
+
+  /**
    * Builds one normalised failure.
    * @param {ApiFailureKind} kind - Which of the four distinguishable failures this is.
    * @param {number} status - HTTP status received, or `0` when no response arrived.
@@ -820,14 +1095,33 @@ export class ApiRequestError extends Error {
    *   status, the problem code and the correlation identifier, and deliberately NOT the request
    *   target, because a target can carry a primary account number as a path parameter and this
    *   sentence is the member a logger is most likely to print.
+   * @param {ApiFailureRemedy} [remedy] - What a screen may offer about this failure. Defaults to the
+   *   judgement {@link remedyFor} reaches with NO request described, which reports a transient
+   *   condition and never a safe repeat.
    */
-  constructor(kind: ApiFailureKind, status: number, problem: ApiError, diagnostic: string) {
+  constructor(
+    kind: ApiFailureKind,
+    status: number,
+    problem: ApiError,
+    diagnostic: string,
+    // Assumptions: the fifth parameter is OPTIONAL, and that is a compatibility decision rather than a
+    //   stylistic one. This constructor is called with four arguments from a dozen screen-level test
+    //   fixtures across `ui/src/test`, each standing up a failure to drive one screen's error arm, and
+    //   a required fifth parameter would break every one of them to add a member none of them asserts.
+    //   Alternatives Considered: deriving both members inside the constructor from `kind` and `status`
+    //   alone, which needs no parameter at all. Rejected because `repeatable` cannot be derived without
+    //   the request -- the method and the idempotency header are what decide it -- so the derivation
+    //   would have had to drop the member that carries the actual safety judgement.
+    remedy: ApiFailureRemedy = remedyFor(kind, status, undefined),
+  ) {
     super(diagnostic);
     this.name = 'ApiRequestError';
     this.kind = kind;
     this.status = status;
     this.problem = problem;
     this.correlationId = problem.correlationId;
+    this.transient = remedy.transient;
+    this.repeatable = remedy.repeatable;
   }
 }
 
@@ -879,6 +1173,385 @@ export function subscribeToAuthenticationRequired(
 }
 
 /**
+ * Refuses an edit that is not conditional on the revision its read returned.
+ *
+ * Purpose: ⚠️ a review found TWO optimistic-concurrency conventions in one client: the account edit
+ * carries `If-Match: W/"8"` against an opaque entity tag, while the card edit carries a numeric
+ * `version` member inside its body. Both are what their contracts publish -- `account-api.yaml`
+ * declares `ETag` on the read and a required `If-Match` on the write, `card-api.yaml` declares
+ * `version` on `CardDetail` -- so the WIRE forms are not this package's to unify. What was this
+ * package's is that each module hand-wrote its own answer to the same question, in its own words, with
+ * its own message; a third operation acquiring optimistic concurrency would have written a third. This
+ * is that question answered once, and it is the whole of the convention a client can hold.
+ *
+ * Assumptions: the rule is that an edit MUST name the revision it was read at, and that a revision
+ * which cannot identify one is not a revision. Both encodings have a value that is syntactically
+ * present and semantically unusable, and both are refused here: the empty or blank entity tag, and the
+ * version that is negative or is not a safe integer. This is the one place the two are the same
+ * question, which is why it is the one place the answer lives.
+ *
+ * Assumptions: refusing LOCALLY is deliberate, and the account case is why. A blank `If-Match` passes
+ * the framework's required-header check and reaches the business rule, which tests it for blankness and
+ * raises the same stale-revision conflict a genuinely outdated token raises -- so the operator is told
+ * `Record changed by some one else. Please review` and sent to look for a concurrent change that never
+ * happened. The real defect is a caller that lost the revision its read returned, and only a local
+ * refusal names it.
+ *
+ * Alternatives Considered: a single client-side facade presenting one precondition shape and choosing
+ * the header or the body member per operation. Rejected: it would hide the divergence rather than
+ * remove it, and hiding it is worse than the divergence -- a reader would believe one convention was in
+ * force while two were on the wire, and the operation that needed a service change would no longer be
+ * visible as the one that needed it. The divergence is reported to the service side; what is unified
+ * here is the rule, not the encoding.
+ *
+ * Trade-offs: the subject is supplied by the caller rather than derived, because the message an operator
+ * or a log reader sees has to name the thing that was not written, and this function cannot know that.
+ * @param {string | number} precondition - The revision the edit is conditional on: the entity tag
+ *   returned by the read for a header-conditional operation, or the version member for a
+ *   body-conditional one.
+ * @param {string} subject - What the edit would change, opening the message, for example
+ *   `An account edit`.
+ * @returns {void} Nothing when the precondition can identify a revision; the caller proceeds.
+ * @throws {RangeError} If a text revision is empty or blank, or a numeric one is negative or not a safe
+ *   integer. Nothing is sent, so no request carries an unusable precondition.
+ */
+export function requireConditionalOn(precondition: string | number, subject: string): void {
+  if (typeof precondition === 'number') {
+    if (!Number.isSafeInteger(precondition) || precondition < 0) {
+      throw new RangeError(`${subject} requires a non-negative safe-integer version.`);
+    }
+    return;
+  }
+  // Assumptions: a blank tag is refused as well as an empty one, because the service's own test is
+  //   `isBlank()` and not `isEmpty()` -- so a tag of one space is a value this client would send and
+  //   the service would answer with the false conflict described above. Matching the service's test is
+  //   what keeps the local refusal and the remote one from disagreeing about the same string.
+  if (precondition.trim().length === 0) {
+    throw new RangeError(`${subject} requires the revision the read returned.`);
+  }
+}
+
+/**
+ * The two answers a confirmation collects, in the one representation every echo form is built from.
+ *
+ * Purpose: ⚠️ a review found the confirmation echoed to the server three different ways -- a required
+ * query parameter on the user deletion, a single-character body member on the three ledger operations
+ * and on the report submission, and NOTHING AT ALL on four of the seven surfaces that ask an operator
+ * to confirm. The three forms are each contract-mandated and are not this package's to unify; what was
+ * this package's is that the ANSWER itself was a bare literal typed out at each call site, so a fourth
+ * spelling was one edit away. This is that answer, once.
+ *
+ * Assumptions: the letters are the baseline's, not a convention invented here. `CONFIRMI PIC X(1)` at
+ * `app/cpy-bms/COBIL00.CPY` L72 and at `app/cpy-bms/COTRN02.CPY` L138 collects one character, and
+ * `app/cbl/COBIL00C.cbl` L173 to L191 evaluates it as a four-state machine: `Y` or `y` confirms, `N` or
+ * `n` declines, blank or low-values is the never-answered state that previews, and anything else is
+ * refused with "Invalid value. Valid values are (Y/N)...". The published `Confirmation` schema carries
+ * exactly that domain as `^[YyNn]?$`, so the upper-case letters below are within it and are what this
+ * package sends.
+ *
+ * Assumptions: the never-answered state is deliberately NOT a member here. It is the ABSENCE of an
+ * answer -- an omitted member, which every request type declares as optional -- and giving it a name
+ * would invite a caller to send it as a value. The empty string reaches the same outcome, but a member
+ * present and empty and a member absent are two spellings of one state, which is how a fourth
+ * spelling starts.
+ *
+ * Trade-offs: which FORM each operation echoes in is not expressed here, because it is not the same
+ * shape in each case -- one is a query parameter typed as the literal `true`, one is a body member
+ * named `confirmation`, one is a body member named `confirm`. Each call site names its own, and the
+ * per-operation documentation states the contract it is taken from; what is shared is the answer.
+ */
+export const CONFIRMATION_ANSWERS = {
+  /** The answer that confirms: posts the payment, writes the transaction, starts the execution. */
+  CONFIRM: 'Y',
+  /** The answer that declines, which is not the same as never having answered. */
+  DECLINE: 'N',
+} as const;
+
+/**
+ * Reports whether an answer confirms, on the domain the baseline evaluates.
+ *
+ * Assumptions: both cases are accepted, because `app/cbl/COBIL00C.cbl` L173 to L191 accepts both and
+ * the published pattern admits both. Accepting only the upper case here would refuse an answer the
+ * service posts on, so a caller checking with this and a service checking its own pattern would
+ * disagree about the same character -- and the direction of that disagreement is a payment the client
+ * believed was a preview.
+ * @param {string | undefined} answer - The answer as collected, or nothing when never answered.
+ * @returns {boolean} `true` only for a confirming answer; `false` for a declining one, for the empty
+ *   string, for an absent one and for any character the service would refuse -- none of which may be
+ *   treated as confirmation.
+ */
+export function isConfirmingAnswer(answer: string | undefined): boolean {
+  return answer === CONFIRMATION_ANSWERS.CONFIRM || answer === 'y';
+}
+
+/**
+ * The destructive requests currently in flight, keyed by exactly what each one destroys.
+ *
+ * Assumptions: the promise itself is held rather than a flag, so a duplicate can be ANSWERED with the
+ * first attempt's outcome instead of merely being refused. A caller that dispatched second is a caller
+ * that wants the row gone; telling it "a deletion is already running" would leave it to decide what to
+ * do with that, and the honest answer is the outcome of the deletion that is already running.
+ */
+const destructiveRequestsInFlight = new Map<string, Promise<void>>();
+
+/**
+ * Runs a destructive request, or joins the identical one already running.
+ *
+ * Purpose: ⚠️ this is the duplicate protection the deletion path had NONE of. A review measured the
+ * report submission carrying an `Idempotency-Key` header while `DELETE /auth/users/{userId}` carried
+ * nothing -- protection present on the safe verb and absent on the dangerous one. The header cannot be
+ * the remedy here: `Idempotency-Key` is declared in exactly one of the seven published contracts, on
+ * `submitTransactionReport` alone, so sending it on a deletion would be a header no service reads. A
+ * key the server ignores is worse than none, because the request then LOOKS protected.
+ *
+ * Assumptions: what this closes is the concurrent duplicate -- a double-click, a repeated key, an
+ * impatient second confirmation -- which is the window a client can close on its own. It does NOT close
+ * the sequential duplicate, where the first attempt's response was lost and the second is sent
+ * afterwards; only the server can recognise that, which is what the reported service-side change is
+ * for. The distinction is stated because a reader could otherwise take this for the whole remedy.
+ *
+ * Assumptions: the key is the METHOD AND TARGET, so two deletions of the same row collapse and two
+ * deletions of different rows do not. It is composed by the caller rather than derived from an axios
+ * configuration here, because the target is already composed by `requestPath` at every call site and
+ * re-deriving it would be a second implementation of the same string.
+ *
+ * Alternatives Considered: an axios request interceptor deduplicating every concurrent identical
+ * mutating request. Rejected as actively unsafe: two identical transaction captures are not a mistake
+ * -- an operator may genuinely capture the same amount at the same merchant twice -- so a general rule
+ * would silently drop the second and the ledger would be short a row nobody could account for.
+ * Deletion is different in kind, and that is why the guard is applied per operation rather than
+ * globally.
+ *
+ * Trade-offs: the entry is removed once the first attempt SETTLES, whether it succeeded or failed, so a
+ * failed deletion can be retried immediately. Holding it after a failure would leave the row
+ * undeletable until a reload, which is a worse outcome than allowing a deliberate retry.
+ * @param {string} key - What is being destroyed, as method and target, for example
+ *   `DELETE /auth/users/USER0100`.
+ * @param {() => Promise<void>} attempt - Issues the request. Invoked only when nothing identical is
+ *   already in flight.
+ * @returns {Promise<void>} The outcome of this attempt, or of the identical one already running.
+ */
+export async function withoutConcurrentDuplicate(
+  key: string,
+  attempt: () => Promise<void>,
+): Promise<void> {
+  const running = destructiveRequestsInFlight.get(key);
+  if (running !== undefined) {
+    return running;
+  }
+  const started = attempt();
+  destructiveRequestsInFlight.set(key, started);
+  try {
+    await started;
+  } finally {
+    destructiveRequestsInFlight.delete(key);
+  }
+}
+
+/**
+ * How one request settled, held for a screen that was no longer there when it did.
+ *
+ * Assumptions: a FAILURE is retained as well as a success, and that is half the value of the mechanism.
+ * The measured defect was a completed write nobody saw, and the mirror of it is a failed write nobody
+ * saw: an operator who navigates away from a payment that then fails is told nothing at all, which is
+ * strictly worse than being told about one that succeeded.
+ *
+ * Assumptions: the failure is typed `unknown` rather than as this module's own failure type, because
+ * what a rejected promise carries is not this module's to promise -- a resource function's own
+ * validation raises `RangeError`. A consumer narrows it with {@link isApiRequestError}, which is what
+ * every screen already does with a caught failure.
+ * @template T What the completed work resolved to.
+ */
+export type RetainedOutcome<T> =
+  | { readonly settled: 'COMPLETED'; readonly value: T }
+  | { readonly settled: 'FAILED'; readonly failure: unknown };
+
+/** Told when an outcome is retained, so a screen already mounted learns without polling. */
+export type RetainedOutcomeListener = (claim: string) => void;
+
+/**
+ * The outcomes retained for a claim nobody has collected yet.
+ *
+ * Assumptions: a `Map` rather than a single slot, because two writes can be abandoned before either is
+ * collected -- the measured run abandoned four -- and a single slot would silently drop all but the last.
+ * Insertion order is what {@link MAX_RETAINED_OUTCOMES} evicts by.
+ */
+const retainedOutcomes = new Map<string, RetainedOutcome<unknown>>();
+
+/** Listeners told when something is retained. */
+const retainedOutcomeListeners = new Set<RetainedOutcomeListener>();
+
+/**
+ * How many uncollected outcomes may be held at once.
+ *
+ * Assumptions: eight, which is more than an operator can abandon between two sign-ons and small enough
+ * that a screen which retains and never collects cannot grow this without bound. Eviction takes the
+ * OLDEST, because an uncollected outcome from eight navigations ago is one the operator has stopped
+ * looking for, whereas the one that just landed is the one they are about to ask about.
+ *
+ * Trade-offs: a duration-based expiry was the alternative and is refused, because it would need a clock
+ * this module deliberately does not read for anything but the server anchor, and because "how long ago"
+ * is not what makes an outcome stale -- being superseded is, and a sign-out is what supersedes it.
+ */
+const MAX_RETAINED_OUTCOMES = 8;
+
+/**
+ * Retains how one piece of work settled, for a screen that is no longer mounted to receive it.
+ *
+ * Purpose: this is the mechanism for the defect the QA sweep measured on four separate writes. A
+ * submission dispatched from a screen keeps running after the operator navigates -- correctly, because
+ * abandoning a write in flight is what would leave a payment applied with nobody told -- and its
+ * continuation then called a state setter on a component that had gone, which React discards silently.
+ * Two of the four were a `201`, one of them minting a one-time credential that was created and
+ * destroyed inside 7 ms. Retaining the outcome in module state rather than in component state is what
+ * lets the continuation put it somewhere that outlives the component.
+ *
+ * Assumptions: the value is retained VERBATIM and this module inspects none of it. A caller retaining a
+ * one-time credential is retaining it deliberately -- it is the whole reason that particular outcome
+ * cannot be lost -- and a mechanism that decided for itself what was safe to keep would have to know
+ * every shape a screen can produce. What bounds the exposure is that nothing is retained unless a caller
+ * asks, the store holds at most {@link MAX_RETAINED_OUTCOMES} entries, collection REMOVES the entry, and
+ * a sign-out discards the lot through {@link discardRetainedOutcomes}.
+ *
+ * Assumptions: no browser storage is touched, for the reason recorded on the access-token holder. A
+ * retained outcome is session state and must not survive a reload any more than the token does.
+ * @template T What the completed work resolved to.
+ * @param {string} claim - The name the collecting screen will ask for. A caller pair owns its own claim,
+ *   and a second retention under the same claim REPLACES the first, because two outcomes of one action
+ *   mean the later one is what happened.
+ * @param {RetainedOutcome<T>} outcome - How the work settled.
+ * @returns {void} Nothing; the outcome is held until collected, evicted or discarded, and every listener
+ *   is told which claim to collect.
+ */
+export function retainOutcomeAcrossNavigation<T>(claim: string, outcome: RetainedOutcome<T>): void {
+  if (!retainedOutcomes.has(claim) && retainedOutcomes.size >= MAX_RETAINED_OUTCOMES) {
+    const oldest = retainedOutcomes.keys().next();
+    if (oldest.done !== true) {
+      retainedOutcomes.delete(oldest.value);
+    }
+  }
+  retainedOutcomes.set(claim, outcome);
+  for (const listener of retainedOutcomeListeners) {
+    // Assumptions: each listener is called inside its own try, exactly as the authentication-required
+    //   registry does it. One subscriber that throws must not stop the next from being told, and the
+    //   caller of this function is a promise continuation whose rejection nobody is waiting on.
+    try {
+      listener(claim);
+    } catch {
+      retainedOutcomeListeners.delete(listener);
+    }
+  }
+}
+
+/**
+ * Collects a retained outcome, REMOVING it so it is delivered exactly once.
+ *
+ * Assumptions: removal on collection is what makes this safe to call on every mount. A screen that
+ * collected without removing would report the same completed payment again on its next mount, and an
+ * operator shown a payment twice cannot tell that from two payments.
+ *
+ * Trade-offs: the collected shape is asserted to the caller's expectation rather than validated, because
+ * a validator would need a schema for every claim and the claim is precisely what identifies the ONE
+ * pair of call sites that agree on the shape. What makes it sound is that both call sites are in the same
+ * screen: the retention and the collection are written together, and a claim is not a public name any
+ * other screen has reason to guess.
+ * @template T The shape the collecting caller retained under this claim.
+ * @param {string} claim - The name it was retained under.
+ * @returns {RetainedOutcome<T> | undefined} How the work settled, or nothing when no outcome is held for
+ *   that claim -- which is the ordinary case, because a screen the operator did not leave collects
+ *   nothing.
+ */
+export function claimRetainedOutcome<T>(claim: string): RetainedOutcome<T> | undefined {
+  const held = retainedOutcomes.get(claim);
+  if (held === undefined) {
+    return undefined;
+  }
+  retainedOutcomes.delete(claim);
+  return held as RetainedOutcome<T>;
+}
+
+/**
+ * Registers a listener told each time an outcome is retained.
+ *
+ * Purpose: collecting on mount alone is not enough, and the measurement says why. The four abandoned
+ * writes landed 7 to 12 ms after the navigation, so the DESTINATION screen was already mounted by the
+ * time the outcome existed -- a screen that only looks on mount would have looked too early. This is how
+ * a mounted screen or the app shell learns without polling.
+ * @param {RetainedOutcomeListener} listener - Called with the claim, once per retention.
+ * @returns {() => void} A function that removes this listener; calling it twice is harmless.
+ */
+export function subscribeToRetainedOutcomes(listener: RetainedOutcomeListener): () => void {
+  retainedOutcomeListeners.add(listener);
+  /**
+   * Removes the listener registered above.
+   * @returns {void} Nothing; the registry shrinks by at most one entry.
+   */
+  function unsubscribe(): void {
+    retainedOutcomeListeners.delete(listener);
+  }
+  return unsubscribe;
+}
+
+/**
+ * Discards every uncollected outcome, which a sign-out must do.
+ *
+ * Assumptions: this is called from `ui/src/hooks/useAuth.ts`'s session discard rather than from this
+ * module's own 401 path, because that hook is the single owner of what a session comprises and is
+ * already the subscriber this module signals re-authentication to. A retained outcome describes work
+ * done under a session, so it may not outlive one -- the next operator to sign on at the same terminal
+ * must not be shown a credential minted for the previous one.
+ * @returns {void} Nothing; nothing is held afterwards. Listeners are LEFT registered, because a
+ *   subscriber is a mounted component and a sign-out does not unmount it.
+ */
+export function discardRetainedOutcomes(): void {
+  retainedOutcomes.clear();
+}
+
+/**
+ * Runs work and retains its outcome only if the caller has gone by the time it settles.
+ *
+ * Purpose: this is the shape a screen actually needs, and it is why the primitives above are not enough
+ * on their own. A screen that retained unconditionally would leave an outcome behind on every successful
+ * submission, and the next screen to collect that claim would report a completed action the operator had
+ * already been shown. Deciding at SETTLEMENT is what separates "the operator is still here to see this"
+ * from "they are not".
+ *
+ * Assumptions: the work is neither aborted nor detached -- it is awaited and its settlement is passed
+ * through unchanged, so a caller still present handles it exactly as it would have without this wrapper.
+ * That is deliberate and is the finding's own guidance: a write already dispatched must be allowed to
+ * finish, because a payment abandoned mid-flight may still be applied and nobody would be told.
+ * @template T What the work resolves to.
+ * @param {string} claim - The name a later screen will collect the outcome under.
+ * @param {Promise<T>} work - The already-dispatched work. It is not started here, so a caller that
+ *   composed it has already sent it.
+ * @param {() => boolean} stillPresent - Asked ONCE, at settlement: `true` when the caller is still there
+ *   to handle the outcome itself, `false` when it has gone and the outcome must be retained. A screen
+ *   supplies a mounted flag it owns.
+ * @returns {Promise<T>} What the work resolved to, unchanged.
+ * @throws {unknown} Whatever the work rejected with, unchanged, so a caller still present reports it the
+ *   way it always did. An abandoned rejection is retained before it is re-thrown, which is why this
+ *   re-throws rather than swallowing it.
+ */
+export async function retainOutcomeIfAbandoned<T>(
+  claim: string,
+  work: Promise<T>,
+  stillPresent: () => boolean,
+): Promise<T> {
+  try {
+    const value = await work;
+    if (!stillPresent()) {
+      retainOutcomeAcrossNavigation<T>(claim, { settled: 'COMPLETED', value });
+    }
+    return value;
+  } catch (failure: unknown) {
+    if (!stillPresent()) {
+      retainOutcomeAcrossNavigation<T>(claim, { settled: 'FAILED', failure });
+    }
+    throw failure;
+  }
+}
+
+/**
  * Mirrors the severity a service would have derived from the same status.
  *
  * Assumptions: the three bands are transcribed from `severityForStatus` in
@@ -908,12 +1581,29 @@ function severityForStatus(status: number): Severity {
  * @returns {string} The identifier, or the empty string when neither side recorded one.
  */
 function correlationIdOf(failure: TransportFailure): string {
+  return correlationIdBetween(failure.response?.headers, failure.config?.headers);
+}
+
+/**
+ * Recovers the correlation identifier from a response's headers, falling back to the request's.
+ *
+ * Refactoring Rationale: this was the body of {@link correlationIdOf} and is now a function of the two
+ * header collections rather than of a failure, because the SUCCESS path needs the same recovery: a
+ * response whose body cannot be used is answered by a service that logged it, and the identifier is
+ * the only way to find that log entry. Threading a fabricated `AxiosError` through the failure-shaped
+ * reader was the alternative and is worse, because it would mean constructing a failure object in order
+ * to read a header off a response that is not a failure.
+ * @param {unknown} responseHeaders - Headers of the response, or nothing when none arrived.
+ * @param {unknown} requestHeaders - Headers the request was dispatched with, or nothing.
+ * @returns {string} The identifier, or the empty string when neither side recorded one.
+ */
+function correlationIdBetween(responseHeaders: unknown, requestHeaders: unknown): string {
   const name = correlationHeaderName();
-  const echoed = headerValue(failure.response?.headers, name);
+  const echoed = headerValue(responseHeaders, name);
   if (echoed !== undefined) {
     return echoed;
   }
-  return headerValue(failure.config?.headers, name) ?? '';
+  return headerValue(requestHeaders, name) ?? '';
 }
 
 /** Trailing digits a card-number-width run keeps, matching the masked rendering every row carries. */
@@ -1125,6 +1815,7 @@ function normaliseFailure(failure: TransportFailure, body: unknown): ApiRequestE
         response.status,
         body,
         diagnosticFor('PROBLEM', response.status, body.code, correlationId),
+        remedyFor('PROBLEM', response.status, failure.config),
       );
     }
     return new ApiRequestError(
@@ -1132,6 +1823,7 @@ function normaliseFailure(failure: TransportFailure, body: unknown): ApiRequestE
       response.status,
       synthesisedProblem(CODE_UNEXPECTED_BODY, response.status, correlationId, target),
       diagnosticFor('RESPONSE', response.status, CODE_UNEXPECTED_BODY, correlationId),
+      remedyFor('RESPONSE', response.status, failure.config),
     );
   }
 
@@ -1147,6 +1839,7 @@ function normaliseFailure(failure: TransportFailure, body: unknown): ApiRequestE
     NO_HTTP_STATUS,
     synthesisedProblem(code, NO_HTTP_STATUS, correlationId, target),
     diagnosticFor(kind, NO_HTTP_STATUS, code, correlationId),
+    remedyFor(kind, NO_HTTP_STATUS, failure.config),
   );
 }
 
@@ -1262,6 +1955,11 @@ async function normaliseFailureAndThrow(failure: unknown): Promise<never> {
   //   asked for one, which is per-call configuration this handler deliberately does not read -- and the
   //   recovery is a no-op for every body that is not a JSON-typed `Blob`.
   const normalised = normaliseFailure(failure, await failureBody(failure));
+  // Assumptions: the announcement is made HERE as well as on the success path, and it is a no-op for
+  //   every kind but `RESPONSE` -- so a refused form field writes nothing while a gateway that answered
+  //   markup writes one line. Both paths can produce an unusable answer and neither can reach the
+  //   other, because a fulfilled interceptor's throw does not pass through this handler.
+  announceUnusableAnswer(normalised);
   invalidateSessionOnUnauthorized(failure, normalised);
   throw normalised;
 }
@@ -1304,6 +2002,46 @@ export function isApiRequestError(value: unknown): value is ApiRequestError {
  */
 export function isConflictFailure(value: unknown): value is ApiRequestError {
   return isApiRequestError(value) && value.status === CONFLICT_STATUS;
+}
+
+/**
+ * Reports whether a caught failure's condition may clear on its own.
+ *
+ * Purpose: this is the predicate a screen uses to choose between "not available at the moment" and
+ * "that did not work", which the QA sweep found no screen able to do: a timeout, a dropped connection
+ * and a 500 were rendered identically on every route, and `/cards` described a 404 as a temporary
+ * availability problem because nothing on the failure said otherwise.
+ *
+ * Alternatives Considered: letting each screen read {@link ApiRequestError.kind} and compare statuses
+ * itself, which needs no export. Rejected for the reason {@link isConflictFailure} records: the status
+ * list would then be copied into every screen that reads a failure, and the copy that omitted `503`
+ * would present a momentary condition as a permanent one with nothing failing to say so.
+ * @param {unknown} value - A caught value of unknown provenance.
+ * @returns {boolean} `true` when the value is an {@link ApiRequestError} whose condition may clear,
+ *   narrowing it to that type.
+ */
+export function isTransientFailure(value: unknown): value is ApiRequestError {
+  return isApiRequestError(value) && value.transient;
+}
+
+/**
+ * Reports whether the exact request that produced this failure may safely be repeated.
+ *
+ * Purpose: this is the predicate a repeat control belongs behind, and it is deliberately STRICTER than
+ * {@link isTransientFailure}. A gateway failure on a money-moving `POST` satisfies that one and not
+ * this one, because the write may have been applied before the gateway gave up -- so offering a repeat
+ * for it risks taking a payment twice, which is the failure mode a confirmation surface exists to
+ * prevent.
+ *
+ * Assumptions: a caller wanting a repeatable write does not need to abandon this predicate -- it needs
+ * to send an {@link IDEMPOTENCY_KEY_HEADER}, which is what makes the service recognise the second
+ * attempt as the same unit of work. `submitReport` in `./reporting` is the worked example.
+ * @param {unknown} value - A caught value of unknown provenance.
+ * @returns {boolean} `true` when the value is an {@link ApiRequestError} whose request may be repeated,
+ *   narrowing it to that type.
+ */
+export function isRepeatableFailure(value: unknown): value is ApiRequestError {
+  return isApiRequestError(value) && value.repeatable;
 }
 
 /**
@@ -1358,6 +2096,15 @@ export function getApiClient(): AxiosInstance {
  */
 export function resetApiClient(): void {
   client = undefined;
+  // Assumptions: any destructive request recorded as in flight is forgotten too. An attempt that never
+  //   settles -- a test that resolves nothing, a reader abandoned mid-flight -- would otherwise leave an
+  //   entry that silently answers the NEXT identical deletion with a promise from a discarded client.
+  destructiveRequestsInFlight.clear();
+  // Assumptions: uncollected outcomes go with the client, because both are state of one configuration.
+  //   A test that retained an outcome and then reset would otherwise leave it visible to the next test
+  //   in the same module, and in the application a reset means the runtime document changed -- an
+  //   outcome produced against the previous base URL is not one to hand to a screen afterwards.
+  discardRetainedOutcomes();
 }
 
 // WHY : Refactoring Rationale: the two request-and-response helpers every typed API module composes
@@ -2041,6 +2788,231 @@ export function keysetPagingMembers(
     return undefined;
   }
   return { cursor, direction: direction ?? DEFAULT_PAGE_DIRECTION };
+}
+
+/**
+ * The published length bound of every request member this package sends that carries one, keyed by the
+ * contract's own schema name and then by the member.
+ *
+ * Purpose: these are the copybook field widths, as each service publishes them. `firstName: 20` is
+ * `SEC-USR-FNAME PIC X(20)` at `app/cpy/CSUSR01Y.cpy`, `embossedName: 50` is
+ * `CARD-EMBOSSED-NAME PIC X(50)` at `app/cpy/CVACT02Y.cpy`, `description: 100` is
+ * `TRAN-DESC PIC X(100)` at `app/cpy/CVTRA05Y.cpy`, and so on for all of them: the width is a property
+ * of the record the value is eventually written into, not of the form it was typed on.
+ *
+ * Refactoring Rationale: this table exists because the HTML `maxLength` attribute was the ONLY guard on
+ * any of these values, and an attribute constrains typing rather than sending. Measured: every one of
+ * eighteen fields accepted a value one character past its attribute when the value was set
+ * programmatically, and `POST /auth/users` answered 201 for a body carrying a 10,000-character
+ * `firstName` into a field 20 characters wide. Whatever the service then did with it, the client had
+ * dispatched 10,061 bytes of a name that cannot be stored, and no part of the browser had objected.
+ *
+ * Alternatives Considered: one flat table keyed by member name alone, which would be a third the size.
+ * Rejected on a measurement rather than on taste: `description` is bounded at 100 on
+ * `TransactionCreateRequest` and at 50 on all four reference request schemas, and `userId` at 8 while
+ * `cardNumber` is 16 -- so a member-name key would have to pick one of two right answers for
+ * `description` and would silently refuse valid input wherever it picked the smaller. The schema name
+ * is the unit the bound actually belongs to.
+ *
+ * Alternatives Considered: importing the width maps the screen modules already hold -- `/users/new`,
+ * `/account/update`, `/cards/:num/edit` and the authorization and bill-pay screens each declare one.
+ * Rejected in this direction: this package's API layer may not depend on its screen layer, that
+ * dependency is the one the module graph is arranged to prevent, and a screen's map is anyway a
+ * statement about a form rather than about a request -- a value reaching a request from a paste, a
+ * restored draft or a test does not pass through the form that bounds it.
+ *
+ * Assumptions: the keys are the CONTRACT's schema names and not this package's interface names, which
+ * differ in two places -- the copy operation's body is `CopyLastRequest` here and
+ * `CopyLastTransactionRequest` in `./types`. Keying by the contract's name is what lets
+ * `./contracts.test.ts` resolve each bound in the published document and fail when the two disagree, so
+ * a service that widens a field cannot leave this table refusing values the service now accepts.
+ *
+ * Assumptions: numeric and enumerated members are absent, because a length bound is not what
+ * constrains them -- `version` is an integer and `direction` is an enumeration, and both are already
+ * refused by the service on their own domains. Members bounded on the wire but validated more strictly
+ * before they get here are still listed: an eleven-digit account identifier is checked digit by digit by
+ * its own guard, and its presence here costs one comparison and means the table can be read as the
+ * contract's bounds rather than as a subset somebody curated.
+ */
+export const PUBLISHED_REQUEST_WIDTHS = {
+  // Authentication and user administration -- `services/auth-service`.
+  SignOnRequest: { userId: 8, password: 256 },
+  TokenRefreshRequest: { userId: 8, refreshToken: 8192 },
+  SignOutRequest: { refreshToken: 8192 },
+  SignOnChallengeRequest: { userId: 8, session: 4096, newPassword: 256 },
+  CreateUserRequest: { firstName: 20, lastName: 20, userId: 8, userType: 1 },
+  UpdateUserRequest: { firstName: 20, lastName: 20, userType: 1 },
+
+  // Accounts, customers and the cross-reference -- `services/account-service`.
+  AccountLookupRequest: { accountId: 11 },
+  CardXrefLookupRequest: { cardNumber: 16 },
+  AccountUpdateRequest: {
+    accountId: 11,
+    activeStatus: 1,
+    creditLimit: 15,
+    cashCreditLimit: 15,
+    currentBalance: 15,
+    currentCycleCredit: 15,
+    currentCycleDebit: 15,
+    openDateYear: 4,
+    openDateMonth: 2,
+    openDateDay: 2,
+    expirationDateYear: 4,
+    expirationDateMonth: 2,
+    expirationDateDay: 2,
+    reissueDateYear: 4,
+    reissueDateMonth: 2,
+    reissueDateDay: 2,
+    groupId: 10,
+    customerId: 9,
+    ssnPart1: 3,
+    ssnPart2: 2,
+    ssnPart3: 4,
+    dateOfBirthYear: 4,
+    dateOfBirthMonth: 2,
+    dateOfBirthDay: 2,
+    ficoCreditScore: 3,
+    firstName: 25,
+    middleName: 25,
+    lastName: 25,
+    addressLine1: 50,
+    addressLine2: 50,
+    city: 50,
+    stateCode: 2,
+    countryCode: 3,
+    zipCode: 5,
+    phone1AreaCode: 3,
+    phone1Prefix: 3,
+    phone1LineNumber: 4,
+    phone2AreaCode: 3,
+    phone2Prefix: 3,
+    phone2LineNumber: 4,
+    governmentIssuedId: 20,
+    eftAccountId: 10,
+    primaryCardHolderIndicator: 1,
+  },
+
+  // Cards -- `services/card-service`.
+  CardLookupRequest: { cardNumber: 16 },
+  CardUpdateRequest: { embossedName: 50, activeStatus: 1, expirationMonth: 2, expirationYear: 4 },
+  CardPageQuery: { accountId: 11, cursor: 256 },
+
+  // The ledger and bill payment -- `services/transaction-service`.
+  TransactionCreateRequest: {
+    accountId: 11,
+    cardNumber: 16,
+    typeCode: 2,
+    categoryCode: 4,
+    source: 10,
+    description: 100,
+    amount: 13,
+    originDate: 10,
+    processDate: 10,
+    merchantId: 9,
+    merchantName: 50,
+    merchantCity: 50,
+    merchantZip: 10,
+    confirmation: 1,
+    confirmationToken: 256,
+  },
+  CopyLastRequest: { accountId: 11, cardNumber: 16, confirmation: 1 },
+  BillPaymentRequest: { accountId: 11, confirmation: 1 },
+
+  // Reference data -- `services/reference-service`.
+  TransactionTypeCreateRequest: { typeCd: 2, description: 50 },
+  TransactionTypeReplaceRequest: { description: 50 },
+  TransactionCategoryCreateRequest: { typeCd: 2, catCd: 4, description: 50 },
+  TransactionCategoryReplaceRequest: { description: 50 },
+  // Assumptions: this is the ELEMENT of the batch operation's `actions` array, not the request body.
+  //   The body carries only that array, so nothing on the body itself has a width, and the values that
+  //   do are one level down. `requireWithinPublishedWidths` deliberately does not walk into arrays --
+  //   see its own note -- so the batch's caller applies this entry per element.
+  MaintenanceAction: { typeCd: 2, description: 50 },
+
+  // Pending authorizations -- `services/authorization-service`.
+  FraudMarkRequest: { action: 1 },
+
+  // Reports and statements -- `services/reporting-service`.
+  ReportRequest: {
+    transactionName: 4,
+    title01: 40,
+    currentDate: 8,
+    programName: 8,
+    title02: 40,
+    currentTime: 8,
+    monthly: 1,
+    yearly: 1,
+    custom: 1,
+    startDate: 10,
+    endDate: 10,
+    confirm: 1,
+    errorMessage: 78,
+  },
+  StatementRequest: { cardNumber: 16, accountId: 11 },
+} as const;
+
+/** One request schema {@link PUBLISHED_REQUEST_WIDTHS} declares the bounds of. */
+export type PublishedRequestSchema = keyof typeof PUBLISHED_REQUEST_WIDTHS;
+
+/**
+ * Refuses a request body carrying a string longer than the contract admits, before anything is sent.
+ *
+ * Assumptions: an over-long value is REFUSED and never truncated, which is the whole decision this
+ * function embodies. Truncating would make the request succeed, and what would then be written to a
+ * master file is a different name, a different merchant or a different description from the one the
+ * operator supplied -- wrong data that looks right, discovered by whoever reads the record months
+ * later. Refusing is loud, local and costs one keystroke to correct.
+ *
+ * Assumptions: the refusal happens HERE rather than being left to the service, even though every
+ * service validates the same bound. Three things follow from doing it before dispatch that do not
+ * follow from doing it after: a 10,061-byte body never crosses the network, the refusal names the
+ * member without a round trip, and a value that cannot possibly be stored never reaches an audit log or
+ * a request trace on the way to being rejected. The service's own check remains the authority -- this
+ * one is not a replacement for it and is deliberately no stricter than the published bound.
+ *
+ * Assumptions: length is measured with `String.length`, which counts UTF-16 code units. That is the
+ * same unit the browser's own `maxLength` attribute counts and the same unit Java's `String.length()`
+ * counts, and it is Java's that the service's `@Size` constraint uses -- so this function refuses
+ * exactly what the service would refuse, including for a value carrying characters outside the basic
+ * multilingual plane, where a code-point count would disagree with both.
+ *
+ * Trade-offs: the walk is ONE level deep and does not descend into nested objects or arrays. Measured
+ * against all seven published contracts, exactly one request schema nests anything --
+ * `MaintenanceActionBatchRequest`, whose sole member is an array of `MaintenanceAction` -- so recursion
+ * would add a general mechanism for a single caller. That caller applies the `MaintenanceAction` entry
+ * per element instead, which is visible at its call site rather than implied by a traversal.
+ * @template T The request body's own type, returned unchanged so the checked object is the sent one.
+ * @param {PublishedRequestSchema} schema - The contract schema this body is an instance of.
+ * @param {T} body - The request body, about to be dispatched.
+ * @returns {T} The same body, unmodified, so a caller passes this call's RESULT as the request body and
+ *   cannot check one object while sending another.
+ * @throws {RangeError} If any member exceeds its published bound. The message names the schema, the
+ *   member, the length received and the length admitted, and deliberately NOT the value: it is thrown
+ *   on a path carrying credentials, primary account numbers and national identifiers, and an exception
+ *   message reaches consoles and bug reports.
+ */
+export function requireWithinPublishedWidths<T extends object>(
+  schema: PublishedRequestSchema,
+  body: T,
+): T {
+  const bounds: Readonly<Record<string, number>> = PUBLISHED_REQUEST_WIDTHS[schema];
+  // Assumptions: the body is read through a `Record<string, unknown>` view rather than iterated with
+  //   `Object.entries`, which would type each value as `any` under this package's generic parameter and
+  //   is refused by the lint rules for exactly that reason. Iterating the BOUNDS also means a member the
+  //   contract does not bound is passed over without a lookup, which is the common case.
+  const carried = body as Readonly<Record<string, unknown>>;
+  for (const member of Object.keys(bounds)) {
+    const limit = bounds[member];
+    const value = carried[member];
+    if (limit === undefined || typeof value !== 'string' || value.length <= limit) {
+      continue;
+    }
+    throw new RangeError(
+      `${schema}.${member} carries ${String(value.length)} characters and the contract admits at` +
+        ` most ${String(limit)}, which is the width of the field it is stored in. Nothing was sent.`,
+    );
+  }
+  return body;
 }
 
 /**

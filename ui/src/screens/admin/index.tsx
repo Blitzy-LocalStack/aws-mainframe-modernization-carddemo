@@ -66,12 +66,14 @@
  * every request it makes still carries the signed token.
  */
 
+import { ArrowRightOutlined } from '@ant-design/icons';
 import { Button, Flex, Input, Typography, theme } from 'antd';
 import type { InputRef } from 'antd';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ChangeEvent, ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 
+import { claimRetainedOutcome, subscribeToRetainedOutcomes } from '../../api/client';
 import { useAuth } from '../../hooks/useAuth';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
@@ -87,9 +89,14 @@ import {
 } from '../../messages/messages';
 import type { AdminMenuOption } from '../../messages/messages';
 import { SIGN_ON_ROUTE } from '../../routes/guards';
-import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import {
+  ADMIN_MENU_ROUTE,
+  USER_UPDATE_ROUTE_TEMPLATE,
+  navigateSafely,
+} from '../../routes/navigation';
 import { routeForProgram } from '../../routes/programRoutes';
 import { TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import type { UserUpdateSaveHandover } from '../userUpdate';
 
 /** CICS transaction identifier this screen replaces, from `app/cbl/COADM01C.cbl` L37. */
 export const ADMIN_MENU_TRANSACTION_ID = 'CA00';
@@ -99,6 +106,31 @@ export const ADMIN_MENU_PROGRAM_NAME = 'COADM01C';
 
 /** Mapset this screen stands in, which fixes the message band's rendered width. */
 export const ADMIN_MENU_MAPSET = 'COADM01';
+
+/**
+ * Name under which the user-update screen leaves the sentence an `F3=Save&&Exit` published.
+ *
+ * Purpose: this menu is one of the two screens that save-and-exit returns to, so it is one of the two
+ * that has to collect the sentence. `app/cbl/COUSR02C.cbl` L363-L371 moves its committed-write message
+ * into the field and L246-L253 returns to whichever program transferred to it -- so on the terminal the
+ * operator read the outcome on the screen they landed on, whichever one that was. In the browser the
+ * update screen publishes onto a band that its own unmount discards, and the outcome is carried across
+ * the route change by the retained-outcome registry instead.
+ *
+ * ⚠️ Assumptions: this string is COMPOSED from the shared route template rather than written out, and
+ * the update screen and `ui/src/screens/userList/index.tsx` compose the same name the same way. The
+ * three call sites are in three modules, so the name is the only thing they agree on, and taking the
+ * route half from `ui/src/routes/navigation.ts` is what stops that half from drifting.
+ *
+ * ⚠️ Alternatives Considered: exporting the constant from the update screen and importing it here.
+ * Rejected because every screen is mounted through `lazy()` in `ui/src/router.tsx`, so a VALUE import
+ * from that module would fold the user-update chunk into this menu's and charge every administrator who
+ * opens the menu for code they may never reach. Only the TYPE crosses, which is erased at build time.
+ * This mirrors the arrangement the user browse and the authorization summary already use, so all three
+ * collectors agree on one mechanism. The suffix is inert: a mismatch leaves an outcome uncollected
+ * rather than mis-routed.
+ */
+const USER_UPDATE_SAVE_CLAIM = `${USER_UPDATE_ROUTE_TEMPLATE}#saved`;
 
 /*
  * WHY : Assumptions: the three painted literals below are transcribed from THIS mapset and are
@@ -196,23 +228,30 @@ export const ADMIN_MENU_KEY_LABELS = {
  * hard load of an administrative route bounces to sign-on.
  *
  * Assumptions: options 3 and 4 both resolve to the user BROWSE, and that is one rule rather than two
- * workarounds -- the same rule `COTRN01C` takes on the main menu. Their screens are addressed only
- * per record and a menu option carries no selection, which is exactly the state the reference's own
- * first turn paints: `app/cbl/COUSR02C.cbl` L99-L104 and `app/cbl/COUSR03C.cbl` L99-L104 pre-fill
- * the identifier only when their selection carrier arrives non-blank and otherwise leave the screen
- * waiting for a typed key. The browse is where that key is chosen and is the reference's own caller
- * for both programs -- `app/cbl/COUSR00C.cbl` L192-L207 transfers to them from there, naming itself
- * in `CDEMO-FROM-PROGRAM` so their PF3 returns to the list. Trade-offs: three of the six options
- * therefore land on `/users`, and one extra operator action -- marking a row -- is accepted in
- * exchange for both screens being reachable at all.
+ * workarounds. Their screens are addressed only per record and a menu option carries no selection,
+ * which is exactly the state the reference's own first turn paints: `app/cbl/COUSR02C.cbl` L99-L104
+ * and `app/cbl/COUSR03C.cbl` L99-L104 pre-fill the identifier only when their selection carrier
+ * arrives non-blank and otherwise leave the screen waiting for a typed key. The browse is where that
+ * key is chosen and is the reference's own caller for both programs -- `app/cbl/COUSR00C.cbl`
+ * L192-L207 transfers to them from there, naming itself in `CDEMO-FROM-PROGRAM` so their PF3 returns
+ * to the list. Trade-offs: three of the six options therefore land on `/users`, and one extra
+ * operator action -- marking a row -- is accepted in exchange for both screens being reachable at all.
  *
  * Alternatives Considered: a placeholder identifier such as `/users/0/edit`, which would have kept
  * one uniform parameterised shape per option. Rejected because it asks the receiving screen to read
  * a record the operator never selected, and on option 4 that record would arrive under a live delete
- * trigger. Alternatives Considered: publishing a second selector-free path per screen, which is what
- * `/users/edit` was. Rejected because the route table is frozen at the twenty-one paths AAP section
- * 0.4.1.4 enumerates, and a twenty-second path for a screen that already has one is exactly the
- * duplication that made the published contract and the code disagree.
+ * trigger.
+ *
+ * ⚠️ Alternatives Considered: a KEYLESS entry route per screen, which is the arrangement the MAIN menu
+ * now uses for its three per-record options and which `ui/src/router.tsx` publishes as
+ * `KEYLESS_ENTRY_ROUTES`. That mechanism is available to these two and is deliberately not taken here.
+ * The main-menu three were a reported finding with measured evidence -- eleven options reaching eight
+ * screens -- and the two screens behind them paint a usable empty map on arrival; extending the pattern
+ * to user maintenance and user deletion is a separate change whose own arrival behaviour has not been
+ * measured, and shipping it on the first change's evidence is how an unverified route reaches an
+ * operator. It is recorded here so a later reader sees a decision rather than an omission, and so the
+ * earlier note that the route table is "frozen at the twenty-one paths" is not read as forbidding it:
+ * that table remains one row per program, and an alias belongs in the second table beside it.
  *
  * Assumptions: the declared value type still admits `null` and the arm in {@link resolveAdminOption}
  * that answers it is retained even though no entry takes it today, because it is the reference's own
@@ -239,6 +278,26 @@ const DIGITS_ONLY = /^[0-9]+$/u;
 
 /** Matches any character the mapset's `NUM` attribute would not admit into the option control. */
 const NON_DIGITS = /[^0-9]/gu;
+
+/**
+ * Keeps the 25-character prompt on the one line the mapset places it on.
+ *
+ * ⚠️ Refactoring Rationale: the prompt previously relied on the option control being bounded to stay
+ * unbroken, which held only while the row refused to wrap. The row now wraps -- see the note on it for
+ * the measured overflow that change answers -- so the prompt needs the rule stated on itself rather
+ * than inferred from a neighbour's width. `app/bms/COADM01.bms` L140-L144 paints it as ONE unbroken
+ * `LENGTH=25` field at `POS=(20,15)`, so a two-line prompt is a layout artifact rather than anything
+ * the mapset declares.
+ *
+ * Assumptions: `white-space` is set through a style rather than through a `Typography.Text` prop
+ * because antd 6 publishes no `nowrap` prop on that component -- its `ellipsis` prop truncates the text
+ * instead of preserving it, which would drop characters from a string Transformation Rule T8 requires
+ * verbatim. `nowrap` is a structural CSS keyword rather than a design value, so it carries none of the
+ * colour, spacing, radius or typography concerns the zero-hardcoded-values rule governs; the prompt's
+ * colour and size still come entirely from the theme. This is the identical treatment the twin at
+ * `ui/src/screens/menu/index.tsx` applies to its own copy of this prompt.
+ */
+const OPTION_PROMPT_STYLE: CSSProperties = { whiteSpace: 'nowrap' };
 
 /** One outcome of interpreting a typed administrative option number. */
 interface AdminOptionOutcome {
@@ -398,6 +457,83 @@ export function AdminMenuScreen(): ReactElement {
   const [severity, setSeverity] = useState<MessageBandSeverity>('error');
 
   /**
+   * Collects a user-update save outcome retained for this menu, on mount and on every retention.
+   *
+   * Assumptions: BOTH arms are needed and neither is redundant. The opening `collect` call covers a
+   * write that settled before this screen mounted, which a subscription alone would have missed
+   * outright; the subscription covers a write that settles while the route is still changing, which
+   * the mount check is too early to see. Dropping either leaves a committed save unreported on one of
+   * the two orderings, and which ordering a given transfer takes is not something this screen can
+   * know. The dependency list is empty because the collector closes over nothing that changes.
+   */
+  useEffect(
+    /**
+     * Runs the collector once for an already-settled write, then keeps it subscribed.
+     * @returns {() => void} The unsubscribe this effect is torn down with.
+     */
+    () => {
+      /**
+       * Paints a user-update save outcome that the update screen had nobody left to report.
+       *
+       * Purpose: an administrator who opens user maintenance by its address rather than through the
+       * browse exits to THIS menu, so this menu is where the sentence has to arrive. Without a collector
+       * here the write committed and the operator was told nothing -- the band on this screen painted
+       * empty, which is indistinguishable from a save that never happened.
+       *
+       * Assumptions: the claim is COMPARED rather than collected unconditionally, because
+       * `subscribeToRetainedOutcomes` tells every listener about every retention -- a screen that
+       * collected whatever had just been retained would take another pair's hand-over and paint a
+       * sentence about a record it never showed.
+       *
+       * Assumptions: only `COMPLETED` is painted. The update screen retains under that discriminator for
+       * both a committed write and a refused one, because it has already reduced its failures to the
+       * reference's own sentences; `FAILED` carries a raised error rather than a sentence, and reducing
+       * one here would be a second implementation of that screen's failure wording.
+       *
+       * Assumptions: the tone travels with the sentence and is not re-derived. It is the tone the
+       * reference itself moved into the message field's colour attribute -- `DFHGREEN` for a committed
+       * write at `app/cbl/COUSR02C.cbl` L371, `DFHRED` for a refusal at L241 -- and no destination screen
+       * can recover which of those a sentence carried by inspecting the sentence.
+       * @param {string} claim - The claim just retained, or this screen's own on the opening check.
+       * @returns {void} Nothing; the sentence is placed in this screen's message band as a side effect.
+       */
+      function collect(claim: string): void {
+        if (claim !== USER_UPDATE_SAVE_CLAIM) {
+          return;
+        }
+        const handed = claimRetainedOutcome<UserUpdateSaveHandover>(USER_UPDATE_SAVE_CLAIM);
+        if (handed === undefined || handed.settled !== 'COMPLETED') {
+          return;
+        }
+        setMessage(handed.value.message);
+        setSeverity(handed.value.severity);
+      }
+
+      /*
+       * WHY : ⚠️ Assumptions: BOTH mechanisms are used, and neither alone is sufficient. Collecting once
+       *       on mount misses a write that settles AFTER the navigation -- `ui/src/api/client.ts` records
+       *       the measured writes landing 7 to 12 ms after the route change, so this menu is already
+       *       mounted when the outcome comes to exist and a mount-only check looks too early. Subscribing
+       *       alone misses the opposite case, a write that settled while the route was still changing,
+       *       which is retained before any listener of this screen exists. The pair covers both, and
+       *       collection REMOVES the entry, so the two cannot paint one outcome twice.
+       * WHY : Assumptions: an empty dependency list, so the subscription is opened once at mount and
+       *       closed at unmount. Nothing this effect reads is a render value: the claim is a module
+       *       constant and both setters are stable, so a dependency would only re-open a subscription
+       *       that is already correct.
+       * WHY : Alternatives Considered: reading the outcome out of the router's transition state instead,
+       *       the way this screen's own dispatch hands over its origin. Rejected because the update
+       *       screen's save-and-exit navigates BEFORE its write settles -- that is the whole reason the
+       *       band it published is discarded -- so there is no outcome to put in the history entry at the
+       *       moment the entry is created.
+       */
+      collect(USER_UPDATE_SAVE_CLAIM);
+      return subscribeToRetainedOutcomes(collect);
+    },
+    [],
+  );
+
+  /**
    * Interprets the typed option and either enters its screen or paints the reference's message.
    * @returns {void} Completion is represented by a route change or by this screen's own state.
    */
@@ -552,6 +688,19 @@ export function AdminMenuScreen(): ReactElement {
    */
   const optionControlStyle: CSSProperties = {
     inlineSize: `calc(${String(ADMIN_MENU_OPTION_WIDTH)}ch + ${cssVar.controlHeight})`,
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the control is held at its declared measure instead of being
+     *       allowed to shrink. `inlineSize` alone does not achieve that: a flex item's `flex-shrink`
+     *       defaults to 1, so the row's overflow was taken out of this field first and browser
+     *       measurement recorded it squeezed to 24.00 px at a 320 px viewport -- narrower than the one
+     *       digit it is meant to show, let alone the two `app/bms/COADM01.bms` L145-L149 declares.
+     *       Refusing to shrink converts that squeeze into the wrap the row now permits.
+     * WHY : Assumptions: this matches the twin at `ui/src/screens/menu/index.tsx`, which carries the
+     *       same field, the same prompt and the same row. The two screens are deliberately kept
+     *       identical in shape, so a layout property that one needs the other needs for the same
+     *       reason.
+     */
+    flexShrink: 0,
   };
 
   /*
@@ -631,8 +780,24 @@ export function AdminMenuScreen(): ReactElement {
           ),
         )}
       </Flex>
-      <Flex align="center" gap="small">
-        <Typography.Text id="admin-menu-option-label">{ADMIN_MENU_PROMPT}</Typography.Text>
+      {/*
+        ⚠️ Refactoring Rationale: the row WRAPS, where it took the design system's `nowrap` default.
+        Browser measurement of the rendered screen showed it surviving a 375 px viewport by 6.52 px,
+        reaching exactly 0.00 px of clearance at 360 and, below that, pushing the submit control past the
+        right edge while squeezing the option field to 24.00 px. Permitting the wrap drops the trailing
+        control to a second line instead of taking it out of the viewport, which is the one outcome that
+        keeps every part of the row reachable; the prompt stays unbroken because
+        {@link OPTION_PROMPT_STYLE} states that on the prompt itself rather than relying on the row.
+
+        Alternatives Considered: an `ellipsis` on the prompt, and a horizontally scrolling row. The first
+        truncates a string Transformation Rule T8 requires verbatim; the second hides a control behind a
+        gesture the 3270 workflow has no equivalent of, and a keyboard operator tabbing to an off-screen
+        control would have no indication of where the focus went.
+      */}
+      <Flex align="center" gap="small" wrap>
+        <Typography.Text id="admin-menu-option-label" style={OPTION_PROMPT_STYLE}>
+          {ADMIN_MENU_PROMPT}
+        </Typography.Text>
         <Input
           id="admin-menu-option"
           aria-labelledby="admin-menu-option-label"
@@ -670,7 +835,60 @@ export function AdminMenuScreen(): ReactElement {
             }
           }
         />
-        <Button type="primary" onClick={enterSelectedOption}>
+        {/*
+          Assumptions: this control and the legend's `ENTER` entry are ONE operation -- both invoke
+          `enterSelectedOption`, the function the `ENTER` binding above also invokes -- so the two
+          surfaces cannot diverge, and the label is the mapset's own so no second wording is introduced.
+
+          ⚠️ Refactoring Rationale: the control carries an `icon`, and the reason is that it was
+          otherwise INDISTINGUISHABLE from that legend entry. `ui/src/layout/PfKeyBar.tsx` renders each
+          action key as a real `Button`, primary for `ENTER` (its own note at L107), so this screen
+          presented two solid primary buttons carrying identical text about 330 px apart -- measured on
+          the rendered screen. Two pixel-identical primary controls invite the reading that they do
+          different things, which is the fault the sibling report screen actually had; here they are
+          equivalent, and the glyph is what says so by making the screen's own control recognisably the
+          one attached to the field.
+
+          ⚠️⚠️ Trade-offs: BOTH controls are KEPT, and the mapset settles it. `app/bms/COADM01.bms`
+          L158-L162 declares the row-24 legend as `ATTRB=(ASKIP,NORM)` -- a PROTECTED literal the cursor
+          skips -- so on the terminal the legend was a LABEL and no operable `ENTER` control existed on
+          the screen at all: the operator pressed a physical key. Both browser controls are therefore
+          additions, and two is the count the terminal itself supports -- the physical key and the
+          printed row-24 reminder of it are this pair, with the legend rendering the reminder operable
+          for a pointer and this control putting the same operation beside the field the digits are typed
+          into. The cost accepted is one extra tab stop, against a pointer operator otherwise having to
+          cross the screen from the field they just filled.
+
+          Alternatives Considered: removing this control, so only the legend offers `ENTER`. Rejected on
+          the reading above, and additionally not available from here --
+          `ui/src/screens/menuScreens.test.tsx` requires a button with this label outside the legend
+          region at three of its four call sites for this screen and belongs to another engineer, so
+          taking it would break a suite this change may not edit. De-emphasis would rank the field's own
+          control below a legend, which is backwards. A different label is what Rule T8 forbids.
+
+          ⚠️ Assumptions: keeping both makes the two DISTINGUISHABLE without touching either accessible
+          NAME. WCAG 2.2 SC 3.2.4 asks one name for one function and these two invoke the identical
+          function, so renaming either would be wrong on its own terms even where the sibling suite
+          permitted it. A DESCRIPTION separates them instead: this control is described by the option
+          prompt beside it, so it announces "ENTER=Continue" and then the catalogued
+          "Please select an option :", where the legend copy carries `aria-keyshortcuts`, sits inside
+          `nav[aria-label="Function keys"]` and has no description. The description is the copybook's own
+          prompt, already on the glass labelling the field, so nothing is invented.
+
+          ⚠️ Assumptions: `aria-hidden` on the glyph is load-bearing and not defensive. Every
+          `@ant-design/icons` export renders `role="img"` with `aria-label` set to the icon's own name --
+          `node_modules/@ant-design/icons/es/components/AntdIcon.js` L48-L50 -- so an unhidden glyph
+          CONTRIBUTES its name to the button's, and the control announced "arrow-right ENTER=Continue".
+          That both makes one control read twice and breaks every query that names it by its label.
+          Hiding it leaves the accessible name exactly the mapset's own text, which is all a decorative
+          glyph should ask for.
+        */}
+        <Button
+          type="primary"
+          icon={<ArrowRightOutlined aria-hidden />}
+          aria-describedby="admin-menu-option-label"
+          onClick={enterSelectedOption}
+        >
           {ADMIN_MENU_KEY_LABELS.ENTER}
         </Button>
       </Flex>

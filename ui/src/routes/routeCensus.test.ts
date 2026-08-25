@@ -340,6 +340,49 @@ function theDeliveredScreensArePresent(): void {
 }
 
 /**
+ * The route constants whose only purpose is to give a per-record screen a keyless address.
+ *
+ * ⚠️ Assumptions: they are named as CONSTANT IDENTIFIERS rather than as path strings, because that is
+ * the form the mounted region holds -- `ui/src/router.tsx` writes `path: CARD_DETAIL_ENTRY_ROUTE` and
+ * the constant is composed in `ui/src/routes/navigation.ts`, so the literal `/cards/view` appears
+ * nowhere in the region this file measures. Matching the identifier is therefore the only text check
+ * available, and it is also the more useful one: it fails when the mount is removed, which is the
+ * regression, and not when the path is renamed, which is a decision the constant carries.
+ */
+const KEYLESS_ENTRY_CONSTANTS: readonly string[] = [
+  'CARD_DETAIL_ENTRY_ROUTE',
+  'CARD_UPDATE_ENTRY_ROUTE',
+  'TRANSACTION_DETAIL_ENTRY_ROUTE',
+];
+
+/**
+ * The three keyless entry routes are still mounted, so no menu option can lose its destination.
+ *
+ * ⚠️ Purpose: this case is NEW and it is a FLOOR in the same sense {@link theDeliveredScreensArePresent}
+ * is. The discovered cases above cannot report it: all three addresses mount screens that are ALSO
+ * mounted at a keyed path, so deleting a keyless route leaves every screen imported, mounted and
+ * accounted for while three main-menu options quietly collapse back onto the browses that mint their
+ * record keys. `ui/src/routerRoutes.test.tsx` catches the same regression by counting distinct menu
+ * destinations; this case catches it in the router's own text, which is where the deletion would happen.
+ *
+ * Assumptions: it asserts the mount and not the alias table beside it. A row published in
+ * `KEYLESS_ENTRY_ROUTES` but never mounted is the failure this pairs against, and that direction is
+ * held by the reachability sweep in `ui/src/routerReachability.test.tsx`, which projects its addresses
+ * from that table and renders each one.
+ * @returns {void} Nothing; assertions raise on failure.
+ */
+function theKeylessEntryRoutesAreMounted(): void {
+  expect(ROUTES_REGION.length, 'the mounted route region resolved empty').toBeGreaterThan(0);
+
+  for (const constant of KEYLESS_ENTRY_CONSTANTS) {
+    expect(
+      ROUTES_REGION.includes(`path: ${constant}`),
+      `ui/src/router.tsx mounts no route at ${constant}, so a main-menu option has no destination`,
+    ).toBe(true);
+  }
+}
+
+/**
  * Registers the route census cases.
  *
  * Assumptions: every case is a hoisted NAMED function passed to `it` by name rather than an inline
@@ -356,6 +399,7 @@ function routeCensusCases(): void {
   it('names no screen directory that does not exist', noRouteNamesAMissingScreen);
   it('references exactly as many screens as are authored', theTwoPopulationsAgree);
   it('still holds every screen this migration has delivered', theDeliveredScreensArePresent);
+  it('still mounts every keyless entry route', theKeylessEntryRoutesAreMounted);
 }
 
 describe('route census', routeCensusCases);

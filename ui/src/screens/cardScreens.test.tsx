@@ -527,9 +527,26 @@ function accessibleLabel(label: string): string {
  *
  * Refactoring Rationale: what this case now asserts is the property that survives the change and is the
  * one it existed to protect: on the selector arrival the record view offers no way to EDIT anything. Both
- * controls are present and both are disabled, which is what `DFHBMPRF` means, and no third control exists.
- * The browse cases below still prove the workflow the header points at; the rendering of the two fields on
- * each arrival is asserted in `ui/src/screens/cardDetail/cardDetail.test.tsx`, beside the edit chain.
+ * controls are present and both refuse input, and no third control exists. The browse cases below still
+ * prove the workflow the header points at; the rendering of the two fields on each arrival is asserted in
+ * `ui/src/screens/cardDetail/cardDetail.test.tsx`, beside the edit chain.
+ *
+ * ⚠️ Refactoring Rationale: "refuse input" is asserted as READ-ONLY-AND-ENABLED, where it was asserted as
+ * disabled. The disabled expectation was false against the mapset. `1300-SETUP-SCREEN-ATTRS` moves
+ * `DFHBMPRF` into both fields on this arrival (`app/cbl/COCRDSLC.cbl` L507-L508), and `DFHBMPRF` is
+ * PROTECT with the modified-data tag set -- not `DFHBMASK`, the autoskip constant. A 3270 protected field
+ * is readable and cursor-addressable and refuses only TYPING, and the program positions the cursor into
+ * one of these two fields on this very arrival (the `WHEN OTHER` arm at L520-L523). Its "SETUP COLOR"
+ * block then moves `DFHDFCOL` into both fields' colour subfields under the identical condition
+ * (L526-L531), so a protected field is painted at FULL intensity: the source is asserting that protection
+ * changes the attribute byte and nothing else. `disabled` claims more than that -- it removes the control
+ * from the focus order and from the accessibility tree -- so the two identifiers an operator arrives to
+ * read were unreachable by keyboard and announced by nothing.
+ *
+ * ⚠️ Assumptions: both halves are asserted, because either alone would pass against a regression. Enabled
+ * alone would pass against a control the operator can type the record's own key over; the read-only
+ * attribute alone would pass against a disabled control, since `readonly` and `disabled` can both be
+ * present at once.
  * @returns {Promise<void>} Resolves once the record has rendered.
  */
 async function detailRendersNoSearchFields(): Promise<void> {
@@ -543,12 +560,13 @@ async function detailRendersNoSearchFields(): Promise<void> {
   expect(controls).toHaveLength(2);
   controls.forEach(
     /**
-     * Asserts one rendered control accepts no input on this arrival.
+     * Asserts one rendered control accepts no input on this arrival yet stays reachable.
      * @param {HTMLElement} control - One rendered text control.
      * @returns {void} Nothing; the assertion carries the outcome.
      */
     (control: HTMLElement): void => {
-      expect(control).toBeDisabled();
+      expect(control).toHaveAttribute('readonly');
+      expect(control).toBeEnabled();
     },
   );
 }

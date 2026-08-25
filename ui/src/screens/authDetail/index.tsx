@@ -55,10 +55,20 @@
  * remembering which turn it is on.
  */
 
-import { Button, Descriptions, Flex, Popconfirm, Result, Spin, Typography, theme } from 'antd';
+import {
+  Button,
+  ConfigProvider,
+  Descriptions,
+  Flex,
+  Modal,
+  Result,
+  Spin,
+  Typography,
+  theme,
+} from 'antd';
 import type { DescriptionsProps } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
-import type { CSSProperties, ReactElement } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties, FC, ReactElement, ReactNode } from 'react';
 import { useNavigate, useParams } from 'react-router';
 
 import {
@@ -67,17 +77,30 @@ import {
   setAuthorizationFraudState,
 } from '../../api/authorization';
 import type { PendingAuthDetailScreen } from '../../api/authorization';
-import { isApiRequestError } from '../../api/client';
+import {
+  isApiRequestError,
+  isRepeatableFailure,
+  isTransientFailure,
+  retainOutcomeAcrossNavigation,
+  withoutConcurrentDuplicate,
+} from '../../api/client';
 import type { ApprovalStatus, FraudAction } from '../../api/types';
 import { useShellSlot } from '../../layout/AppShell';
+import { busyAnnouncement } from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { usePfKeys } from '../../layout/usePfKeys';
 import {
   INVALID_KEY_PRESSED,
+  PERSISTENT_FAILURE_REPORT_IT,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
+  TRANSIENT_FAILURE_TRY_AGAIN,
   UNEXPECTED_ABEND_OCCURRED,
 } from '../../messages/messages';
+import { MONEY_PICTURES, renderMoney } from '../../format/money';
+import type { RenderedMoney } from '../../format/money';
 import { navigateSafely } from '../../routes/navigation';
+import { destructiveFocusTheme } from '../../theme/antdTheme';
 import {
   BMS_TEXT_COLOR_TOKENS,
   DFH_RUNTIME_COLOR_TOKENS,
@@ -251,6 +274,76 @@ export const FRAUD_REPORTED: FraudAction = 'F';
 export const FRAUD_WITHDRAWN: FraudAction = 'R';
 
 /**
+ * Identifies the element inside the fraud confirmation that names the record it acts on.
+ *
+ * Assumptions: it exists so both of the confirmation's own controls can point at it with
+ * `aria-describedby`. A reviewer who reaches the confirming control by keyboard hears the record named
+ * as part of that control, rather than having to have read a description they may have arrived past.
+ */
+export const FRAUD_CONFIRMATION_RECORD_ID = 'auth-detail-fraud-confirmation-record';
+
+/**
+ * Names the record the fraud confirmation acts on, and the tag the confirmation would write.
+ *
+ * ⚠️ Purpose: this is the finding this function exists for. Browser validation reported that no
+ * confirmation on this screen carried a description, that none named the record it acted on, and that
+ * the fraud prompt did not distinguish marking from removing -- its only text was the button's own
+ * legend echoed back. A confirmation that names nothing asks a reviewer to consent to "this one",
+ * which on a screen that can step to the next authorization under the prompt is not an identification
+ * at all.
+ *
+ * ⚠️ Assumptions: every word this puts on screen is a label the mapset already paints -- `Card #:`,
+ * `Auth Date:`, `Auth Time:`, `Tran Id:` and `Fraud Status:` from {@link AUTH_DETAIL_FIELD_LABELS} --
+ * and every value is the record's own. Nothing here is composed prose. That is a constraint rather
+ * than a style choice: transformation rule T8 carries user-visible strings across verbatim, and no
+ * baseline source paints a fraud confirmation question. `COUSR03C` has one for its own delete --
+ * `'Press PF5 key to delete this user ...'` -- and `COPAUS1C` has no counterpart, so authoring one
+ * here would be inventing operator text. The gap is reported rather than filled.
+ *
+ * ⚠️ Assumptions: the four identifying fields are the ones that identify the ROW rather than describe
+ * it. `cpy/CIPAUDTY.cpy` L19 to L54 keys the pending-authorization detail by account with the
+ * authorization date and time, and `COPAU01.bms` paints the card number and the fifteen-character
+ * transaction identifier beside them -- so date, time, card and transaction identifier together name
+ * one authorization to a reviewer who is looking at the same four values on the glass behind the
+ * prompt.
+ *
+ * ⚠️ Assumptions: the tag that WOULD be written is shown under the mapset's own `Fraud Status:` label,
+ * which is how marking is distinguished from removing without a sentence for either. `F` and `R` are
+ * the reference's own condition values on `PA-AUTH-FRAUD` at `cpy/CIPAUDTY.cpy` L50 to L52, and they
+ * are the two characters a reviewer of this screen already reads in that field.
+ *
+ * Alternatives Considered: titling the prompt with `'AUTH MARKED FRAUD...'` or
+ * `'AUTH FRAUD REMOVED...'` from the `COPAUS1C` catalog, which do name the two directions. Rejected
+ * because both are OUTCOME sentences -- `COPAUS1C.cbl` L531 to L538 reaches them only from the
+ * `STATUS-OK` arm after a syncpoint -- so either would announce a completed write as the question
+ * about whether to perform it, which is the one thing a confirmation must not do.
+ * @param {PendingAuthDetailScreen} detail - The record on the glass.
+ * @param {FraudAction} action - The tag this confirmation would write.
+ * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
+ * @returns {ReactElement} The record naming, ready to be the confirmation's description.
+ */
+function fraudConfirmationRecord(
+  detail: PendingAuthDetailScreen,
+  action: FraudAction,
+  tokens: AntdCssVariables,
+): ReactElement {
+  const labels = AUTH_DETAIL_FIELD_LABELS;
+  /*
+   * WHY : Assumptions: fixed pitch, for the reason `valueCellStyle` applies it to these same four
+   *       fields in the record above -- a masked card number, a date, a time and an identifier are
+   *       read position by position, and a proportional face makes two of them differing in one digit
+   *       look alike.
+   */
+  const style: CSSProperties = { fontFamily: tokens[TYPOGRAPHY_TOKENS.fixedPitchData] };
+
+  return (
+    <Typography.Text id={FRAUD_CONFIRMATION_RECORD_ID} style={style}>
+      {`${labels.cardNumber} ${detail.cardNumber} ${labels.authDate} ${displayText(detail.authDate)} ${labels.authTime} ${displayText(detail.authTime)} ${labels.transactionId} ${detail.transactionId} ${labels.fraudStatus} ${action}`}
+    </Typography.Text>
+  );
+}
+
+/**
  * Column counts for the two record blocks, per viewport width.
  *
  * ⚠️ Refactoring Rationale: this is a BREAKPOINT MAP and was the bare number `2`, which antd treats as
@@ -357,23 +450,54 @@ export function fraudOutcomeMessage(action: FraudAction): string {
  * document is reported with `UNEXPECTED ABEND OCCURRED.`, which is the sentence the reference uses when
  * it cannot say more -- inventing a sentence for a failure the service did not describe would put text
  * on the band that no program owns.
+ *
+ * ⚠️ Assumptions: the service's own sentence is preferred over both authored ones, and no branch on
+ * the failure's `kind` appears -- deliberately, having been checked rather than skipped. Of the four
+ * kinds only `PROBLEM` can arrive with an authored sentence: `ui/src/api/client.ts` builds `RESPONSE`
+ * through `unusableAnswerFailure` at L836 to L848 and both `TIMEOUT` and `NETWORK` through the same
+ * `synthesisedProblem`, whose `message` is `null` in every case. So a `kind === 'PROBLEM'` gate would
+ * select exactly the values this null test already selects, and adding it would be a branch that can
+ * never differ from its own fall-through.
+ *
+ * ⚠️ Refactoring Rationale: a momentary condition is now reported in DIFFERENT words from a permanent
+ * one, and this function used to report both as `UNEXPECTED ABEND OCCURRED.` The note that stood here
+ * recorded the reason as an absent sentence -- `PROGRAM_MESSAGES.COPAUS1C` catalogues three and none is
+ * about reaching the service -- and reported the gap rather than authoring operator text. The shared
+ * catalogue now declares both sentences, so the note is deleted rather than softened and the
+ * distinction `isTransientFailure` already draws is finally sayable: a gateway that timed out is
+ * answered with `TRANSIENT_FAILURE_TRY_AGAIN`, which tells the reviewer to try again, where the abend
+ * sentence told them the program had failed. Reporting an unreachable service as an abend is not a
+ * lesser sentence, it is a wrong one.
+ *
+ * ⚠️ Assumptions: the abend sentence is KEPT for a rejection the transport did not classify at all --
+ * anything that is not an `ApiRequestError`, which is a raised error rather than an answered request.
+ * That is exactly the condition the reference's own sentence exists for: the program could not say
+ * more. The two authored sentences describe a request that reached a classifier, so applying one to a
+ * rejection that never did would state a remedy nothing established.
  * @param {unknown} failure - Whatever the request rejected with.
  * @returns {string} The sentence to paint on the message line.
  */
 export function detailFailureMessage(failure: unknown): string {
+  if (!isApiRequestError(failure)) {
+    return UNEXPECTED_ABEND_OCCURRED;
+  }
   /*
    * WHY : Assumptions: the document's own message is checked for being ABSENT as well as blank, because
    *       `ApiError.message` is declared nullable -- the 78-character band field the reference paints is
    *       empty on a response that carries no sentence, and the contract models that as `null` rather
    *       than as an empty string. Testing only the trimmed length would dereference a null.
    */
-  if (isApiRequestError(failure)) {
-    const reported = failure.problem.message;
-    if (reported !== null && reported.trim().length > 0) {
-      return reported;
-    }
+  const reported = failure.problem.message;
+  if (reported !== null && reported.trim().length > 0) {
+    return reported;
   }
-  return UNEXPECTED_ABEND_OCCURRED;
+  /*
+   * WHY : Assumptions: the choice is made on the failure's own `transient` judgement read through
+   *       `isTransientFailure`, not by comparing its `kind` or its status here. The client derives that
+   *       judgement once from the kind and a closed status list, so a second derivation in this screen
+   *       would be a copy free to drift from it.
+   */
+  return isTransientFailure(failure) ? TRANSIENT_FAILURE_TRY_AGAIN : PERSISTENT_FAILURE_REPORT_IT;
 }
 
 /**
@@ -423,6 +547,43 @@ type ColorTokenName = Extract<
 const AUTH_DETAIL_APPROVED: ApprovalStatus = 'A';
 
 /**
+ * The edit mask this screen's one amount is rendered through.
+ *
+ * ⚠️ Assumptions: the picture is chosen rather than defaulted, because `COPAU01.bms` declares no
+ * `PICOUT` on `AUTHAMT` -- so unlike every other money surface in the application there is no mapset
+ * mask to transcribe, and the mask has to be taken from the program that paints the field.
+ * `COPAUS1C.cbl` L52 declares `WS-AUTH-AMT PIC -zzzzzzz9.99` and moves the amount through it at L309:
+ * twelve characters, eight integer positions, no grouping. `MONEY_PICTURES.transactionAmount` is
+ * `+99999999.99` -- eight integer positions, ungrouped, width twelve -- so it matches on positions,
+ * width and grouping. `accountGrouped` is fifteen wide, nine integer positions and grouped;
+ * `billPayBalance` carries ten integer positions. This is the one declared picture the reference
+ * justifies, and the summary screen resolves to the same one from its own two program masks, so the
+ * two authorization screens render money identically.
+ */
+const AUTH_DETAIL_MONEY_PICTURE = MONEY_PICTURES.transactionAmount;
+
+/**
+ * The name of the token the money renderer resolves a sign to.
+ *
+ * ⚠️ Purpose: this exists so the widening below states its PROVENANCE instead of merely being wide.
+ * `RenderedMoney.colorToken` is declared as the whole `AntdTokenName` surface at
+ * `ui/src/format/money.ts` L418, so an amount's tone cannot be assigned to {@link ColorTokenName} however
+ * narrow the value actually is at run time -- the money authority publishes a wide name, and a type
+ * cannot narrow it after the fact without asserting something it has not proved.
+ *
+ * Alternatives Considered: adding `MONEY_SIGN_TEXT_TOKENS`' members to {@link ColorTokenName} as a third
+ * audited map. Rejected because it would not compile the assignment either: the union would gain the
+ * three token names, and the VALUE being assigned would still be typed as the wide name rather than as
+ * one of them, so the error would move rather than close.
+ *
+ * Alternatives Considered: an `as ColorTokenName` assertion at the assignment. Rejected on the ground
+ * `ui/src/screens/billPay/index.tsx` L1590 to L1593 records for the same problem -- an assertion
+ * silences the checker without proving anything, whereas resolving the reference through `String` is an
+ * identity at run time and a real narrowing at compile time.
+ */
+type MoneyToneName = RenderedMoney['colorToken'];
+
+/**
  * One rendered row of a record block: the painted label, the value, and the value's measured tone.
  *
  * Assumptions: the rows are DATA rather than markup, so each block is declared once as an ordered
@@ -440,9 +601,27 @@ export interface AuthDetailRow {
   /** The value as the service rendered it, already normalised away from `null`. */
   readonly value: string;
   /** Token for the value's measured `COLOR=` operand, resolved by the caller against the theme. */
-  readonly tone: ColorTokenName;
+  /*
+   * WHY : ⚠️ Assumptions: the union admits the money authority's token as well as the two audited BMS
+   *       maps, and the widening is confined to this ONE member rather than applied to
+   *       {@link ColorTokenName} itself -- every other tone on this screen still resolves through the
+   *       narrow union, so nothing else gains the ability to name a duration or a radius. Every value
+   *       assigned here still originates in an audited map: `pink`, `blue` and `approvalToneToken` are
+   *       all {@link ColorTokenName}, and the amount's tone comes from `MONEY_SIGN_TEXT_TOKENS`.
+   */
+  readonly tone: ColorTokenName | MoneyToneName;
   /** Whether the value is a fixed-width datum whose columns must align. */
   readonly fixedPitch: boolean;
+  /**
+   * Whether the value's own pad characters carry meaning and must survive to the screen.
+   *
+   * ⚠️ Assumptions: exactly one row sets this -- the edited amount -- and it is optional rather than
+   * required for that reason: nineteen rows carrying `preserveSpacing: false` would be nineteen
+   * declarations of an absence. A browser collapses a run of spaces under normal white-space handling,
+   * which for an edit-masked amount means discarding the leading pad that IS the column, so the flag
+   * marks the one row where that collapse would lose information rather than whitespace.
+   */
+  readonly preserveSpacing?: boolean;
 }
 
 /**
@@ -519,6 +698,13 @@ export function authorizationRows(detail: PendingAuthDetailScreen): readonly Aut
    *       colouring them conditionally would be this screen inventing a rule the mapset does not have.
    */
   const red = BMS_TEXT_COLOR_TOKENS.RED;
+  /*
+   * WHY : Assumptions: the amount is rendered ONCE here rather than in the cell builder, because the
+   *       row's tone depends on the sign the renderer classifies -- so rendering it later would mean
+   *       either classifying the sign twice or carrying the classification separately from the text it
+   *       describes. `AUTH_DETAIL_MONEY_PICTURE` records which picture and why.
+   */
+  const approvedAmount = renderMoney(detail.approvedAmount, AUTH_DETAIL_MONEY_PICTURE);
   return [
     {
       key: 'cardNumber',
@@ -562,12 +748,50 @@ export function authorizationRows(detail: PendingAuthDetailScreen): readonly Aut
       tone: blue,
       fixedPitch: true,
     },
+    /*
+     * WHY : ⚠️ Purpose: the amount is the one row built from a rendered form rather than from the
+     *       contract member directly, and this is the finding's own resolution. Browser validation
+     *       counted four mutually incompatible money renderings across the application and named this
+     *       screen's bare `123.45` -- no sign, no pad, no column -- as one of them. `renderMoney`
+     *       routes it through the application's single money authority.
+     * WHY : ⚠️ Assumptions: the picture is `transactionAmount` because this mapset declares NO `PICOUT`
+     *       on its amount field, so there is no mapset mask to transcribe and the mask lives in the
+     *       program instead: `COPAUS1C.cbl` L52 declares `WS-AUTH-AMT PIC -zzzzzzz9.99` and paints it
+     *       at L309 -- twelve characters, eight integer positions, ungrouped. Of the three declared
+     *       pictures only `transactionAmount` (`+99999999.99`) matches on all three counts;
+     *       `accountGrouped` is fifteen wide, nine integer positions and grouped, and `billPayBalance`
+     *       carries ten integer positions.
+     * WHY : ⚠️ Trade-offs: the declared picture zero-FILLS and prints `+` on a positive where
+     *       `-zzzzzzz9.99` zero-SUPPRESSES and prints a blank, so `123.45` renders `+00000123.45`.
+     *       Accepted: reproducing the suppression here would add a fifth rendering to the screen the
+     *       finding exists because of. The digits are the service's own either way -- `renderMoney`
+     *       masks text and never parses a number, so the packed-decimal exactness of
+     *       `PA-APPROVED-AMT PIC S9(10)V99 COMP-3` (`cpy/CIPAUDTY.cpy` L35) survives, and
+     *       `applyMoneyEditMask` PRESERVES a value too wide for its picture instead of truncating it.
+     *       That last property is what retires the divergence this screen used to register: the
+     *       reference's own mask holds eight integer positions against a ten-digit source and so
+     *       truncates a large amount on the terminal, and masking here still cannot.
+     * WHY : ⚠️ Assumptions: the tone is the token the RENDERER returns, for all three sign cases and
+     *       unconditionally. `MONEY_SIGN_TEXT_TOKENS` in `ui/src/theme/tokens.ts` is the application's
+     *       one authority for money hue, and `ui/src/screens/accountView/index.tsx` L1050 and
+     *       `ui/src/screens/billPay/index.tsx` L1594 resolve it the same unconditional way -- so this
+     *       amount paints the same hue as the same sign of the same magnitude does on either of them,
+     *       which is the cross-screen agreement the money finding measured the absence of.
+     * WHY : ⚠️ Trade-offs: `AUTHAMT`'s own `COLOR=BLUE` operand in `COPAU01.bms` is therefore not
+     *       honoured, and a positive amount resolves to `DEFAULT` instead. Knowing divergence, and the
+     *       narrower of the two available: honouring the operand would put a fourth money hue on the
+     *       glass and would make an ordinary positive amount here differ from the identical amount on
+     *       the account view. The operand is not lost -- every non-money value on this screen still
+     *       resolves through `blue` -- so the mapset's colour vocabulary survives everywhere it is not
+     *       competing with the money authority.
+     */
     {
       key: 'approvedAmount',
       label: AUTH_DETAIL_FIELD_LABELS.amount,
-      value: detail.approvedAmount,
-      tone: blue,
+      value: approvedAmount.text,
+      tone: approvedAmount.colorToken,
       fixedPitch: true,
+      preserveSpacing: true,
     },
     {
       key: 'posEntryMode',
@@ -713,6 +937,44 @@ function toDescriptionItems(
 }
 
 /**
+ * Resolves one theme token name to a value a CSS `color` property accepts.
+ *
+ * ⚠️ Purpose: close the widening at the ONE place it can be closed with a proof rather than an
+ * assertion. `RenderedMoney.colorToken` is declared as the whole `AntdTokenName` surface at
+ * `ui/src/format/money.ts` L418, so a tone carrying an amount's sign token is typed as any key of the
+ * theme's token map -- and that map's value type spans the numeric durations, the radii and the
+ * elevation objects, none of which a `color` property accepts. Indexing it therefore yields a union
+ * wider than a colour however narrow the value is at run time.
+ *
+ * ⚠️ Refactoring Rationale: this replaces a bare `String(tokens[name])`, which was the narrowing
+ * `ui/src/screens/billPay/index.tsx` L1586 to L1601 records for the identical problem. Measured, it does
+ * not close it: `@typescript-eslint/no-base-to-string` reports `String` applied to a union containing an
+ * object type, because such a value stringifies to `[object Object]` -- so the call silenced the
+ * assignment and left the diagnostic. The `typeof` test below is the narrowing that actually holds: it
+ * proves the value is a string instead of asserting it, and the checker accepts the proof.
+ *
+ * ⚠️ Assumptions: the fallback is unreachable by construction and is `currentColor` rather than a
+ * thrown error or an invented value. Every name that reaches here originates in an audited colour map
+ * -- `BMS_TEXT_COLOR_TOKENS`, `DFH_RUNTIME_COLOR_TOKENS` or `MONEY_SIGN_TEXT_TOKENS` -- and the design
+ * system publishes each of those as a `var(--ant-...)` REFERENCE, which is a string for every token it
+ * emits including the numeric ones. So the second branch cannot be taken by any caller this module has.
+ * It is present because the type admits what the callers do not, and it resolves to the inherited
+ * colour: one of the six literals this tree's no-hardcoded-values rule admits, so a token that somehow
+ * failed to resolve leaves the text readable rather than painting an invented colour or crashing a
+ * render. Alternatives Considered: throwing on the second branch, which would state the impossibility
+ * loudly. Rejected because it puts a throw on a render path to report a condition the type system
+ * cannot produce, and an unreadable screen is a worse answer than an inherited colour.
+ * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
+ * @param {AntdTokenName} name - The token whose reference is wanted.
+ * @returns {string} The token's CSS-variable reference, or the inherited colour if it resolved to no
+ *   string.
+ */
+function colorValue(tokens: AntdCssVariables, name: AntdTokenName): string {
+  const resolved: unknown = tokens[name];
+  return typeof resolved === 'string' ? resolved : 'currentColor';
+}
+
+/**
  * Builds the style for one value cell from its measured tone and width class.
  *
  * ⚠️ Trade-offs: the amount reaches this function as an exact decimal STRING and is rendered
@@ -738,8 +1000,25 @@ function toDescriptionItems(
  * @returns {CSSProperties} The style for that row's value.
  */
 function valueCellStyle(tokens: AntdCssVariables, row: AuthDetailRow): CSSProperties {
-  const base: CSSProperties = { color: tokens[row.tone], overflowWrap: 'break-word' };
-  return row.fixedPitch ? { ...base, fontFamily: tokens[TYPOGRAPHY_TOKENS.fixedPitchData] } : base;
+  const base: CSSProperties = {
+    color: colorValue(tokens, row.tone),
+    overflowWrap: 'break-word',
+  };
+  /*
+   * WHY : ⚠️ Refactoring Rationale: `white-space: pre` is applied to the one row that asks for it,
+   *       and it is what makes the edit mask visible at all. The mask pads with spaces, a browser
+   *       collapses a run of spaces under normal handling, and the collapse would leave the amount
+   *       starting at its first significant digit -- the exact rendering the money finding measured.
+   *       `renderMoney` returns the property for that reason, and the value is taken from the row
+   *       rather than written here so the two screens cannot disagree about it.
+   * WHY : Assumptions: the two decorations are applied in sequence rather than as one conditional
+   *       expression, because they are independent -- a row can want fixed pitch without pad
+   *       preservation, which nineteen of these twenty rows do.
+   */
+  const pitched = row.fixedPitch
+    ? { ...base, fontFamily: tokens[TYPOGRAPHY_TOKENS.fixedPitchData] }
+    : base;
+  return row.preserveSpacing === true ? { ...pitched, whiteSpace: 'pre' } : pitched;
 }
 
 /**
@@ -763,6 +1042,78 @@ interface ScreenAnnouncement {
   readonly text: string;
   /** The severity the reference painted that sentence in. */
   readonly severity: MessageBandSeverity;
+}
+
+/**
+ * The sentence a fraud transition settled with, handed to whichever screen is there to read it.
+ *
+ * ⚠️ Purpose: PF3 is NOT refused while a fraud write is outstanding -- its binding below carries no
+ * `disabled` -- so a reviewer who confirms the transition and then leaves unmounts this screen while the
+ * write is still in flight. Every setter in the continuation then runs against a component React has
+ * already discarded, silently, and the reviewer is never told whether the row they reported was
+ * reported. `retainOutcomeAcrossNavigation` in `ui/src/api/client.ts` exists for exactly that measured
+ * defect, and this is the shape it carries for this pair of screens.
+ *
+ * Assumptions: an ALIAS of {@link ScreenAnnouncement} rather than a second interface with the same two
+ * members. What is handed over is precisely what would have been painted here -- the sentence and the
+ * severity the reference painted it in -- so declaring a parallel shape would create two definitions of
+ * one payload, free to drift while both continued to compile.
+ */
+export type FraudTransitionHandover = ScreenAnnouncement;
+
+/**
+ * Name the fraud outcome is retained and collected under.
+ *
+ * Assumptions: COMPOSED from the summary route both screens already hold rather than written out as a
+ * literal in each, which is the arrangement `ui/src/screens/userUpdate/index.tsx` L175 settles for the
+ * same problem -- the retention is here and the collection is in the summary, so the claim is a name two
+ * modules must agree on, and deriving both from one route makes agreement structural.
+ *
+ * ⚠️ Alternatives Considered: exporting this constant and importing it in the summary, which is what
+ * `ui/src/api/client.ts` assumes when it records that "both call sites are in the same screen". Rejected
+ * for the reason that precedent records: every screen is mounted through `lazy()` in
+ * `ui/src/router.tsx`, so a value import from this module into the summary would fold this screen's
+ * chunk into the summary's and charge every operator who opens the list for code they may never reach.
+ * The suffix is the only duplicated text and it is inert -- a mismatch leaves an outcome uncollected
+ * rather than mis-routed, and the owned cases in `ui/src/test/authDetail.test.tsx` and
+ * `ui/src/test/authSummary.test.tsx` fail on exactly that.
+ *
+ * Trade-offs: this module declares its own {@link AUTHORIZATION_SUMMARY_ROUTE} while
+ * `ui/src/routes/navigation.ts` L235 declares one of the same name and value, and the summary composes
+ * its half of this claim from the routing tree's copy. That duplication predates this change and is
+ * reported rather than folded in here: collapsing it means editing the routing module, and a mismatch
+ * between the two copies would break the route as well as the claim, so it cannot drift unnoticed.
+ */
+const AUTH_FRAUD_TRANSITION_CLAIM = `${AUTHORIZATION_SUMMARY_ROUTE}#fraud`;
+
+/**
+ * The contract operation identifier the fraud write is issued under.
+ *
+ * Assumptions: the operation IDENTIFIER, taken from `SET_AUTHORIZATION_FRAUD_STATE` at
+ * `ui/src/api/authorization.ts` L217 to L221, and not a re-composed request path. The path template
+ * lives in that module and is expanded there by `requestPath`; writing `/api/v1/authorizations/.../fraud`
+ * out again here would be a second definition of one route, and the copy that failed to follow a
+ * contract change would silently stop colliding with itself.
+ */
+const FRAUD_TRANSITION_OPERATION_ID = 'setAuthorizationFraudState';
+
+/**
+ * Builds the key two concurrent fraud writes collapse on.
+ *
+ * ⚠️ Assumptions: the ACTION is part of the key, which is a deliberate departure from the
+ * method-and-target composition `withoutConcurrentDuplicate` documents. A deletion has one possible
+ * effect per row, so its target alone identifies it; this transition has two opposite effects per row,
+ * because `PA-AUTH-FRAUD` admits both `'F'` and `'R'` (`CIPAUDTY.cpy` L50 to L52). Keying on the target
+ * alone would let a withdrawal JOIN a report already running and then paint the withdrawal's
+ * confirmation for a row the service left reported -- a success announced beside a contradicting value,
+ * which is the one outcome the confirmation surface exists to prevent. With the action in the key, two
+ * identical transitions collapse and two opposite ones are both sent, each answering for itself.
+ * @param {string} selector - The sealed row selector the write is addressed to.
+ * @param {FraudAction} action - The state the write moves the row to.
+ * @returns {string} The collapse key for that exact transition.
+ */
+function fraudTransitionKey(selector: string, action: FraudAction): string {
+  return `${FRAUD_TRANSITION_OPERATION_ID} ${selector} ${action}`;
 }
 
 /**
@@ -898,6 +1249,73 @@ export function AuthDetailScreen(): ReactElement {
    */
   const [fraudTarget, setFraudTarget] = useState<FraudConfirmationTarget | null>(null);
 
+  /**
+   * Whether a fraud write is already issued, held as a ref so a second confirmation cannot pass.
+   *
+   * ⚠️ Purpose: the `busy` FLAG cannot close this window on its own. Two confirmations delivered in one
+   * React batch both read `busy` as it was before either of them set it, so both pass the guard and both
+   * write -- and on this path the second write is the INVERSE of the first, because the direction is
+   * derived from the mark, so a double confirmation could mark and then unmark. A ref is written
+   * synchronously, so the second reader sees the first writer.
+   *
+   * ⚠️ Refactoring Rationale: this note used to say the keyed guard was reported rather than made. It
+   * is now made: {@link submitFraudTransition} dispatches through `withoutConcurrentDuplicate`, which
+   * collapses the duplicate across component instances as this ref cannot. The two are complementary
+   * rather than alternative -- the guard ANSWERS a second caller with the first attempt's outcome, which
+   * is right for a deletion and wrong for a toggle, so this latch still refuses the second confirmation
+   * within one batch instead of letting it be answered by the write it means to reverse.
+   *
+   * ⚠️ Trade-offs: both live in the SCREEN, and the keyed guard would sit better in
+   * `ui/src/api/authorization.ts` beside the request, where the two delete operations already keep
+   * theirs -- every caller of the operation would then inherit it, not just this screen. That module is
+   * not this change's to edit, so the placement is reported and the guard is applied at the one call
+   * site there is.
+   */
+  const fraudWriteIssued = useRef(false);
+
+  /**
+   * Whether this screen is still mounted, so a continuation knows whether anyone can read it.
+   *
+   * ⚠️ Purpose: the PF3 binding below carries no `disabled`, so leaving is available while a fraud
+   * write is outstanding -- and the reference has no equivalent state to copy, because CICS holds the
+   * terminal for the turn and there is nowhere to go from inside one. A continuation that resumes after
+   * the operator has left calls setters React discards silently, which is how a completed fraud report
+   * comes to be reported to nobody. This ref is what lets the continuation choose between painting the
+   * outcome and handing it on through {@link AUTH_FRAUD_TRANSITION_CLAIM}.
+   *
+   * Assumptions: a ref and not state, because it is read inside a promise continuation and never
+   * rendered; making it state would re-render the screen twice for a value nothing paints.
+   *
+   * Assumptions: set to `true` on every run of the effect rather than only at first mount, because React
+   * 19's development mode mounts, cleans up and mounts again -- a one-way initialiser would leave the
+   * screen believing it had gone while it was on the glass, and every outcome would be handed to the
+   * summary instead of painted here.
+   */
+  const mounted = useRef(true);
+
+  useEffect(
+    /**
+     * Raises the mounted flag the write continuations read, and lowers it when the screen leaves.
+     *
+     * Assumptions: the flag is raised on every RUN of this effect rather than only at first mount, for
+     * the reason recorded on the ref itself -- React 19's development mode mounts, cleans up and mounts
+     * again, so a one-way initialiser would leave the screen believing it had gone while it was on the
+     * glass.
+     * @returns {() => void} The cleanup that records the screen can no longer paint anything.
+     */
+    () => {
+      mounted.current = true;
+      /**
+       * Records that nothing on this screen can be painted any more.
+       * @returns {void} Nothing; the flag is lowered for the continuations still running.
+       */
+      return () => {
+        mounted.current = false;
+      };
+    },
+    [],
+  );
+
   const load = useCallback(
     /**
      * Reads the screen-shaped rendering of the addressed authorization.
@@ -931,12 +1349,42 @@ export function AuthDetailScreen(): ReactElement {
      * because the read is asynchronous and the call site would have to know when it had finished, which
      * is knowledge this function already has -- and a call site that guessed would restore exactly the
      * race that produced the empty band.
+     *
+     * ⚠️ Purpose: the third parameter is why the announcement is CONDITIONAL rather than carried
+     * unconditionally, and it exists for one measured failure mode. A fraud write can answer success and
+     * the re-read can still come back describing a row the transition was not applied to -- an
+     * unreported row after a report, or a reported one after a withdrawal. Announcing the write's
+     * confirmation over that rendering puts `AUTH MARKED FRAUD...` on the band beside a `Fraud Status:`
+     * that says the authorization is not marked, and a reviewer who reads the sentence and closes the
+     * screen has been told the opposite of what the service holds. The read supplies the values, so the
+     * read is where the sentence has to be reconsidered.
+     *
+     * ⚠️ Assumptions: when the test refuses the announcement the ROW'S OWN sentence is painted, and
+     * nothing is composed to explain the disagreement. There is no catalogued sentence for "the write
+     * succeeded and the row disagrees" -- `PROGRAM_MESSAGES.COPAUS1C` carries three sentences and none
+     * is about it -- and Transformation Rule T8 forecloses authoring one. Falling back to the plain-read
+     * treatment is the outcome that can be reached with the strings that exist: the operator is shown
+     * whatever the service says about the row, and is not told a transition landed that the values in
+     * front of them contradict. A blank band is a worse experience than a sentence and a better one than
+     * a false confirmation, so the missing sentence is REPORTED rather than invented.
+     *
+     * Alternatives Considered: testing the returned row at the CALL SITE and choosing between two calls
+     * to this function. Rejected because the row does not exist at the call site -- it arrives inside
+     * this continuation -- so the call site would have to read the row itself to decide how to ask for
+     * it to be read, which is the second read and the second implementation of the same test.
      * @param {string} rowKey - The sealed selector to read.
      * @param {ScreenAnnouncement} [announce] - Sentence to paint once the read completes, in place of
      *   whatever sentence the row itself carries. Omitted for a plain read.
+     * @param {(screen: PendingAuthDetailScreen) => boolean} [refuseAnnouncementWhen] - Test applied to
+     *   the row that arrives; when it answers `true` the announcement is discarded and the row's own
+     *   sentence is painted instead. Omitted when the announcement cannot be contradicted by a row.
      * @returns {void} Completion is represented by this screen's own state.
      */
-    (rowKey: string, announce?: ScreenAnnouncement): void => {
+    (
+      rowKey: string,
+      announce?: ScreenAnnouncement,
+      refuseAnnouncementWhen?: (screen: PendingAuthDetailScreen) => boolean,
+    ): void => {
       setLoading(true);
       /*
        * WHY : ⚠️ Refactoring Rationale: the rendered record is ERASED for the duration of the read, and
@@ -968,8 +1416,19 @@ export function AuthDetailScreen(): ReactElement {
         (screen) => {
           setFraudTarget(null);
           setDetail(screen);
-          setMessage(announce === undefined ? screen.message : announce.text);
-          setSeverity(announce === undefined ? 'error' : announce.severity);
+          /*
+           * WHY : ⚠️ Assumptions: the announcement is discarded when the row CONTRADICTS it, and the
+           *       row is published either way -- `setDetail` above is unconditional. What is on the
+           *       glass is always what the service last said; the only question here is whether a
+           *       sentence claiming a transition may be painted over it.
+           * WHY : Assumptions: the test is consulted only when there is an announcement to refuse, so a
+           *       plain read never calls it. A caller that supplies a test without a sentence has
+           *       nothing for it to act on, and evaluating it anyway would run a predicate over every
+           *       ordinary read for no effect.
+           */
+          const contradicted = announce !== undefined && refuseAnnouncementWhen?.(screen) === true;
+          setMessage(announce === undefined || contradicted ? screen.message : announce.text);
+          setSeverity(announce === undefined || contradicted ? 'error' : announce.severity);
           setLoading(false);
         },
         /**
@@ -1039,9 +1498,19 @@ export function AuthDetailScreen(): ReactElement {
      */
     const target = fraudTarget;
     setFraudTarget(null);
-    if (busy || !isFraudTargetCurrent(target, selector, detail)) {
+    if (busy || fraudWriteIssued.current || !isFraudTargetCurrent(target, selector, detail)) {
       return;
     }
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the latch is raised in the same statement sequence as the guard
+     *       that reads it, BEFORE the request is issued, because that is the only ordering in which a
+     *       second confirmation delivered in the same React batch is refused. `busy` is state, so both
+     *       confirmations would read its pre-batch value; the latch is a ref, so the second reads what
+     *       the first wrote. It is lowered on both settlements below rather than in a `finally`, so a
+     *       refused write can be retried immediately -- holding it after a refusal would leave the
+     *       transition unavailable until a reload, which is worse than allowing a deliberate retry.
+     */
+    fraudWriteIssued.current = true;
     setBusy(true);
     /*
      * WHY : ⚠️ Refactoring Rationale: exactly ONE call is issued, where the reference issues two writes
@@ -1065,12 +1534,65 @@ export function AuthDetailScreen(): ReactElement {
      *       exactly the path this guard exists for, so the two would agree in every test that did not
      *       matter.
      */
-    setAuthorizationFraudState(target.selector, { action: target.action }).then(
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the dispatch goes through `withoutConcurrentDuplicate`, which the
+     *       latch above does not make redundant. The latch is a ref on ONE component instance, so a
+     *       remount -- a route change back onto this row, or React 19's development-mode double mount --
+     *       starts with a fresh one and a second confirmation would issue a second write. The guard's
+     *       map is module state, so it collapses the duplicate across instances as well as within one,
+     *       and answers the joined caller with the first attempt's own outcome instead of refusing it.
+     *       Both are kept because they close different windows: the latch closes the same-React-batch
+     *       window the guard cannot see, since two confirmations in one batch both reach the guard and
+     *       the second would be answered rather than refused -- correct for a deletion, wrong for a
+     *       toggle whose second press means the opposite of the first.
+     * WHY : Assumptions: the attempt discards the response body. `FraudMarkResponse` describes the row
+     *       as the write left it, and this screen re-READS the row immediately afterwards for the reason
+     *       recorded on that path, so consuming the body would render the same values from a second
+     *       source -- and `withoutConcurrentDuplicate` resolves `void`, so a joined caller could not
+     *       have it anyway.
+     */
+    withoutConcurrentDuplicate(
+      fraudTransitionKey(target.selector, target.action),
+      /**
+       * Issues the one fraud write this confirmation authorised.
+       * @returns {Promise<void>} Resolves when the service has answered; rejects with the refusal.
+       */
+      async (): Promise<void> => {
+        await setAuthorizationFraudState(target.selector, { action: target.action });
+      },
+    ).then(
       /**
        * Reports the reference program's own confirmation for the submitted transition and re-reads.
-       * @returns {void} Completion is represented by this screen's own state.
+       *
+       * Assumptions: the outcome is HANDED ON when nobody is here to read it, rather than painted into
+       * a discarded component. The sentence is the same one either way -- what changes is who paints it.
+       * @returns {void} Completion is represented by this screen's own state, or by the retained outcome.
        */
       () => {
+        fraudWriteIssued.current = false;
+        const settled: ScreenAnnouncement = {
+          text: fraudOutcomeMessage(target.action),
+          severity: 'success',
+        };
+        if (!mounted.current) {
+          /*
+           * WHY : ⚠️ Trade-offs: the sentence handed over is NOT put through the contradiction test the
+           *       mounted arm below applies, and that is a knowing limit rather than an oversight. The
+           *       test needs a re-read of the row to have something to disagree with, and there is no
+           *       screen left to read it into -- issuing a read from a discarded component to validate a
+           *       sentence would be a request whose answer nothing renders. The rule the test enforces
+           *       is about a success announced BESIDE a contradicting value, and on this arm the values
+           *       are gone: the reviewer is on the summary, where the rows are read afresh from the
+           *       store. Reported rather than absorbed, because closing it properly means the write's
+           *       own response body describing the row it left -- a confirmation echo member on
+           *       `services/.../authorization-api.yaml`, which is not this change's to add.
+           */
+          retainOutcomeAcrossNavigation<FraudTransitionHandover>(AUTH_FRAUD_TRANSITION_CLAIM, {
+            settled: 'COMPLETED',
+            value: settled,
+          });
+          return;
+        }
         setBusy(false);
         /*
          * WHY : Assumptions: the severity is `success`, which is the only non-error severity a WRITE
@@ -1083,17 +1605,90 @@ export function AuthDetailScreen(): ReactElement {
          *       paragraphs actually establish. The sentence itself is chosen by `fraudOutcomeMessage`,
          *       whose block records why the service's own outcome sentence is deliberately not painted.
          */
-        load(target.selector, { text: fraudOutcomeMessage(target.action), severity: 'success' });
+        /*
+         * WHY : ⚠️ Purpose: the confirmation is offered to the re-read WITH a test that can refuse it,
+         *       because a write answering success is not proof that the row now reads that way. The
+         *       cross-screen rule this screen is held to is that no success is announced while a
+         *       contradicting value is displayed, and the fraud tag is displayed -- `Fraud Status:` is
+         *       one of the twelve captions -- so this is the screen where that rule has teeth.
+         * WHY : ⚠️ Assumptions: the contradiction is expressed through `nextFraudAction`, the same
+         *       function the fifth key uses to derive the transition, rather than by comparing the tag
+         *       to a letter here. The row's mark is the composed tag or a lone separator, not a bare
+         *       `'F'`/`'R'` -- `app/app-authorization-ims-db2-mq/cbl/COPAUS1C.cbl` L344 to L350
+         *       composes it -- so a letter comparison here would be a second reading of that format,
+         *       free to disagree with the one the key uses. If the row STILL asks for the transition
+         *       just submitted, the transition is not reflected in what is on the glass.
+         */
+        load(
+          target.selector,
+          settled,
+          /**
+           * Reports whether the re-read row still contradicts the transition just submitted.
+           * @param {PendingAuthDetailScreen} row - The row as the re-read returned it.
+           * @returns {boolean} `true` when the row still asks for the transition that just succeeded,
+           *   which means the write is not reflected in what is on the glass.
+           */
+          (row: PendingAuthDetailScreen): boolean =>
+            nextFraudAction(row.fraudMark) === target.action,
+        );
       },
       /**
-       * Reports a refused transition on the message line, leaving the rendering as it was.
+       * Reports a refused transition, and re-reads the row when the refusal leaves its fate unknown.
+       *
+       * ⚠️ Purpose: a failure is not evidence that nothing happened. `remedyFor` in
+       * `ui/src/api/client.ts` L969 to L985 records the case exactly: a gateway failure on a write is
+       * transient AND not repeatable, "because the write may already have been applied". On this screen
+       * that is the one arrangement that can leave a fraud tag on the glass contradicting what the
+       * service holds -- the reviewer reads `Fraud Status: R` beside a sentence about a refusal, while
+       * the row was in fact reported. So the uncertain case RE-READS, and the row is repainted from the
+       * service with the refusal's own sentence carried across it.
+       *
+       * ⚠️ Assumptions: uncertainty is `isTransientFailure && !isRepeatableFailure`, and neither
+       * predicate alone would do. `isRepeatableFailure` is false for EVERY failure of this operation --
+       * `PUT` is deliberately outside `REPEATABLE_METHODS` and this request sends no idempotency key --
+       * so testing it alone would re-read after a plain 400 as well, replacing the service's own field
+       * refusal with whatever the re-read reported and costing a request on a screen that just failed.
+       * `isTransientFailure` alone would be true for a `GET`-shaped condition that is safe to repeat.
+       * Together they name the narrow case: the condition may have reached the service, and repeating is
+       * not how to find out.
+       *
+       * ⚠️ Trade-offs: a described refusal -- 400, 403, 404, 409, and 500 with it -- leaves the
+       * rendering untouched and paints only the sentence. A 500 could in principle follow a commit, so
+       * this is a knowing trade: `TRANSIENT_STATUSES` excludes 500 on the recorded ground that it is
+       * "the status a service answers for a defect it has already recorded", and re-reading on every
+       * refusal would discard the refusal's own sentence whenever the re-read failed too -- which, on a
+       * service answering 500, is the likely case. The shared classification is followed rather than a
+       * third rule invented here.
        * @param {unknown} failure - Whatever the write rejected with.
-       * @returns {void} Completion is represented by this screen's own state.
+       * @returns {void} Completion is represented by this screen's own state, or by the retained outcome.
        */
       (failure: unknown) => {
+        fraudWriteIssued.current = false;
+        const settled: ScreenAnnouncement = {
+          text: detailFailureMessage(failure),
+          severity: 'error',
+        };
+        if (!mounted.current) {
+          /*
+           * WHY : Assumptions: the discriminator says the HANDOVER completed, not that the write did --
+           *       the same reading `ui/src/screens/userUpdate/index.tsx` L1564 to L1570 settles on. The
+           *       write's own verdict is already in `severity`, and `FAILED` in that type carries a
+           *       raised error rather than a sentence, which would ask the collecting screen to reduce
+           *       a failure this one has already reduced.
+           */
+          retainOutcomeAcrossNavigation<FraudTransitionHandover>(AUTH_FRAUD_TRANSITION_CLAIM, {
+            settled: 'COMPLETED',
+            value: settled,
+          });
+          return;
+        }
         setBusy(false);
-        setMessage(detailFailureMessage(failure));
-        setSeverity('error');
+        if (isTransientFailure(failure) && !isRepeatableFailure(failure)) {
+          load(target.selector, settled);
+          return;
+        }
+        setMessage(settled.text);
+        setSeverity(settled.severity);
       },
     );
   }
@@ -1120,25 +1715,44 @@ export function AuthDetailScreen(): ReactElement {
       return;
     }
     setFraudTarget({ selector, action: nextFraudAction(detail.fraudMark) });
+    /*
+     * WHY : ⚠️ Refactoring Rationale: NOTHING is focused here, and the line that was here --
+     *       `fraudTrigger.current?.focus()` -- is deleted rather than moved. It existed to drag an
+     *       ANCHORED balloon into view, on the recorded assumption that `cancelButtonProps autoFocus`
+     *       would still take focus once the prompt mounted. Browser validation measured that
+     *       assumption false three ways: immediately after activation, after a 900 ms settle
+     *       (`Cancel.isActive false`, `OK.isActive false`) and again through the fifth KEY,
+     *       `document.activeElement` was the destructive trigger itself
+     *       (`ant-btn-dangerous … ant-popover-open`). The explicit call ran after the state update was
+     *       queued but the browser applied it after the overlay's own autofocus, so it STOLE focus
+     *       from the safe control -- which is how a bare Enter came to re-toggle the prompt from the
+     *       trigger instead of dismissing it from Cancel.
+     * WHY : Assumptions: no replacement is needed, because the surface below is no longer anchored to
+     *       anything. A `Modal` is centred in the viewport and traps focus inside itself, so the three
+     *       controls that reach this call -- the button beside the record, the legend's fifth button
+     *       and the fifth key -- all raise the same centred dialog with focus on its declining choice.
+     *       The 250-pixel displacement the deleted line was compensating for cannot arise.
+     * WHY : Alternatives Considered: keeping the call and re-focusing Cancel from an effect after the
+     *       prompt mounted. Rejected because it would be two competing focus writers on one surface,
+     *       resolved by whichever ran last -- which is exactly the defect being removed, expressed as
+     *       a race instead of an ordering.
+     */
   }
 
   /**
-   * Discards the captured target when the confirmation is dismissed, and captures one when it opens.
+   * Discards the captured target when the confirmation is withdrawn, writing nothing.
    *
-   * Assumptions: the component's own open requests are routed back through {@link openFraudPrompt}
-   * rather than satisfied by setting a flag, so a prompt raised by the wrapped trigger captures its
-   * target exactly as the key and the bar's button do -- one capture site, whichever control asked.
-   * A dismissal, whether by the cancel control, the Escape key or a click away, discards the capture:
-   * a prompt the reviewer has walked away from must not leave a target that a later confirmation
-   * could act on.
-   * @param {boolean} next - Whether the confirmation is being opened, as antd reports it.
+   * Purpose: this is the single decline path. The dialog primitive routes its Cancel control, its
+   * Escape key and a click on its mask all through `onCancel`, so one function answers all three and
+   * none of them can reach the write.
+   *
+   * ⚠️ Assumptions: the CAPTURE is discarded and not merely hidden. A prompt the reviewer has walked
+   * away from must leave no target behind, because {@link submitFraudTransition} composes its request
+   * from the capture -- so a surviving target is a write a later confirmation could still deliver
+   * against a record nobody was asked about.
    * @returns {void} Completion is represented by this screen's own state.
    */
-  function handleFraudPromptOpenChange(next: boolean): void {
-    if (next) {
-      openFraudPrompt();
-      return;
-    }
+  function withdrawFraudPrompt(): void {
     setFraudTarget(null);
   }
 
@@ -1217,6 +1831,15 @@ export function AuthDetailScreen(): ReactElement {
    *       reports `CCDA-MSG-INVALID-KEY`, which is why the rejection handler below re-reads as well as
    *       painting the sentence. That combination is unusual among these programs and is the
    *       reference's own: the card detail screen coerces silently, the menus report without re-running.
+   * WHY : ⚠️ Assumptions: every binding declares its RISK, and the declaration follows what the key's
+   *       own label says the action does rather than which attention identifier carries it. Three of
+   *       the four read -- Enter re-reads the record, PF3 returns to the summary and PF8 steps to the
+   *       next authorization -- and one writes irreversibly, `F5=Mark/Remove Fraud`. Without the
+   *       declaration the legend takes its emphasis from `PRIMARY_ACTION_AIDS`, which puts Enter and
+   *       PF5 on the same primary emphasis: the key that re-reads and the key that reports a live
+   *       authorization as fraud rendered identically, so the bar distinguished neither. Declaring the
+   *       risk makes the fifth key the solid dangerous control and lowers the three reading keys to the
+   *       default, which is the whole of the distinction a reviewer needs before pressing one.
    */
   const { bindings, invoke } = usePfKeys(
     {
@@ -1230,6 +1853,7 @@ export function AuthDetailScreen(): ReactElement {
             load(selector);
           }
         },
+        risk: 'read-only',
       },
       PFK03: {
         /**
@@ -1240,6 +1864,7 @@ export function AuthDetailScreen(): ReactElement {
           navigateSafely(navigate, AUTHORIZATION_SUMMARY_ROUTE);
         },
         label: AUTH_DETAIL_KEY_LABELS.PFK03,
+        risk: 'read-only',
       },
       PFK05: {
         /**
@@ -1260,7 +1885,22 @@ export function AuthDetailScreen(): ReactElement {
           openFraudPrompt();
         },
         label: AUTH_DETAIL_KEY_LABELS.PFK05,
-        disabled: detail === null || busy,
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the in-flight condition has moved OFF `disabled` and onto
+         *       `busy`, and only the structural one is left greying the key. The two conditions are
+         *       different in kind and were being reported the same way: `detail === null` means there
+         *       is no record to act on, which is an unavailable key, whereas an outstanding write means
+         *       the key is perfectly valid and was pressed early. `usePfKeys` answers a DISABLED
+         *       binding through its invalid-key channel, so pressing the fifth key during its own write
+         *       reported `CCDA-MSG-INVALID-KEY` -- a verbatim sentence that means something else -- and
+         *       greyed the one control that should have been saying it was working. On `busy` the key
+         *       is declined SILENTLY and paints the in-flight affordance instead, which is the 3270's
+         *       own input-inhibit behaviour: the terminal announced a running task and withdrew
+         *       nothing.
+         */
+        disabled: detail === null,
+        busy,
+        risk: 'destructive',
       },
       PFK08: {
         /**
@@ -1271,7 +1911,14 @@ export function AuthDetailScreen(): ReactElement {
           stepToNextAuthorization();
         },
         label: AUTH_DETAIL_KEY_LABELS.PFK08,
-        disabled: busy,
+        /*
+         * WHY : Assumptions: the same substitution as the fifth key, for the same reason -- a step
+         *       requested while one is outstanding is an early press and not an invalid key. There is
+         *       no structural condition left to grey this one on, because the step is addressed by the
+         *       route parameter rather than by the record.
+         */
+        busy,
+        risk: 'read-only',
       },
     },
     {
@@ -1427,6 +2074,25 @@ export function AuthDetailScreen(): ReactElement {
         `COLOR=NEUTRAL`, which the shared component would not apply on its own.
       */}
       <ScreenTitle style={structuralStyle}>{AUTH_DETAIL_SUBTITLE}</ScreenTitle>
+      {/*
+       * WHY : ⚠️ Assumptions: the in-flight sentence is announced through the shared live region, and
+       *       the region is mounted on EVERY render of the record rather than only while a request is
+       *       outstanding. `ui/src/layout/fieldHelp.tsx` records why that is load-bearing: a live region
+       *       has to be in the accessibility tree before its content changes, so one mounted with its
+       *       sentence already in place is frequently treated as initial content and announced by
+       *       nothing -- which would lose the first transition, the only one that matters. Mounting it
+       *       here puts it in place before the operator can reach the fifth key at all.
+       * WHY : Assumptions: the sentence is `REQUEST_IN_PROGRESS` from the shared catalogue and is not
+       *       composed here. A previous note in this file claimed the catalogue declared no busy
+       *       sentence; it now does, so the note is deleted rather than softened and the authored
+       *       sentence is read from the one place operator text lives.
+       * WHY : Assumptions: this covers the WRITE and the forward step, which are the two requests that
+       *       leave the record on the glass. The initial read and the re-read after a settled write
+       *       replace the whole screen with the design system's spinner, which carries its own visible
+       *       and announced busy state, so a second announcement for those would say the same thing
+       *       twice.
+       */}
+      {busyAnnouncement(busy ? REQUEST_IN_PROGRESS : undefined)}
       {detail === null ? null : (
         <>
           {/*
@@ -1474,34 +2140,170 @@ export function AuthDetailScreen(): ReactElement {
             is a browser addition rather than a reference behaviour -- the terminal's PF5 wrote
             immediately. It is added because a pointer can activate a control by accident where a
             function key cannot, and marking a live authorization as fraud is not reversible without a
-            second write. The design-system mapping assigns `Popconfirm` to exactly this role.
+            second write.
             Assumptions: the control's label is the mapset's own row-24 legend text, so no new wording
             is introduced for it.
-            ⚠️ Assumptions: the prompt is rendered as open only while the captured target still
-            describes this record, which is the rendered half of the guard `isFraudTargetCurrent`
-            states. A target that has stopped matching CLOSES the prompt instead of pointing it at
-            whatever arrived: an open confirmation names one authorization to the reviewer, so keeping
-            it open over a different one would be the screen asking about A and holding B.
+            ⚠️ Assumptions: a nested `ConfigProvider` carrying `destructiveFocusTheme` wraps the
+            trigger, so its focus ring takes the error ramp's darkest published step instead of the
+            neutral primary ring. `ui/src/theme/antdTheme.ts` records that a nested provider MERGES per
+            component name, so this changes the ring and nothing else, and gap G9 records why a
+            per-variant focus token cannot do it instead.
           */}
           <Flex gap="small">
-            <Popconfirm
-              title={AUTH_DETAIL_KEY_LABELS.PFK05}
-              okType="danger"
-              open={isFraudTargetCurrent(fraudTarget, selector, detail)}
-              onOpenChange={handleFraudPromptOpenChange}
-              onConfirm={submitFraudTransition}
-            >
+            <ConfigProvider theme={destructiveFocusTheme}>
               <Button danger disabled={busy} onClick={openFraudPrompt}>
                 {AUTH_DETAIL_KEY_LABELS.PFK05}
               </Button>
-            </Popconfirm>
+            </ConfigProvider>
             <Button disabled={busy} onClick={stepToNextAuthorization}>
               {AUTH_DETAIL_KEY_LABELS.PFK08}
             </Button>
           </Flex>
+          {/*
+           * WHY : ⚠️ Refactoring Rationale: this surface was a `Popconfirm` and is now a `Modal`, and
+           *       the reason is mechanical rather than stylistic. `Popconfirm` renders through the
+           *       tooltip primitive, whose overlay hardcodes `role: "tooltip"` at
+           *       `ui/node_modules/@rc-component/tooltip/es/Popup.js` with no prop path to override it;
+           *       it carries no `aria-modal` and traps no focus. Browser validation measured all three
+           *       consequences on this screen at once: the prompt was announced as a tooltip, focus
+           *       stayed on the destructive trigger (`ant-btn-dangerous … ant-popover-open`) rather
+           *       than on Cancel, and one `Tab` from there landed on `F8=Next Auth` -- outside the
+           *       prompt, `popconfirm.contains(activeElement) === false`. `Modal` renders through the
+           *       dialog primitive, which sets `role="dialog"`, `aria-modal="true"` and
+           *       `aria-labelledby` from the title
+           *       (`ui/node_modules/@rc-component/dialog/es/Dialog/Content/Panel.js` L113-L115), locks
+           *       focus inside itself while it is open and restores focus to the trigger when it closes.
+           *       The migrated user-delete confirmation is the same change for the same reason and is
+           *       the pattern followed here.
+           *       Alternatives Considered: keeping the `Popconfirm` and setting `role="dialog"` through
+           *       a pass-through prop -- there is none, and an attribute hand-set on the trigger cannot
+           *       give the overlay a focus trap. Also considered: the imperative `Modal.confirm` API --
+           *       rejected because its content would be composed outside this render tree and so would
+           *       not re-read `detail`, and a dialog opened before a step arrived would then name a
+           *       stale record, which is the class of defect the captured target exists to close.
+           * WHY : ⚠️ Assumptions: the dialog is rendered open only while the captured target still
+           *       describes this record, which is the rendered half of the guard
+           *       {@link isFraudTargetCurrent} states. A target that has stopped matching CLOSES the
+           *       dialog instead of pointing it at whatever arrived: an open confirmation names one
+           *       authorization to the reviewer, so keeping it open over a different one would be the
+           *       screen asking about A and holding B.
+           * WHY : ⚠️ Assumptions: the dialog is CONTROLLED by this screen's own state, so the fifth
+           *       key, the legend's fifth button and the button beside the record all raise one surface
+           *       through {@link openFraudPrompt}, and accepting it is the only path to
+           *       {@link submitFraudTransition}. `Popconfirm`'s `onOpenChange` handler is gone with it:
+           *       a `Modal` has no self-opening trigger to route back, so the capture site is now the
+           *       only way in by construction rather than by convention.
+           * WHY : ⚠️ Assumptions: initial focus is placed on the DECLINING choice through
+           *       `cancelButtonProps autoFocus`, and NOTHING competes for it -- the deleted
+           *       `fraudTrigger.current?.focus()` was the competitor, and the dialog primitive itself
+           *       focuses its own panel only when focus is not already inside the wrapper
+           *       (`Dialog/index.js` `focusDialogContent`). So a bare Enter on arrival dismisses the
+           *       dialog and writes nothing, which matters more here than on a delete screen because
+           *       Enter is a working key on this application's every other surface and a reviewer
+           *       arrives with the habit of pressing it. Alternatives Considered: focusing the accept,
+           *       which is what the bill-pay confirmation does. Rejected outright: one keystroke would
+           *       then report a live authorization as fraud.
+           * WHY : Assumptions: the accept carries `danger` on TOP of the default primary type rather
+           *       than the legacy `okType="danger"` this surface used before.
+           *       `convertLegacyProps('danger')` yields `danger: true` with the DEFAULT variant, so the
+           *       destructive control rendered as the quieter and smaller of the two buttons --
+           *       emphasis inverted against risk. Passing both props makes it the solid, full-height,
+           *       red one.
+           * WHY : Assumptions: only the ACCEPT is wrapped in the destructive-focus provider, not the
+           *       whole dialog, which is why the footer is composed through the render-prop form.
+           *       Wrapping the dialog would put the error-ramp ring around Cancel as well -- the one
+           *       control on this surface that is safe -- and a focus ring is a risk signal.
+           * WHY : ⚠️ Assumptions: the accept's label is the mapset's own row-24 legend text and not the
+           *       stock `OK`, so the control that writes says what it writes. The title carries the
+           *       same legend, which is what `aria-labelledby` names the dialog by. No wording is
+           *       authored: transformation rule T8 carries user-visible strings across verbatim and
+           *       `COPAUS1C` paints no confirmation question of its own, which
+           *       {@link fraudConfirmationRecord} records as a reported gap rather than filling it.
+           * WHY : Assumptions: no `confirmLoading` is passed. {@link submitFraudTransition} discards
+           *       the captured target in the same statement sequence that raises the in-flight state,
+           *       so the dialog is already closed by the time a spinner could appear on it; passing the
+           *       prop would advertise a behaviour this surface does not have. The in-flight state is
+           *       reported where the operator is actually left -- the record's own busy region, the
+           *       legend's fifth key and the disabled trigger beside the record.
+           */}
+          <Modal
+            cancelButtonProps={{
+              autoFocus: true,
+              'aria-describedby': FRAUD_CONFIRMATION_RECORD_ID,
+            }}
+            /*
+             * WHY : ⚠️ Refactoring Rationale: a withdrawn confirmation is DESTROYED rather than kept
+             *       hidden, and the reason is the `autoFocus` two lines above rather than tidiness.
+             *       `autoFocus` is a MOUNT-time platform attribute: the browser honours it when the
+             *       control enters the document and never again. The design system keeps a closed
+             *       dialogue mounted at `display:none` by default, so the second and every later
+             *       opening re-shows controls that are already in the document and nothing re-applies
+             *       the attribute. A browser pass measured exactly that: on a FIRST open the focus was
+             *       on `Cancel` at 0ms, at 900ms and at 1500ms across 463 samples, while on a RE-OPEN
+             *       it stayed on the destructive trigger for about 360ms and then settled on the
+             *       dialogue's own container element -- so the declining choice, which is the whole
+             *       point of opening a destructive question focused on the safe answer, was not
+             *       focused on any opening after the first.
+             *       Alternatives Considered: calling `focus()` from an effect keyed on the open state.
+             *       Rejected because this screen has already paid for that mistake once -- the finding
+             *       that put the fraud prompt in a dialogue at all was a `focus()` call running AFTER
+             *       the surface opened and pulling the focus onto the destructive control. Adding a
+             *       second focus mover to compensate for a missing mount is how that class of defect
+             *       returns; removing the reason the mount is missing does not.
+             *       Trade-offs: the surface is rebuilt on each opening rather than reused, one mount
+             *       per confirmation on a screen whose accept is already behind a network write. The
+             *       withdrawal still FADES rather than vanishing, which is the objection this would
+             *       otherwise face: `@rc-component/dialog/lib/Dialog/Content/index.js` passes the flag
+             *       as the motion's `removeOnLeave`, so the panel is removed when the leave animation
+             *       COMPLETES, not when the close is requested.
+             */
+            destroyOnHidden
+            footer={fraudConfirmationFooter}
+            okButtonProps={{ danger: true, 'aria-describedby': FRAUD_CONFIRMATION_RECORD_ID }}
+            okText={AUTH_DETAIL_KEY_LABELS.PFK05}
+            onCancel={withdrawFraudPrompt}
+            onOk={submitFraudTransition}
+            open={isFraudTargetCurrent(fraudTarget, selector, detail)}
+            title={AUTH_DETAIL_KEY_LABELS.PFK05}
+          >
+            {fraudConfirmationRecord(
+              detail,
+              fraudTarget === null ? nextFraudAction(detail.fraudMark) : fraudTarget.action,
+              cssVar,
+            )}
+          </Modal>
         </>
       )}
     </Flex>
+  );
+}
+
+/**
+ * Composes the fraud dialog's footer so the accept alone carries the destructive focus ring.
+ *
+ * Purpose: reach one of the two stock controls without also reaching the other. The dialog's own
+ * `okButtonProps` and `cancelButtonProps` are read by these stock components, so composing the footer
+ * changes only which of them is inside the nested provider.
+ *
+ * Assumptions: cancel is rendered FIRST, which is both the stock order and the safe one -- the first
+ * control a keyboard reaches on this surface is the one that changes nothing.
+ * @param {ReactNode} _stockFooter - The stock pair, unused; the two members are placed by hand.
+ * @param {object} controls - The stock buttons the dialog supplies.
+ * @param {FC} controls.OkBtn - The accept, reading this dialog's `okButtonProps` and `onOk`.
+ * @param {FC} controls.CancelBtn - The decline, reading `cancelButtonProps` and `onCancel`.
+ * @returns {ReactElement} The declining control followed by the destructive accept.
+ */
+function fraudConfirmationFooter(
+  _stockFooter: ReactNode,
+  controls: { readonly OkBtn: FC; readonly CancelBtn: FC },
+): ReactElement {
+  return (
+    <>
+      <controls.CancelBtn />
+      <ConfigProvider theme={destructiveFocusTheme}>
+        <controls.OkBtn />
+      </ConfigProvider>
+    </>
   );
 }
 

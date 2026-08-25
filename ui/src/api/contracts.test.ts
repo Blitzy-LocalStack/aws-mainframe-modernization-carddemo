@@ -18,11 +18,15 @@
  * delivered mechanism, so agreement is checked at the OPERATION level, as a test failure rather than a
  * compile error.
  *
- * Trade-offs: this gate decides which operations exist on each side; it does not decide field-level
- * agreement, and a generated client would have. That limit is stated rather than left implied, because
- * a gate that appears to decide everything teaches reviewers to stop reading. What bounds the residual
- * risk is that each client module's interfaces are transcribed from the contract property by property
- * and each carries the contract schema it mirrors by name, so a field-level disagreement is at least
+ * Trade-offs: ⚠️ this gate decides which operations exist on each side AND, since the closure comparison
+ * below was folded in, which members each bound schema declares, whether each is optional, whether each
+ * is nullable, and -- last -- what length bound each request member the client enforces is published
+ * with. What it still does not decide is every other keyword a schema can carry: a `pattern`, a
+ * `minimum`, an `enum` or a `format` tightened on the service side is invisible here, and a generated
+ * client would have caught it. That limit is stated rather than left implied, because a gate that
+ * appears to decide everything teaches reviewers to stop reading. What bounds the residual risk is that
+ * each client module's interfaces are transcribed from the contract property by property and each
+ * carries the contract schema it mirrors by name, so a disagreement in an unchecked keyword is at least
  * locatable by reading two named artifacts instead of the whole tree.
  *
  * Why the contract is read as text rather than parsed
@@ -48,7 +52,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { API_PATH_PREFIX, isApiError, requestPath } from './client';
+import { API_PATH_PREFIX, PUBLISHED_REQUEST_WIDTHS, isApiError, requestPath } from './client';
 import type { ContractOperation } from './types';
 import { ACCOUNT_CONTRACT_OPERATIONS } from './accounts';
 import { CARD_CONTRACT_OPERATIONS } from './cards';
@@ -2561,3 +2565,203 @@ describe('wire-type module erasability', wireTypeModuleErasability);
 describe('single definition per wire shape', singleDefinitionPerWireShape);
 describe('binary response negotiation', binaryResponseNegotiation);
 describe('schema and type closure', schemaAndTypeClosure);
+
+/**
+ * Matches a length bound at whatever indentation it sits at: `maxLength: 20`.
+ *
+ * Assumptions: the indentation is deliberately unconstrained, because the same keyword appears at three
+ * depths in these documents -- six spaces on a scalar schema's own body, ten on a property that declares
+ * its own bound, and deeper inside an `allOf` branch. What keeps the match sound is that it must be the
+ * whole line and its value must be digits, which no prose line in a folded description can be.
+ */
+const MAX_LENGTH = /^\s*maxLength:\s*(\d+)\s*$/u;
+
+/**
+ * How many schema-and-member pairs `PUBLISHED_REQUEST_WIDTHS` declares a bound for.
+ *
+ * Assumptions: this is pinned for the reason {@link EXPECTED_OPERATION_COUNT} is pinned, and against the
+ * same failure mode. The gate below resolves each declared pair in a published document and fails naming
+ * any it cannot; what that leaves undetected is the table SHRINKING -- an entry deleted along with the
+ * call site that consulted it would leave a smaller table fully agreeing with the contracts. Measured
+ * per schema: 43 on the account edit, 15 on a transaction capture, 13 on a report submission, 4 on a
+ * card edit, and between one and four on each of the remaining nineteen.
+ */
+const EXPECTED_DECLARED_WIDTH_COUNT = 112;
+
+/**
+ * Reads the length bound declared directly in a block of schema or property lines.
+ * @param {readonly string[]} lines - The lines to inspect, being a schema body or one property's body.
+ * @returns {number | undefined} The bound, or nothing when these lines declare none.
+ */
+function declaredWidth(lines: readonly string[]): number | undefined {
+  for (const line of lines) {
+    const match = MAX_LENGTH.exec(line);
+    if (match?.[1] !== undefined) {
+      return Number.parseInt(match[1], 10);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolves the length bound one contract publishes for one member of one schema.
+ *
+ * Assumptions: the reference form is followed, and following it is not optional. Measured across the
+ * seven documents, most request members declare no bound of their own at all -- they are written as
+ * `allOf: [$ref: AccountId]` so the bound is stated once on the scalar schema and inherited by every
+ * request that carries that value. A resolver that read only a member's own lines found 8 bounds in the
+ * transaction contract instead of 71.
+ *
+ * Refactoring Rationale: this reuses {@link schemaBodies} and {@link scanSchema} rather than walking the
+ * document itself, which is what the note above those functions demands: a second scanner over the same
+ * documents was the hazard that folded the narrow nullability gate into the closure one, because two
+ * scanners drift and the narrower one silently stops matching.
+ * @param {Map<string, readonly string[]>} bodies - Every schema of one contract, keyed by name.
+ * @param {string} schema - The schema to read.
+ * @param {string} member - The member of it to read.
+ * @returns {number | undefined} The published bound, or nothing when this document does not publish one
+ *   for that pair -- which includes the ordinary case of a document that does not declare the schema.
+ */
+function publishedWidthOf(
+  bodies: Map<string, readonly string[]>,
+  schema: string,
+  member: string,
+): number | undefined {
+  const body = bodies.get(schema);
+  if (body === undefined) {
+    return undefined;
+  }
+  const lines = scanSchema(body).properties.get(member);
+  if (lines === undefined) {
+    return undefined;
+  }
+  const own = declaredWidth(lines);
+  if (own !== undefined) {
+    return own;
+  }
+  for (const line of lines) {
+    for (const match of line.matchAll(SCHEMA_REFERENCE)) {
+      const referenced = match[1];
+      if (referenced === undefined) {
+        continue;
+      }
+      const referencedBody = bodies.get(referenced);
+      if (referencedBody === undefined) {
+        continue;
+      }
+      const inherited = declaredWidth(scanSchema(referencedBody).ownLines);
+      if (inherited !== undefined) {
+        return inherited;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Asserts every length bound the client enforces is the one its contract publishes.
+ *
+ * Purpose: `PUBLISHED_REQUEST_WIDTHS` in `./client` refuses a request member longer than the field it is
+ * stored in, before dispatch. That table is a transcription, and a transcription of a value held in
+ * another repository tree is exactly what drifts. The direction that matters is a service WIDENING a
+ * field: the table would then refuse values the service now accepts, and the operator would meet a
+ * refusal no service ever sent and no log records.
+ *
+ * Assumptions: each declared pair is looked for in EVERY contract rather than in the one service that
+ * owns it, and every resolution found must agree. Two things follow. The table needs no second column
+ * saying which document to look in -- one more thing to keep correct -- and a schema name that comes to
+ * be declared in two documents with different bounds fails here rather than resolving to whichever was
+ * read first.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function everyDeclaredWidthMatchesItsContract(): void {
+  const perContract = new Map<string, Map<string, readonly string[]>>();
+  for (const service of Object.keys(CONTRACTS)) {
+    perContract.set(service, schemaBodies(contractText(service as keyof typeof CONTRACTS)));
+  }
+
+  let checked = 0;
+  for (const [schema, bounds] of Object.entries(PUBLISHED_REQUEST_WIDTHS)) {
+    for (const [member, declared] of Object.entries<number>(bounds)) {
+      const found: number[] = [];
+      for (const bodies of perContract.values()) {
+        const published = publishedWidthOf(bodies, schema, member);
+        if (published !== undefined) {
+          found.push(published);
+        }
+      }
+      expect(
+        found,
+        `no contract publishes a length bound for ${schema}.${member}`,
+      ).not.toHaveLength(0);
+      for (const published of found) {
+        expect(
+          published,
+          `the client bounds ${schema}.${member} at ${String(declared)} and its contract publishes ${String(published)}`,
+        ).toBe(declared);
+      }
+      checked += 1;
+    }
+  }
+  expect(checked).toBe(EXPECTED_DECLARED_WIDTH_COUNT);
+}
+
+/**
+ * Asserts the width resolver reads a seeded document correctly, including through a reference.
+ *
+ * Assumptions: this exists for the reason the closure scanner's seeded case exists -- the failure mode of
+ * a narrow scanner is that it matches NOTHING and reports agreement. Four forms are seeded: a bound
+ * declared on the property itself, one inherited through a single-quoted reference, one inherited through
+ * a double-quoted reference (both quote styles appear in these documents), and a member whose reference
+ * resolves to a schema carrying no bound at all, which must resolve to nothing rather than to zero.
+ * @returns {void} Nothing; the assertions are the outcome.
+ */
+function theWidthResolverReadsASeededDocument(): void {
+  const bodies = schemaBodies(
+    [
+      'components:',
+      '  schemas:',
+      '    Bounded:',
+      '      type: string',
+      '      maxLength: 20',
+      '    DoubleQuoted:',
+      '      type: string',
+      '      maxLength: 8',
+      '    Unbounded:',
+      '      type: string',
+      '    Seeded:',
+      '      type: object',
+      '      properties:',
+      '        ownBound:',
+      '          type: string',
+      '          maxLength: 50',
+      '        inherited:',
+      '          allOf:',
+      "            - $ref: '#/components/schemas/Bounded'",
+      '        inheritedDoubleQuoted:',
+      '          allOf:',
+      '            - $ref: "#/components/schemas/DoubleQuoted"',
+      '        unbounded:',
+      "          $ref: '#/components/schemas/Unbounded'",
+      '',
+    ].join('\n'),
+  );
+
+  expect(publishedWidthOf(bodies, 'Seeded', 'ownBound')).toBe(50);
+  expect(publishedWidthOf(bodies, 'Seeded', 'inherited')).toBe(20);
+  expect(publishedWidthOf(bodies, 'Seeded', 'inheritedDoubleQuoted')).toBe(8);
+  expect(publishedWidthOf(bodies, 'Seeded', 'unbounded')).toBeUndefined();
+  expect(publishedWidthOf(bodies, 'Seeded', 'absent')).toBeUndefined();
+  expect(publishedWidthOf(bodies, 'Absent', 'ownBound')).toBeUndefined();
+}
+
+/**
+ * Registers the request-width agreement cases.
+ * @returns {void} Nothing; the cases are registered as a side effect.
+ */
+function publishedRequestWidths(): void {
+  it('matches every declared width to its contract', everyDeclaredWidthMatchesItsContract);
+  it('reads a seeded document correctly', theWidthResolverReadsASeededDocument);
+}
+
+describe('published request widths', publishedRequestWidths);

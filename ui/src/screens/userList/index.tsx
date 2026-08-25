@@ -74,25 +74,46 @@
  */
 
 import { Flex, Form, Input, Table, Typography, theme } from 'antd';
-import type { InputRef, TableColumnsType } from 'antd';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import type { GlobalToken, InputRef, TableColumnsType } from 'antd';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 
 import { USER_ID_MAX_LENGTH, listUsers } from '../../api/auth';
+import { claimRetainedOutcome } from '../../api/client';
+/*
+ * WHY : Assumptions: this import is TYPE-ONLY and stays type-only. `verbatimModuleSyntax` is on, so an
+ *       `import type` is erased before the bundler sees it and creates no dependency between the two
+ *       chunks -- which matters because every screen is mounted through `lazy()` in
+ *       `ui/src/router.tsx`, and a VALUE import from the update screen would fold its chunk into this
+ *       one and charge every operator who opens the browse for code they may never reach. The shape is
+ *       worth sharing this way rather than restating: two independent declarations of the same two
+ *       members could drift, and a drifted handover would be read as a sentence that is not there.
+ */
+import type { UserUpdateSaveHandover } from '../userUpdate';
 import type { ApiError, PageResponse, UserSummary } from '../../api/types';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
-import type { PagedQueryRequest } from '../../hooks/usePagedQuery';
+import type { PageBoundary, PagedQueryRequest } from '../../hooks/usePagedQuery';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import { busyAnnouncement, fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
-import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
-import { INVALID_KEY_PRESSED, PROGRAM_MESSAGES, SHARED_MESSAGES } from '../../messages/messages';
-import { ADMIN_MENU_ROUTE, USER_LIST_ROUTE, navigateSafely } from '../../routes/navigation';
+import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
+import {
+  INVALID_KEY_PRESSED,
+  PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
+  SHARED_MESSAGES,
+} from '../../messages/messages';
+import {
+  ADMIN_MENU_ROUTE,
+  USER_LIST_ROUTE,
+  USER_UPDATE_ROUTE_TEMPLATE,
+  navigateSafely,
+} from '../../routes/navigation';
 /*
  * WHY : Assumptions: only the TEXT-grade colour map and the typography map are read here, and
  *       `SPACING_TOKENS` deliberately is not. Every gap on this screen is expressed through a named
@@ -105,8 +126,9 @@ import { ADMIN_MENU_ROUTE, USER_LIST_ROUTE, navigateSafely } from '../../routes/
  */
 import {
   BMS_TEXT_COLOR_TOKENS,
+  TARGET_SIZE_AA_MINIMUM,
   TYPOGRAPHY_TOKENS,
-  characterCellWidthShare,
+  characterCellColumnMeasure,
 } from '../../theme/tokens';
 
 /** CICS transaction identifier this screen replaces, as `app/csd/CARDDEMO.CSD` L449-L450 defines it. */
@@ -180,6 +202,142 @@ export type UserListRowActionCode =
  * cannot be typed into it at all rather than being typed and then refused.
  */
 export const USER_LIST_ACTION_CELL_LENGTH = 1;
+
+/**
+ * Character columns an action cell RESERVES, which is one more than it admits.
+ *
+ * ⚠️ Purpose: keep the typed character visible. A browser measurement of the delivered screen found this
+ * control 24 pixels wide with a `clientWidth` of 22 and the design system's own 11-pixel padding on each
+ * side, giving a CONTENT BOX of 0.00 pixels against a measured glyph advance of 9.078 pixels for the
+ * `U` an operator is instructed to type: a pixel scan of the whole control returned zero ink while the
+ * value was genuinely stored and the caret genuinely at position 1. The operator typed, saw nothing, and
+ * had no way to tell whether the keystroke had registered.
+ *
+ * ⚠️ Assumptions: the extra column is for the CARET and not padding for its own sake. A 3270 cursor was a
+ * block that occupied the character cell itself, so one declared column was all the terminal ever needed;
+ * a browser draws its caret BETWEEN character positions, so a content box of exactly one column leaves
+ * the caret and the glyph competing for the same space and the glyph scrolls out of view -- which is the
+ * measured `scrollWidth` 22 to 31 with `scrollLeft` 8 that the same pass recorded.
+ *
+ * Assumptions: this is a DISPLAY reservation and changes nothing about what the field accepts.
+ * {@link USER_LIST_ACTION_CELL_LENGTH} remains the `maxLength`, so a second character still cannot be
+ * typed, and the two constants are kept apart precisely so a reader cannot mistake the reservation for a
+ * relaxation of the declared width.
+ */
+export const USER_LIST_ACTION_CELL_RESERVED_COLUMNS = USER_LIST_ACTION_CELL_LENGTH + 1;
+
+/**
+ * Pointer affordance for a table row that can be acted on.
+ *
+ * ⚠️ Purpose: say under the pointer that a row is actionable. A browser pass measured `cursor: auto` on
+ * these rows both at rest and hovered, on a browse whose entire purpose is choosing a row -- so nothing
+ * about a row indicated it could be acted on, and the only clue was the one-character control in its
+ * leading column, which the same pass found invisible.
+ *
+ * Assumptions: `pointer` is a structural interaction keyword rather than a design value, so it resolves
+ * to no design token and needs none -- the same standing `auto`, `none` and `inherit` have. It is
+ * declared once so every row takes the same one, and it matches the idiom the authorization browse
+ * already uses for its own rows.
+ */
+const ROW_AFFORDANCE_STYLE: CSSProperties = { cursor: 'pointer' };
+
+/**
+ * The positions from which a backward step has nothing to answer with.
+ *
+ * WHY : ⚠️ Refactoring Rationale: the two paging guards read a NAMED position where they used to read
+ *       `browse.hasPrev` and `browse.hasNext`. The members are exactly equivalent -- the browse hook
+ *       derives all five positions from them -- so which sentence appears when has not changed. What
+ *       changes is that the dead end is ENUMERATED instead of falling out of two false flags: a browse
+ *       with no rows and no page on either side satisfied `!hasPrev` and `!hasNext` at once and neither
+ *       guard said so, which is the state a reader had to reconstruct.
+ *       Assumptions: the two sets are written out rather than derived from one another, because they are
+ *       not complements -- `INTERIOR` is in neither and `EMPTY` and `ONLY` are in both -- so an
+ *       expression relating them would be longer than the enumeration and harder to check against the
+ *       hook's own table. The reference-type browse states the same two sets for the same reason, and
+ *       they are restated here rather than imported: every screen is mounted through `lazy()` in
+ *       `ui/src/router.tsx`, so a value import from another screen would fold its chunk into this one.
+ */
+const BACKWARD_EXHAUSTED: readonly PageBoundary[] = Object.freeze(['EMPTY', 'ONLY', 'FIRST']);
+
+/**
+ * The positions from which a forward step has nothing to answer with.
+ *
+ * Assumptions: the mirror of {@link BACKWARD_EXHAUSTED}, with `LAST` in place of `FIRST`.
+ */
+const FORWARD_EXHAUSTED: readonly PageBoundary[] = Object.freeze(['EMPTY', 'ONLY', 'LAST']);
+
+/**
+ * Discards a paging turn's settlement, for the two key handlers that cannot observe it.
+ *
+ * Purpose: `ui/src/hooks/usePagedQuery.ts` now returns a promise from `prevPage` and `nextPage` so a
+ * caller that needs to sequence on a turn can. These two callers do not: both are `void`-returning key
+ * handlers, and the page they asked for arrives through the hook's own result on a later render.
+ *
+ * ⚠️ Refactoring Rationale: the two call sites used to be bare statements, which became floating
+ * promises the moment those members stopped returning `void`. `ui/eslint.config.js` configures
+ * `no-floating-promises` with `ignoreVoid: false`, so the `void` discard is not available either, and
+ * making the handlers `async` is worse than unavailable -- `no-misused-promises` with `checksVoidReturn`
+ * rejects a promise-returning function where a `void` one is expected, which is exactly what
+ * `PfKeyHandlerEntry.onInvoke` declares. Settling with a named no-op on both arms is the shape
+ * `usePagedQuery.ts` itself uses for its own opening read, so this screen states the same thing that
+ * module states rather than inventing a second discipline for it.
+ *
+ * Assumptions: discarding is CORRECT here and not merely permitted. Every outcome of a page turn is
+ * already applied through the hook's reducer -- the rows, the cursors, the position and any failure --
+ * so there is nothing at these two call sites left to act on. The rejection arm is supplied for the
+ * same reason the hook supplies its own: a handler that exists cannot become an unhandled rejection
+ * that a later change to the hook would otherwise introduce here silently.
+ * @returns {void} Nothing; the turn's outcome has already been recorded by the browse hook.
+ */
+function ignoreSettledPageTurn(): void {
+  // Assumptions: an empty body is the whole implementation and is deliberate rather than unfinished.
+  //   Logging here would emit a line for every ordinary page turn an operator makes.
+}
+
+/**
+ * Gives an action cell a content box wide enough to show the character typed into it.
+ *
+ * Purpose: turn the proportional column width from a size into a CEILING for this one column. Every
+ * other column on this browse carries prose or a code that shrinks gracefully, so a percentage share is
+ * the whole answer for them; this one carries a single character inside a bordered control whose own
+ * padding does not shrink, so at a phone width the share resolved to less than the padding and the
+ * content box collapsed to nothing while the value stayed stored and unreadable.
+ *
+ * ⚠️ Assumptions: the floor is stated as `min-inline-size` rather than as a wider column share, and the
+ * difference matters. A wider share would take its width from the two twenty-character NAME columns at
+ * every viewport, undoing the relative emphasis the mapset gives them; a minimum takes width only when
+ * the share falls below what the control needs, which at the measured 1440-pixel viewport is never.
+ *
+ * ⚠️ Assumptions: the character term is in `ch` and the padding term is read from the design system, for
+ * the reasons `copybookFieldWidthStyle` in `ui/src/layout/recordLayout.ts` records for the same pair:
+ * `ch` is the browser's nearest equivalent of a character column, and controls are border-box so the
+ * padding has to be added rather than absorbed. This function is deliberately NOT that helper: that one
+ * publishes a maximum from a declared width and this one publishes a minimum from a reserved width, and
+ * spreading both onto one control would set a maximum of one column and a minimum of two on one box.
+ *
+ * ⚠️ Assumptions: {@link TARGET_SIZE_AA_MINIMUM} is stated as an explicit alternative inside `max()`
+ * instead of being left to fall out of the arithmetic. The two terms happen to clear it at the pinned
+ * theme, but that is a property of a token value rather than of this expression, and an accessibility
+ * floor that holds only while a token keeps its current value is not a floor. `max()` also degrades the
+ * way the rest of this tree does: if the padding custom property fails to resolve -- it is scoped to
+ * component class scopes, not to the document root -- the `calc()` term is invalid at computed-value
+ * time and the AA figure remains as the operative minimum, so the control can never return to a
+ * zero-width content box.
+ *
+ * Trade-offs: a pixel figure is spelled here, which the zero-hardcoded-values rule otherwise forbids. It
+ * is admitted because it is not a design value: it is a WCAG success-criterion threshold, held in
+ * `ui/src/theme/tokens.ts` with its criterion attached, and no token on any of the system's scales
+ * expresses a conformance floor.
+ * @param {GlobalToken} cssVar - The theme's CSS-variable reference map, from `theme.useToken()`.
+ * @returns {CSSProperties} The minimum measure to spread onto the action cell's control.
+ */
+export function actionCellWidthStyle(cssVar: GlobalToken): CSSProperties {
+  return {
+    minInlineSize: `max(${String(TARGET_SIZE_AA_MINIMUM)}px, calc(${String(
+      USER_LIST_ACTION_CELL_RESERVED_COLUMNS,
+    )}ch + 2 * ${String(cssVar.controlPaddingHorizontal)}))`,
+  };
+}
 
 /**
  * Screen sub-title, verbatim from the mapset's own row-4 field.
@@ -326,6 +484,18 @@ interface ScreenBand {
 const EMPTY_BAND: ScreenBand = { text: null, severity: 'error' };
 
 /**
+ * Name under which the update screen leaves the sentence a `F3=Save&&Exit` published.
+ *
+ * ⚠️ Assumptions: this string is COMPOSED from the shared route template rather than written out, and
+ * the update screen composes the same name the same way. That screen retains the outcome and this one
+ * collects it, so the two are in different modules and the name is the only thing they agree on; taking
+ * the route half from `ui/src/routes/navigation.ts` is what stops that half from drifting. The suffix is
+ * inert -- a mismatch leaves an outcome uncollected rather than mis-routed -- and the paired cases in
+ * `ui/src/test/userList.test.tsx` and `ui/src/test/userUpdate.test.tsx` fail on exactly that.
+ */
+const USER_UPDATE_SAVE_CLAIM = `${USER_UPDATE_ROUTE_TEMPLATE}#saved`;
+
+/**
  * What the page's action cells, taken together, request.
  *
  * Assumptions: at most ONE row is ever selected, because the reference's selection scan is an ordered
@@ -437,6 +607,14 @@ export function reduceUserRowSelection(
  * browse hook's own refusal of a page longer than the screen declared room for.
  * `ui/src/hooks/usePagedQuery.ts` states that distinction, and a browse that kept displaying stale
  * rows in either case would be the silent broken view the flag exists to prevent.
+ *
+ * ⚠️ Alternatives Considered: the message catalogue now publishes two AUTHORED failure sentences --
+ * `TRANSIENT_FAILURE_TRY_AGAIN` for a condition that may clear and `PERSISTENT_FAILURE_REPORT_IT` for
+ * one that will not -- selected on the classification `ui/src/api/client.ts` already computes. Neither
+ * is taken here, and the reason is Rule T8 rather than inertia: this screen's failure sentence HAS a
+ * mainframe source, so substituting an authored one would replace a verbatim operator-facing string
+ * with a better-worded invention. The authored pair is for screens and states the reference never had a
+ * sentence for -- which is why the busy announcement above does take one.
  * @param {boolean} isFailed - Whether the most recent read ended in refusal or failure.
  * @param {ApiError | null} error - The problem document the service returned, when there was one.
  * @returns {ScreenBand} The verbatim listing-failure sentence at error severity, or the empty band
@@ -466,10 +644,21 @@ function listingFailureBand(isFailed: boolean, error: ApiError | null): ScreenBa
  * table was first left to size its own columns from content, and the one-character action column then
  * rendered about 700px wide -- wider than either twenty-character name column -- because an
  * unconstrained `Input` reports a full-width intrinsic size however few characters it accepts. That is
- * the exact defect {@link characterCellWidthShare} was written for, so this reuses that helper rather
- * than introducing a second treatment of it. The percentages it returns are design gap G1 artefacts
+ * the exact defect {@link characterCellColumnMeasure} was written for, so this reuses that helper
+ * rather than introducing a second treatment of it. The lengths it returns are design gap G1 artefacts
  * derived from a countable mapset measurement, which is why a rendered length may be spelled there and
  * nowhere else.
+ *
+ * ⚠️ Refactoring Rationale: these counts were first applied through the PROPORTIONAL sibling helper,
+ * `characterCellWidthShare`, which divides a column's cells by the row's and applies the result to a
+ * total that includes the grid's padding. A browser pass measured what that costs the narrowest
+ * column: `userType` spans 4 of 71 cells, so it drew 5.63% of a 718.63-pixel table -- 40.48 pixels --
+ * and the design system's 16 pixels of padding on each edge left roughly 8 pixels of content box. Its
+ * own four-character heading therefore laid out ONE CHARACTER PER LINE, standing the header row 120
+ * pixels tall, at every width from 375 to 1920. The counts were right and the way they were applied
+ * was wrong: a column has two paddings whatever it spans, so the padding must be reserved per column
+ * rather than shared out in proportion to characters. The absolute helper does that and its five
+ * results still sum to exactly the measure {@link userListTableMeasure} declares.
  */
 const USER_LIST_COLUMN_CELLS = Object.freeze({
   /** `'Sel'` heads column 5 and the identifier heads 12, so the action column spans seven cells. */
@@ -486,6 +675,96 @@ const USER_LIST_COLUMN_CELLS = Object.freeze({
   rowSpan: 71,
 });
 
+/** Columns the grid lays out, which fixes how many times the design system adds its cell padding. */
+const USER_LIST_COLUMN_COUNT = 5;
+
+/**
+ * The one theme member {@link userListTableMeasure} reads, in the form the theme actually supplies it.
+ *
+ * ⚠️ Assumptions: `padding` is `number | string` and not `GlobalToken['padding']`, which is
+ * `number` alone. That narrower declaration is true of the RESOLVED token; what the screen passes is
+ * the CSS-VARIABLE map from `theme.useToken()`, whose members hold `var(--ant-padding)` references at
+ * runtime while keeping the resolved token's compile-time type. `String()` at the use site is what
+ * bridges the two, and the union is what lets a case state either form -- a literal length for the
+ * arithmetic, and the reference the application resolves for the rendered assertion.
+ *
+ * Alternatives Considered: (1) `cssVar: GlobalToken`, the form the sibling transaction-type browse's
+ * own `tableMinimumMeasure` takes. Rejected here because a case that states the padding then has to
+ * write `{ padding: '8px' } as GlobalToken`, a conversion between types 493 members apart that the
+ * compiler refuses outright; keeping it would need a second cast through `unknown`, which suppresses
+ * the check rather than satisfying it. (2) `Pick<GlobalToken, 'padding'>`, which is narrow but not
+ * true -- it pins `padding` to `number` and so refuses the CSS length the variable map actually holds.
+ */
+export interface TableMeasureTokens {
+  /** The design system's cell padding, resolved or as the CSS-variable reference the map carries. */
+  readonly padding: number | string;
+}
+
+/**
+ * Least measure this grid may be laid out at, in the mapset's own character cells.
+ *
+ * Purpose: give {@link USER_LIST_COLUMN_CELLS}' proportional shares a floor to resolve against, so a
+ * narrow viewport scrolls the grid INSIDE its own region instead of pushing the whole page sideways.
+ *
+ * ⚠️ Refactoring Rationale: the grid declared no horizontal extent at all, and a browser pass at a
+ * 375-pixel viewport measured the consequence as page-level pan rather than as a squeezed column:
+ * `document.documentElement.scrollWidth` was **398** against a `clientWidth` of **375**, and
+ * `window.scrollTo(50, 0)` genuinely moved the document to `window.scrollX` **23**. The `Type` heading
+ * was clipped to `Typ` and its values sat half outside the viewport. The same pass established that
+ * this was NOT the grid's own scroller overflowing: the table measured 374.25 pixels inside a
+ * 327-pixel `.ant-table-content` whose computed `overflow-x` was `visible`, and every ancestor up to
+ * `BODY` reported the same 398 against 375 -- so with nothing declaring a scrolling region, the
+ * overflow was paid for by the page.
+ *
+ * ⚠️ Assumptions: declaring the extent is what CREATES the region, and the mechanism is the design
+ * system's own rather than a style added here. In the pinned package
+ * `ui/node_modules/@rc-component/table/lib/Table.js` L259-L272 turns a declared horizontal extent into
+ * `overflow-x: auto` on the `-content` element and `width: <extent>; min-width: 100%` on the inner
+ * table, and L556-L575 is where both are applied. `min-width: 100%` is why nothing changes above the
+ * floor: at any viewport wide enough the grid still fills its container exactly as it does today.
+ *
+ * ⚠️ Assumptions: the floor is the mapset's own row geometry and not a chosen breakpoint. The five
+ * columns span 71 character cells of the 80-column display -- {@link USER_LIST_COLUMN_CELLS} counts
+ * them off `app/bms/COUSR00.bms` row 8 -- and the design system adds its cell padding on both sides of
+ * each of the {@link USER_LIST_COLUMN_COUNT} columns, which `antd/lib/table/style/index.js` derives
+ * from the `padding` token. `ch` is the browser's nearest equivalent of a character column, the same
+ * equivalence `copybookFieldWidthStyle` in `ui/src/layout/recordLayout.ts` records.
+ *
+ * ⚠️ Assumptions: this is the same treatment the transaction-type browse already carries -- its own
+ * `tableMinimumMeasure` states the identical derivation over its three columns -- and the two are
+ * stated separately rather than shared for the reason {@link BACKWARD_EXHAUSTED} records: every screen
+ * is mounted through `lazy()` in `ui/src/router.tsx`, so a value import from another screen would fold
+ * that screen's chunk into this one. The measurement each states is its own mapset's, so there is no
+ * single value to share anyway -- 71 cells over five columns here against 69 over three there.
+ *
+ * Alternatives Considered: (1) letting the page keep the overflow and relying on the operator panning.
+ * Rejected on the measurement itself -- a horizontally panned page moves the shell's title band, its
+ * row-23 message and its row-24 legend out from under the operator, so the cost of reading one column
+ * is losing three persistent zones. (2) Dropping the `Type` column at narrow widths. Rejected because
+ * `SEC-USR-TYPE` is one of the four members `UserSummary` declares and the mapset heads it at
+ * `POS=(8,72)` on every turn; a column that disappears is a column an operator cannot learn. (3)
+ * Truncating the headings with an ellipsis, which a fixed layout does support. Rejected because the
+ * clipped `Typ` the pass measured is exactly that outcome, and it reads as a complete heading that
+ * happens to be short.
+ *
+ * Trade-offs: below the floor the grid scrolls sideways, which the terminal never did because it was
+ * exactly 80 columns wide. Design gap G1 already records that a fixed character grid can only scale or
+ * clip; scrolling ONE region is the least lossy of those, and it is what the finding asks for -- it
+ * names page-level pan as the defect and an internal scroller as the accepted pattern.
+ * ⚠️ Assumptions: the parameter is declared as {@link TableMeasureTokens} -- the one token member
+ * the measure reads -- rather than as the whole `GlobalToken` the screen happens to hold. The screen
+ * passes the full token, which satisfies it, and the narrowing is what lets a case state the padding
+ * directly instead of casting a one-member stub across a 493-member type.
+ * @param {TableMeasureTokens} cssVar - The theme's CSS-variable reference map, from
+ *   `theme.useToken()`; only its `padding` member is read.
+ * @returns {string} The measure, as a CSS length expression the design system applies to the grid.
+ */
+export function userListTableMeasure(cssVar: TableMeasureTokens): string {
+  return `calc(${String(USER_LIST_COLUMN_CELLS.rowSpan)}ch + ${String(
+    USER_LIST_COLUMN_COUNT * 2,
+  )} * ${String(cssVar.padding)})`;
+}
+
 /** What {@link buildUserListColumns} needs from the screen to describe one page's columns. */
 export interface UserListColumnOptions {
   /**
@@ -501,6 +780,17 @@ export interface UserListColumnOptions {
    * arguments and can be asserted without a design-system provider around it.
    */
   readonly fixedPitchStyle: CSSProperties;
+  /**
+   * The design system's per-edge cell padding, which every column reserves on top of its characters.
+   *
+   * ⚠️ Assumptions: it is the SAME member {@link userListTableMeasure} reads, and that is what keeps
+   * the two in agreement. That function declares the grid's least measure as `71ch + 10 * padding`
+   * and each column here claims `cells * ch + 2 * padding`; summing the five columns reproduces the
+   * declared total exactly, so a change to either has to be a change to both to stay consistent.
+   * Threading it in rather than reading the theme keeps this builder assertable with a literal
+   * length and no provider around it, which is the same reason the fixed-pitch style is threaded.
+   */
+  readonly cellPadding: TableMeasureTokens['padding'];
 }
 
 /**
@@ -529,20 +819,24 @@ export interface UserListColumnOptions {
  * padded. The padding sizes each heading to a fixed character column that no longer exists, so
  * rendering it would show leading and trailing whitespace inside a table header; the padded value is
  * kept in the constant so the transcription still matches the mapset byte for byte.
- * @param {UserListColumnOptions} options - The row-action renderer and the fixed-pitch style.
+ * @param {UserListColumnOptions} options - The row-action renderer, the fixed-pitch style and the
+ *   design system's cell padding.
  * @param {(row: UserSummary) => ReactElement} options.renderActionCell - Renders one row's action cell.
  * @param {CSSProperties} options.fixedPitchStyle - Applies the fixed-pitch token to aligned columns.
+ * @param {number | string} options.cellPadding - Per-edge cell padding each column reserves on top of
+ *   its characters, so the five widths sum to the measure {@link userListTableMeasure} declares.
  * @returns {TableColumnsType<UserSummary>} The five column descriptors, in the mapset's own order.
  */
 export function buildUserListColumns({
   renderActionCell,
   fixedPitchStyle,
+  cellPadding,
 }: UserListColumnOptions): TableColumnsType<UserSummary> {
   return [
     {
       title: USER_LIST_LABELS.selColumn.trim(),
       key: 'sel',
-      width: characterCellWidthShare(USER_LIST_COLUMN_CELLS.sel, USER_LIST_COLUMN_CELLS.rowSpan),
+      width: characterCellColumnMeasure(USER_LIST_COLUMN_CELLS.sel, cellPadding),
       render: renderActionCell,
     },
     // WHY : Assumptions: the identifier and the type render fixed-pitch and the two names do not.
@@ -553,7 +847,7 @@ export function buildUserListColumns({
     {
       title: USER_LIST_LABELS.userIdColumn.trim(),
       dataIndex: 'userId',
-      width: characterCellWidthShare(USER_LIST_COLUMN_CELLS.userId, USER_LIST_COLUMN_CELLS.rowSpan),
+      width: characterCellColumnMeasure(USER_LIST_COLUMN_CELLS.userId, cellPadding),
       /**
        * Renders the identifier in the fixed-pitch face so the column aligns as the terminal's did.
        * @param {string} userId - The row's eight-character identifier.
@@ -566,18 +860,12 @@ export function buildUserListColumns({
     {
       title: USER_LIST_LABELS.firstNameColumn.trim(),
       dataIndex: 'firstName',
-      width: characterCellWidthShare(
-        USER_LIST_COLUMN_CELLS.firstName,
-        USER_LIST_COLUMN_CELLS.rowSpan,
-      ),
+      width: characterCellColumnMeasure(USER_LIST_COLUMN_CELLS.firstName, cellPadding),
     },
     {
       title: USER_LIST_LABELS.lastNameColumn.trim(),
       dataIndex: 'lastName',
-      width: characterCellWidthShare(
-        USER_LIST_COLUMN_CELLS.lastName,
-        USER_LIST_COLUMN_CELLS.rowSpan,
-      ),
+      width: characterCellColumnMeasure(USER_LIST_COLUMN_CELLS.lastName, cellPadding),
     },
     // WHY : ⚠️ Assumptions: the type is DISPLAY ONLY and no decision may be taken from it. It renders
     //       the `'A'`/`'U'` domain of `SEC-USR-TYPE` (`app/cpy/CSUSR01Y.cpy` L22) as the stored
@@ -590,10 +878,7 @@ export function buildUserListColumns({
     {
       title: USER_LIST_LABELS.typeColumn.trim(),
       dataIndex: 'userType',
-      width: characterCellWidthShare(
-        USER_LIST_COLUMN_CELLS.userType,
-        USER_LIST_COLUMN_CELLS.rowSpan,
-      ),
+      width: characterCellColumnMeasure(USER_LIST_COLUMN_CELLS.userType, cellPadding),
       /**
        * Renders the stored type character in the fixed-pitch face.
        * @param {string} userType - The row's one-character type, `'A'` or `'U'`.
@@ -686,6 +971,23 @@ export default function UserListScreen(): ReactElement {
    */
   const searchFocusRef = useRef<HTMLInputElement | null>(null);
 
+  /*
+   * WHY : ⚠️ Purpose: hold each row's action control by identifier, so a click anywhere in a row can put
+   *       the cursor where that row is acted on. The reference had no need of this -- a 3270 operator
+   *       moved the cursor with the tab key onto a field whose position they could see -- but design gap
+   *       G1 surrenders exactly that position, so the pointer needs a way of saying which field a row
+   *       click belongs to.
+   * WHY : Assumptions: a mutable map keyed by the record's own key, not an index. The identifier is the
+   *       `USRSEC` cluster key (`app/cpy/CSUSR01Y.cpy` `SEC-USR-ID PIC X(08)`) and is already this
+   *       table's `rowKey`, so an entry cannot be re-associated with a different operator when a page
+   *       turns -- which an index-keyed map would do on every page move.
+   * WHY : Alternatives Considered: resolving the control with `document.getElementById` from the
+   *       identifier {@link actionCellId} already composes. Rejected because it reaches outside the
+   *       component's own tree for a node the component rendered, which would also find a stale node
+   *       during the render pass that replaces a page.
+   */
+  const actionCellRefs = useRef<Map<string, HTMLInputElement>>(new Map());
+
   const readPage = useCallback(
     /**
      * Reads one page, carrying the applied positioning key on the opening read.
@@ -739,6 +1041,58 @@ export default function UserListScreen(): ReactElement {
      */
     (): void => {
       setBand(EMPTY_BAND);
+    },
+    [],
+  );
+
+  useEffect(
+    /**
+     * Paints the sentence a save on the update screen published just before it transferred here.
+     *
+     * ⚠️ Purpose: this is the reading end of the gap a browser sweep measured on `F3=Save&&Exit`. That
+     * key writes and transfers in one turn, so the band it publishes is discarded by its own unmount --
+     * `PUT` returning `200` followed by an arrival whose band was empty. The reference has the same
+     * shape and loses it the same way: `UPDATE-USER-SEC-FILE` composes the green sentence and performs
+     * `SEND-USRUPD-SCREEN` at `app/cbl/COUSR02C.cbl` L370-L377, and the `EXEC CICS XCTL` at L258-L261
+     * then overwrites the terminal with the destination's map. Collecting it here is that sentence
+     * reaching the reader the program addressed it to.
+     *
+     * Assumptions: the sentence is published as this turn's band, so it obeys the same lifetime as any
+     * other sentence this screen raises -- `beginTurn` clears it on the operator's next key, which is
+     * the reference's `MOVE SPACES TO WS-MESSAGE` at the head of each turn. It is deliberately NOT given
+     * a longer life than a locally-raised one: an outcome of the previous screen must not still be on
+     * the glass after the operator has acted on this one.
+     *
+     * Assumptions: collecting on mount is sufficient here, and that is a property of the retaining side
+     * rather than an assumption about timing. The update screen retains and then navigates in one
+     * synchronous handler, so the outcome exists before this screen is mounted at all.
+     * Alternatives Considered: also subscribing through `subscribeToRetainedOutcomes`, which
+     * `ui/src/api/client.ts` provides for an outcome that lands 7 to 12 ms AFTER the destination
+     * mounted. Rejected because no path retains under this claim after a navigation has been issued, so
+     * the listener could never fire -- and a subscription that cannot fire is a line a later reader
+     * would have to disprove.
+     *
+     * Assumptions: collection REMOVES the outcome, which is what makes running this on every mount
+     * safe. An operator who returns to the browse a second time is not shown a write they were already
+     * told about.
+     * @returns {void} Completion is represented by the screen's own band state.
+     */
+    (): void => {
+      const handed = claimRetainedOutcome<UserUpdateSaveHandover>(USER_UPDATE_SAVE_CLAIM);
+
+      /*
+       * WHY : Assumptions: the `FAILED` arm is declined rather than rendered, and the guard is here
+       *       because the retained type admits it -- not because this pair produces it. The update
+       *       screen reduces every failure to one of its own sentences before it hands anything over, so
+       *       it always retains `COMPLETED` and the tone carries success or refusal. A `FAILED` outcome
+       *       carries a raised error and no sentence, and painting one would put a framework or
+       *       transport string where the reference paints a program's own.
+       */
+      if (handed === undefined || handed.settled !== 'COMPLETED') {
+        return;
+      }
+
+      setBand({ text: handed.value.message, severity: handed.value.severity });
     },
     [],
   );
@@ -844,7 +1198,7 @@ export default function UserListScreen(): ReactElement {
     (): void => {
       beginTurn();
 
-      if (!browse.hasPrev) {
+      if (BACKWARD_EXHAUSTED.includes(browse.boundary)) {
         setBand({
           text: SHARED_MESSAGES.YOU_ARE_ALREADY_AT_THE_TOP_OF_THE_PAGE,
           severity: 'error',
@@ -852,7 +1206,13 @@ export default function UserListScreen(): ReactElement {
         return;
       }
 
-      browse.prevPage();
+      /*
+       * WHY : Assumptions: the turn is SETTLED with a named no-op rather than left as a bare
+       *       statement, because the hook now answers with a promise. See
+       *       {@link ignoreSettledPageTurn} for why discarding is correct here and why neither `void`
+       *       nor an `async` handler is available as the discard.
+       */
+      browse.prevPage().then(ignoreSettledPageTurn, ignoreSettledPageTurn);
     },
     [beginTurn, browse],
   );
@@ -861,15 +1221,17 @@ export default function UserListScreen(): ReactElement {
     /**
      * Pages forward, or refuses when the envelope reports no further page.
      *
-     * Assumptions: the refusal is decided by `hasNext` and never by counting the rows received. The
-     * service settles that flag from a read of one row beyond the page, which is how `COUSR00C`
-     * settles `NEXT-PAGE-YES` too, and `PROCESS-PF8-KEY` refuses on the flag alone at L270-L273.
+     * Assumptions: the refusal is decided by the browse's published POSITION and never by counting the
+     * rows received. That position is derived from the envelope's further-page indicator, which the
+     * service settles from a read of one row beyond the page -- which is how `COUSR00C` settles
+     * `NEXT-PAGE-YES` too, and `PROCESS-PF8-KEY` refuses on the flag alone at L270-L273. A count of the
+     * rows received cannot answer it, because a full page and a full last page hold the same number.
      * @returns {void} Completion is represented by a painted sentence or a forward step.
      */
     (): void => {
       beginTurn();
 
-      if (!browse.hasNext) {
+      if (FORWARD_EXHAUSTED.includes(browse.boundary)) {
         setBand({
           text: SHARED_MESSAGES.YOU_ARE_ALREADY_AT_THE_BOTTOM_OF_THE_PAGE,
           severity: 'error',
@@ -877,7 +1239,12 @@ export default function UserListScreen(): ReactElement {
         return;
       }
 
-      browse.nextPage();
+      /*
+       * WHY : Assumptions: settled with the same named no-op as the backward arm, for the reason
+       *       {@link ignoreSettledPageTurn} records. The two arms are written identically so a reader
+       *       comparing them cannot mistake a difference in discipline for a difference in behaviour.
+       */
+      browse.nextPage().then(ignoreSettledPageTurn, ignoreSettledPageTurn);
     },
     [beginTurn, browse],
   );
@@ -887,23 +1254,53 @@ export default function UserListScreen(): ReactElement {
    *       exactly four attention identifiers -- Enter, PF3, PF7 and PF8 -- and answers everything else
    *       through its `WHEN OTHER` arm. Registering PF4, PF5 or PF12 would put a key on the legend that
    *       the reference screen does not offer.
-   * WHY : Assumptions: the two paging keys are greyed out from `hasPrev` and `hasNext` rather than from
-   *       the page number. The ordinal is what the hook derives `hasPrev` FROM, so binding to the
-   *       published flag keeps one derivation instead of two that could disagree.
+   * WHY : ⚠️ Refactoring Rationale: NO binding here carries a `disabled` predicate, and the two paging
+   *       keys used to. Greying them read as the "`disabled` bound to `hasNext`/`hasPrev`" mapping AAP
+   *       section 0.3.2 gives a page-navigation pair, and it cost a verbatim sentence: the reference
+   *       refuses no paging key. `PROCESS-PF7-KEY` at L248-L254 and `PROCESS-PF8-KEY` at L271-L277 each
+   *       dispatch the key, move their own sentence into `WS-MESSAGE` and re-send the map, so the
+   *       operator is always told which end they are at in the program's own words. A withdrawn key
+   *       cannot say anything, and `ui/src/layout/usePfKeys.ts` answers a disabled binding through the
+   *       unmapped-key path -- so the previous form put "Invalid key pressed" where the reference puts
+   *       "You are already at the top of the page...". `ui/src/hooks/usePagedQuery.ts` records the same
+   *       finding across all five browse screens and states the rule this now follows: a screen CHOOSES
+   *       A SENTENCE from the published position and never disables a key.
+   * WHY : Assumptions: nothing needs disabling to stay SAFE, because a step from an exhausted end is
+   *       already a documented no-op -- both handlers above answer the boundary and return before they
+   *       reach the hook's paging call.
+   * WHY : Alternatives Considered: keeping the greying and ALSO answering the refusal in
+   *       {@link usePfKeys}' invalid-key path, which is what this screen did. It produced the right
+   *       sentence for a keyboard operator and still left a pointer operator facing a control that
+   *       could not be pressed, and it split one decision -- which sentence a boundary raises -- across
+   *       a binding predicate and a rejection handler that had to agree about which keys were greyed.
+   * WHY : ⚠️ Refactoring Rationale: all four bindings declare `risk: 'read-only'`, which is what the
+   *       legend's emphasis is now painted from. It used to come from a frozen attention-identifier list
+   *       that lists `ENTER` -- so this browse rendered its Enter key in primary blue, the same paint the
+   *       sibling maintenance screens give a key that WRITES, and the same paint a measured pass found on
+   *       `F5=Delete`. Nothing on this screen writes: `app/bms/COUSR00.bms` L457 paints
+   *       `ENTER=Continue  F3=Back  F7=Backward  F8=Forward`, and `app/cbl/COUSR00C.cbl` L121-L133
+   *       dispatches those four to a row transfer, a transfer back and two browse repositions. A bar with
+   *       no primary control is therefore the accurate rendering of a screen with no action to take, and
+   *       it is what lets an emphasised control elsewhere in the application still mean something.
+   * WHY : ⚠️ Assumptions: NO binding declares `busy`, and the omission is a decision rather than an
+   *       oversight. `busy` is a per-KEY statement that this key's own turn is outstanding, and the only
+   *       in-flight signal this screen has is the browse's single `isLoading` flag, which cannot tell one
+   *       direction's turn from the other's. Declaring it on both paging keys would therefore decline a
+   *       press of the OPPOSITE direction while a turn ran -- and `ui/src/hooks/usePagedQuery.ts`
+   *       coalesces only IDENTICAL in-flight turns precisely so an operator who overshoots can step back
+   *       immediately. Suppressing that would be a behaviour regression dressed as an affordance.
+   * WHY : Alternatives Considered: declaring `busy` on Enter alone, whose turn is distinguishable. It was
+   *       rejected because Enter's turn is a route transfer or a browse restart, and the restart's
+   *       in-flight window is the same `isLoading` the two paging keys share -- so the declaration would
+   *       announce Enter busy during a page turn it did not start. The in-flight affordance for this
+   *       screen is carried where it is unambiguous instead: `Table loading` renders the design system's
+   *       own spinner over the rows being replaced.
    */
   const keyHandlers: PfKeyHandlerMap = {
-    ENTER: { onInvoke: handleEnter, label: USER_LIST_KEY_LABELS.ENTER },
-    PFK03: { onInvoke: handleBack, label: USER_LIST_KEY_LABELS.PFK03 },
-    PFK07: {
-      onInvoke: handlePageBackward,
-      label: USER_LIST_KEY_LABELS.PFK07,
-      disabled: !browse.hasPrev,
-    },
-    PFK08: {
-      onInvoke: handlePageForward,
-      label: USER_LIST_KEY_LABELS.PFK08,
-      disabled: !browse.hasNext,
-    },
+    ENTER: { onInvoke: handleEnter, label: USER_LIST_KEY_LABELS.ENTER, risk: 'read-only' },
+    PFK03: { onInvoke: handleBack, label: USER_LIST_KEY_LABELS.PFK03, risk: 'read-only' },
+    PFK07: { onInvoke: handlePageBackward, label: USER_LIST_KEY_LABELS.PFK07, risk: 'read-only' },
+    PFK08: { onInvoke: handlePageForward, label: USER_LIST_KEY_LABELS.PFK08, risk: 'read-only' },
   };
 
   const { bindings, invoke } = usePfKeys(keyHandlers, {
@@ -916,43 +1313,36 @@ export default function UserListScreen(): ReactElement {
      */
     restoreFocusRef: searchFocusRef,
     /**
-     * Answers a key the hook refused: a boundary step with its own sentence, anything else with the
-     * reference's invalid-key sentence.
+     * Answers a key this screen does not bind with the reference's invalid-key sentence.
      *
-     * ⚠️ Refactoring Rationale: a `'disabled'` refusal used to return in silence here, and that was a
-     * defect this screen's own tests caught. Greying the two paging keys at the boundaries is what AAP
-     * section 0.3.2 asks for -- `disabled` bound to `hasPrev` and `hasNext` -- but the hook refuses a
-     * disabled binding BEFORE its handler runs, so the in-handler guards below could never fire and two
-     * of the five sentences the reference declares were computed nowhere. `PROCESS-PF7-KEY` at L248-L253
-     * and `PROCESS-PF8-KEY` at L270-L275 both dispatch and then answer, so the answer must survive the
-     * greying. Routing the refusal to the same sentence keeps both requirements: the greyed control says
-     * the direction is exhausted before an attempt, and a keyboard operator who presses the key anyway
-     * is told why in the reference's own words.
-     * @param {PfKeyRejection} rejection - Why the key was refused, and by which attention identifier.
+     * ⚠️ Refactoring Rationale: this used to branch on a `'disabled'` refusal and compose a boundary
+     * sentence for it, because the two paging keys were greyed at the ends of the browse and the hook
+     * answers a greyed binding through this path rather than through the binding's own handler. Neither
+     * key is greyed now -- the reference refuses no paging key, and the binding block above records why
+     * -- so a refusal can no longer be a boundary and the branch is gone rather than left standing over
+     * a state that cannot arise. The two boundary sentences are raised where the two conditions are
+     * actually known, in {@link handlePageBackward} and {@link handlePageForward}, which is also where
+     * the reference raises them.
+     *
+     * ⚠️ Assumptions: every refusal reaching here is therefore an UNMAPPED key, which is exactly the
+     * `WHEN OTHER` arm at `app/cbl/COUSR00C.cbl` L124-L133: it moves the invalid-key sentence, places
+     * the cursor on the search field and re-sends the map. Both halves are honoured -- the sentence
+     * below and the `restoreFocusRef` above.
+     *
+     * Assumptions: the rejection payload is not read, and the parameter is therefore not declared. One
+     * refusal reason is now reachable and one sentence answers it, so reading the payload could only
+     * re-derive a constant this screen already holds; the hook's option type accepts a handler that
+     * takes fewer arguments than it supplies.
      * @returns {void} Completion is represented by the screen's own band state.
      */
-    onInvalidKey: (rejection: PfKeyRejection): void => {
-      if (rejection.reason === 'disabled') {
-        /*
-         * WHY : Assumptions: only the two paging keys are ever greyed on this screen, so the two arms
-         *       below are exhaustive and a third would answer for a state that cannot arise. Enter and
-         *       PF3 carry no `disabled` predicate at all -- the reference gates neither -- so a
-         *       refusal reaching here can only name PF7 or PF8.
-         */
-        const boundary =
-          rejection.aid === 'PFK07'
-            ? SHARED_MESSAGES.YOU_ARE_ALREADY_AT_THE_TOP_OF_THE_PAGE
-            : SHARED_MESSAGES.YOU_ARE_ALREADY_AT_THE_BOTTOM_OF_THE_PAGE;
-
-        setBand({ text: boundary, severity: 'error' });
-        return;
-      }
-
-      // WHY : Assumptions: the sentence is read from the catalog rather than from the rejection
-      //       payload, so this screen has one source for every sentence it paints. It is the same
-      //       `CCDA-MSG-INVALID-KEY` value the program moves at L128, declared at
-      //       `app/cpy/CSMSG01Y.cpy`, and the hook publishes it too -- so this is not a second
-      //       transcription, only a second reader of one constant.
+    onInvalidKey: (): void => {
+      /*
+       * WHY : Assumptions: the sentence is read from the catalog rather than from the rejection the hook
+       *       composed, so this screen keeps one source for every string it paints. It is the same
+       *       `CCDA-MSG-INVALID-KEY` value the program moves at L128, declared at
+       *       `app/cpy/CSMSG01Y.cpy`; the hook publishes it too, so this is a second reader of one
+       *       constant rather than a second transcription.
+       */
       setBand({ text: INVALID_KEY_PRESSED, severity: 'error' });
     },
   });
@@ -1005,6 +1395,8 @@ export default function UserListScreen(): ReactElement {
   const fixedPitchStyle: CSSProperties = {
     fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData],
   };
+
+  const actionCellStyle = actionCellWidthStyle(cssVar);
 
   /*
    * WHY : Assumptions: `ATTRB=BRT` on the row-21 prompt resolves to WEIGHT and not to a colour. All 37
@@ -1114,14 +1506,48 @@ export default function UserListScreen(): ReactElement {
               );
             }
           }
+          ref={
+            /**
+             * Records this row's control so a row click can place the cursor in it.
+             * @param {InputRef | null} instance - The control instance, or `null` on unmount.
+             * @returns {void} The node is registered, or its entry removed on unmount.
+             */
+            (instance: InputRef | null): void => {
+              const node = instance?.input ?? null;
+
+              /*
+               * WHY : Assumptions: the entry is DELETED on unmount rather than left holding `null`,
+               *       because the map outlives a page: the ten rows of the page just left would
+               *       otherwise stay in it forever, and a click on a row whose identifier happened to
+               *       repeat would resolve to a detached node.
+               */
+              if (node === null) {
+                actionCellRefs.current.delete(row.userId);
+                return;
+              }
+
+              actionCellRefs.current.set(row.userId, node);
+            }
+          }
           status={refusal === null ? '' : 'error'}
+          /*
+           * WHY : ⚠️ Assumptions: the measure is spread onto the DESIGN-SYSTEM CONTROL and not onto a
+           *       wrapper, because the padding custom property the expression reads resolves on
+           *       `.ant-input` and returns the empty string on an arbitrary element -- the same measured
+           *       constraint `ui/src/layout/recordLayout.ts` records for the declared-width ceiling.
+           */
+          style={actionCellStyle}
           value={actionCodes[row.userId] ?? ''}
         />
       </Form.Item>
     );
   }
 
-  const columns = buildUserListColumns({ renderActionCell, fixedPitchStyle });
+  const columns = buildUserListColumns({
+    renderActionCell,
+    fixedPitchStyle,
+    cellPadding: cssVar.padding,
+  });
 
   return (
     /*
@@ -1132,6 +1558,21 @@ export default function UserListScreen(): ReactElement {
      */
     <Flex vertical gap="large">
       <ScreenTitle>{USER_LIST_TITLE}</ScreenTitle>
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the screen ANNOUNCES its outstanding turn, where it previously
+       *       only showed one. A review found `aria-busy` on no button anywhere and no live region
+       *       naming the wait, so an operator who could not see the in-flight affordance had nothing at
+       *       all: the controls stayed reachable, the request was in flight, and the screen said nothing
+       *       about it. `busyAnnouncement` renders one visually hidden `role="status"` region -- always
+       *       mounted, empty while idle, because a live region has to be in the accessibility tree
+       *       BEFORE its content changes for the first change to be announced.
+       * WHY : Assumptions: the sentence is `REQUEST_IN_PROGRESS` from the message catalogue, which is
+       *       AUTHORED rather than transcribed, and taking an authored sentence here does not weaken
+       *       Rule T8. The reference has no equivalent to carry: a 3270 turn simply locked the keyboard,
+       *       so there is no mapset literal this could be displacing. Every sentence on this screen that
+       *       DOES have a mainframe source is still that source's, verbatim.
+       */}
+      {busyAnnouncement(browse.isLoading ? REQUEST_IN_PROGRESS : undefined)}
       {/*
        * WHY : Assumptions: the search field and the page indicator share a row because the mapset paints
        *       them on rows 6 and 4 of one header zone, above the list and below the title band. Their
@@ -1236,6 +1677,43 @@ export default function UserListScreen(): ReactElement {
         columns={columns}
         dataSource={browse.items}
         loading={browse.isLoading}
+        /*
+         * WHY : ⚠️ Purpose: `onRow` gives each row the affordance it did not have. A browser pass
+         *       measured `cursor: auto` on these rows both at rest and hovered, on a browse whose whole
+         *       purpose is choosing rows to act on -- so nothing about a row said it could be acted on,
+         *       and the only clue was the one-character control in its leading column, which the same
+         *       pass measured with a zero-width content box.
+         * WHY : ⚠️ Assumptions: a row click places the CURSOR in that row's action cell and types
+         *       nothing into it. The reference separates choosing a row from acting on it and the
+         *       separation is load-bearing: `PROCESS-ENTER-KEY` reads the action characters and only
+         *       then transfers control (`app/cbl/COUSR00C.cbl` L288 onward), so a mis-aimed click costs
+         *       a cursor move and never a navigation or a deletion. Writing `'U'` into the cell on a
+         *       click would put the operator one Enter away from an update they did not ask for, and
+         *       writing `'D'` one Enter away from a deletion.
+         * WHY : ⚠️ Assumptions: no `tabIndex` is put on the row, and the absence is deliberate. Each row
+         *       already carries a focusable, named control in its leading column, so the keyboard route
+         *       through the rows exists -- ten tab stops, each announcing `Sel` with the row's own
+         *       identifier -- and a focusable row would double every one of those stops with an element
+         *       that has no accessible name. This matches the treatment the authorization browse
+         *       records for the same measurement.
+         */
+        onRow={
+          /**
+           * Makes a row's whole area put the cursor in that row's action cell.
+           * @param {UserSummary} row - The user the row lists.
+           * @returns {{ onClick: () => void; style: CSSProperties }} The row's handler and style.
+           */
+          (row: UserSummary): { onClick: () => void; style: CSSProperties } => ({
+            /**
+             * Places the cursor in the clicked row's action cell, changing no value.
+             * @returns {void} Nothing; focus moves as a side effect.
+             */
+            onClick: (): void => {
+              actionCellRefs.current.get(row.userId)?.focus();
+            },
+            style: ROW_AFFORDANCE_STYLE,
+          })
+        }
         pagination={false}
         /*
          * WHY : Assumptions: the row key is the user identifier, which `app/cpy/CSUSR01Y.cpy` makes the
@@ -1244,8 +1722,46 @@ export default function UserListScreen(): ReactElement {
          *       row index instead would re-associate every typed entry with a different operator the
          *       moment a page turned.
          */
+        /*
+         * WHY : ⚠️ Refactoring Rationale: NO `size` is declared, and `size="small"` used to be. A
+         *       rendering comparison across the four browse screens found this one alone rendering
+         *       `ant-table-small` with 8-pixel cell padding while the card, transaction and
+         *       reference-type browses all took the design system's default 16. Nothing about this
+         *       mapset asks for the tighter scale -- `app/bms/COUSR00.bms` gives its ten row families
+         *       the same one row each that every other browse mapset gives its rows -- so the override
+         *       was density chosen for this screen and nowhere else, and three screens against one
+         *       settles which of the two is the tree's idiom.
+         * WHY : Alternatives Considered: keeping `small` and changing the other three, which would have
+         *       been the same reconciliation in the opposite direction. Rejected on two counts: those
+         *       three files belong to other work and this one does not, and the tighter scale reduces
+         *       the pointer target of the action cell in every row, which is the measurement
+         *       {@link actionCellWidthStyle} exists to protect.
+         * WHY : Trade-offs: ten rows at the larger padding are taller than ten at the smaller, so more
+         *       of the browse sits below the fold on a short viewport. That is accepted because the
+         *       shell already scrolls its content region -- design gap G1 gave up the fixed 24-row
+         *       display precisely so content could grow -- and because a row an operator has to scroll
+         *       to is better than a row whose action cell they cannot aim at.
+         */
         rowKey="userId"
-        size="small"
+        /*
+         * WHY : ⚠️ Purpose: give the grid its OWN horizontal scrolling region, so a viewport narrower
+         *       than the mapset's own row scrolls the grid rather than the page. {@link
+         *       userListTableMeasure} records the measurement this answers -- 398 pixels of document
+         *       against a 375-pixel viewport, with `window.scrollX` reaching 23 -- and why declaring
+         *       the extent is what creates the region.
+         * WHY : ⚠️ Assumptions: `tableLayout` is stated EXPLICITLY and must be, because the design
+         *       system would not infer it here. `@rc-component/table/lib/Table.js` L426-L442 falls
+         *       back to `'fixed'` only for a pinned column, a pinned header, a sticky grid or an
+         *       ellipsised column, and this grid has none of the four -- so with the extent declared
+         *       and the layout left to infer, it would resolve to `'auto'`. Under an automatic layout a
+         *       declared column width is a MINIMUM the content may grow, which is the exact defect
+         *       {@link USER_LIST_COLUMN_CELLS} records: the one-character action column measured about
+         *       700 pixels because an unconstrained `Input` reports a full-width intrinsic size. Fixing
+         *       the layout is what keeps the five mapset-derived shares authoritative once an extent
+         *       exists for them to resolve against.
+         */
+        scroll={{ x: userListTableMeasure(cssVar) }}
+        tableLayout="fixed"
       />
       {/*
        * WHY : Assumptions: the prompt is painted on every turn rather than shown only when a cell is in

@@ -503,7 +503,20 @@ async function keysCollidingRowsApart(): Promise<void> {
   expect(controlLabels.filter(isDetailControlLabel)).toHaveLength(2);
   expect(controlLabels.filter(isUpdateControlLabel)).toHaveLength(2);
 
-  const rowKeys = Array.from(table.querySelectorAll('tbody tr')).map(
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the selector excludes the design system's OWN measure row, which it
+   *       did not need to before. Under a declared table layout antd renders one extra `tr` carrying
+   *       `ant-table-measure-row` as the first child of the body -- it holds a zero-height cell per
+   *       column so the browser can report each column's resolved extent -- and that row carries no
+   *       `data-row-key`, so an unfiltered walk collected a leading `null` and the comparison failed
+   *       against a screen whose two data rows were keyed exactly as this case requires. The layout was
+   *       declared to stop this grid painting outside the viewport at a phone width, so the measure row
+   *       is a consequence of a fix rather than a regression to catch here.
+   *       Assumptions: the row is excluded by its own class rather than by dropping rows with no key,
+   *       because a DATA row that lost its key is precisely the defect this case exists to catch -- and
+   *       a filter on the key's presence would silently absorb it.
+   */
+  const rowKeys = Array.from(table.querySelectorAll('tbody tr:not(.ant-table-measure-row)')).map(
     /**
      * Reads one rendered row's reconciliation key.
      * @param {Element} row - One rendered table row.
@@ -518,10 +531,23 @@ async function keysCollidingRowsApart(): Promise<void> {
 /**
  * Asserts a superseded paging response cannot replace the page a later request delivered.
  *
- * Assumptions: the two forward steps are issued from a page that reports a further page each time, and
- * the SECOND settles first. Applying the first afterwards is the defect: its rows would replace the ones
- * on display while the ordinal had already moved twice, and the ordinal is what decides the backward
- * refusal -- so the screen would then offer a step back from a page it was not showing.
+ * ⚠️ Refactoring Rationale: the two outstanding turns are a BACKWARD step and a FORWARD one, and they
+ * were two forward steps. Two forward steps no longer produce two reads: `ui/src/hooks/usePagedQuery.ts`
+ * coalesces identical in-flight turns, keyed on the browse identity, the restart generation, the
+ * direction and the cursor, so the second click joined the first read instead of issuing one. The case
+ * was then asserting nothing -- the later response it settled had never been requested, so the negative
+ * assertion held whatever the hook did with the earlier one. Opposite directions are never coalesced,
+ * because they carry different cursors and would answer with different rows, so a backward step followed
+ * by a forward one is the smallest arrangement that still puts two genuinely different reads in flight.
+ *
+ * Assumptions: the SECOND of the two settles first, and applying the first afterwards is the defect
+ * being guarded against: its rows would replace the ones on display while the ordinal had already moved
+ * again, and the ordinal is what decides the backward refusal -- so the screen would then offer a step
+ * back from a page it was not showing.
+ *
+ * Assumptions: the arrangement needs a page from which BOTH keys are live, which is why one forward step
+ * is taken and settled before the two held reads are started. `hasPrev` is the hook's own ordinal rather
+ * than anything the envelope carries, so it becomes true only once a page has been left behind.
  * @returns {Promise<void>} Resolves once both settlements have been attempted.
  */
 async function discardsASupersededPagingResponse(): Promise<void> {
@@ -548,6 +574,7 @@ async function discardsASupersededPagingResponse(): Promise<void> {
 
   vi.mocked(listCards)
     .mockResolvedValueOnce(first)
+    .mockResolvedValueOnce(pageOf(ONE_ROW, true))
     .mockReturnValueOnce(supersededRead.promise)
     .mockReturnValueOnce(currentRead.promise);
 
@@ -556,8 +583,26 @@ async function discardsASupersededPagingResponse(): Promise<void> {
   renderBrowse();
   await screen.findByRole('table');
 
+  // WHY : Assumptions: one forward step is taken and ANSWERED first, so the browse is on a page with a
+  //       page behind it and a page ahead of it -- which is what makes both of the next two keys live.
   await user.click(screen.getByRole('button', { name: 'F8=Forward' }));
+  await waitFor(
+    /**
+     * Waits until the backward key has become live, which is the second page having arrived.
+     * @returns {void} Nothing; throws until the key is enabled.
+     */
+    () => {
+      expect(screen.getByRole('button', { name: 'F7=Backward' })).toBeEnabled();
+    },
+    { timeout: ASYNC_CONDITION_TIMEOUT_MS },
+  );
+
+  // WHY : Assumptions: backward THEN forward, so the two reads carry different directions and different
+  //       cursors and the hook has nothing to coalesce them on. Taken the other way round the assertions
+  //       would read identically and the case would still be exercising one read.
+  await user.click(screen.getByRole('button', { name: 'F7=Backward' }));
   await user.click(screen.getByRole('button', { name: 'F8=Forward' }));
+  expect(vi.mocked(listCards), 'both turns must have reached the client').toHaveBeenCalledTimes(4);
 
   currentRead.settle(pageOf(fresh, true));
   await waitFor(

@@ -57,8 +57,19 @@
  * Assumptions: the sign-on branch is NOT here. `app/cbl/COSGN00C.cbl` L230-L240 transfers an `'A'`
  * operator to `COADM01C` and everyone else to `COMEN01C`, and its migrated form -- a navigation
  * chosen from the signed group claim -- belongs to `ui/src/screens/signon/index.tsx`. This file
- * only makes `/admin` and `/menu` reachable behind the authentication guard; a reader looking for
- * the branch should look there.
+ * makes `/menu` reachable behind the authentication guard and `/admin` reachable behind the
+ * administrative one, so the same branch holds however an operator arrives; a reader looking for the
+ * branch AT SIGN-ON should look there.
+ *
+ * ⚠️ Refactoring Rationale: the BARE ORIGIN takes the same branch, where it used to redirect every
+ * operator to `/menu` regardless of claim. {@link RootRedirect} replaces that fixed redirect. The
+ * note this replaces argued the fixed destination was correct because the origin is reachable with no
+ * session, so choosing between the two menus would mean reading a claim that might not exist. That
+ * argument does not survive: reading the claim at a public route is harmless -- `useAuth` answers
+ * `isAdmin: false` when no session is held, which selects `/menu`, and the authentication guard then
+ * bounces an anonymous caller to sign-on exactly as before -- while the fixed destination contradicts
+ * L230-L240 for the one case it was reached in, sending an administrator holding a session to the
+ * ORDINARY menu. The reference never puts `COMEN01C` in front of an `'A'` operator.
  *
  * Authentication boundary ----------------------- Assumptions: exactly one screen route is outside
  * the guard, and it is sign-on, because sign-on is the route that establishes the credential the
@@ -81,14 +92,35 @@
  * fields exist only while that layout route does, and a second mount anywhere would frame every
  * guarded screen twice.
  *
- * Assumptions: the administrative subtree holds EXACTLY the six entries of the administrative option
- * table `app/cpy/COADM02Y.cpy` -- `/users`, `/users/new`, `/users/:id/edit`, `/users/:id/delete`,
- * `/reference/transaction-types` and `/reference/transaction-types/:cd` -- and nothing else. That
- * record (L56-L59) carries no `USRTYPE` field, because its six options are administrative by
- * construction, so the option table IS the boundary and a seventh gated path would be a target-side
- * invention. `/admin` is therefore an ordinary authenticated route: it is the administrative MENU,
- * which is reachable but acts on nothing, because every option an operator can choose from it leads
- * to one of the six gated paths and meets `RequireAdmin` there.
+ * Assumptions: the administrative subtree holds the six entries of the administrative option table
+ * `app/cpy/COADM02Y.cpy` -- `/users`, `/users/new`, `/users/:id/edit`, `/users/:id/delete`,
+ * `/reference/transaction-types` and `/reference/transaction-types/:cd` -- AND the menu that lists
+ * them, `/admin`, for seven gated paths in total.
+ *
+ * ⚠️⚠️ Refactoring Rationale: `/admin` was classified `authenticated` and is now `administrative`,
+ * and this is the migration's largest correction to this file. The argument that stood here was that
+ * the option record L56-L59 carries no `USRTYPE` field, so its six options ARE the boundary and a
+ * seventh gated path would be a target-side invention; the menu was said to be "reachable but acts on
+ * nothing" because every option leads to one of the six. Measurement refuted the second half and the
+ * first half was answering the wrong question. A `carddemo-user` rendered the COMPLETE administrative
+ * menu -- the `CA00`/`COADM01C` title band, all six option labels from `app/cpy/COADM02Y.cpy`, and a
+ * focused option field that accepted and dispatched an entry -- with an EMPTY message band and no
+ * refusal anywhere on the screen. So it did act: it disclosed the whole administrative capability
+ * inventory and then took the operator to `/users`, where the refusal finally fired, which is a
+ * refusal delivered one screen too late and at the wrong screen. What the missing `USRTYPE` field
+ * means is that the six options need no per-option test, not that the menu listing them is ordinary:
+ * `app/cbl/COSGN00C.cbl` L230-L240 is the reference's own statement of who may see it, and it puts
+ * `COADM01C` in front of an `'A'` operator and `COMEN01C` in front of everyone else, unconditionally.
+ * A `'U'` operator has no path to that menu in the baseline at all, so gating it restores the
+ * reference boundary rather than inventing a target-side one -- and `app/cbl/COMEN01C.cbl` L140,
+ * which refuses an administrative option ON THE MENU the operator is already looking at, is the
+ * reference's evidence that a refusal belongs at the point of entry.
+ *
+ * Assumptions: nothing else moves. The six option paths were already gated and stay gated; the
+ * guard is unchanged; and because the administrative branch is one subtree, the menu is now gated by
+ * WHERE IT IS WRITTEN rather than by a second mechanism. {@link ROUTE_TABLE} publishes the resulting
+ * class for every path and `ui/src/routerRoutes.test.tsx` pins all 21 by name, so an access level
+ * omitted from a route added later fails a case instead of shipping.
  *
  * The frame is mounted here ------------------------- Refactoring Rationale:
  * `ui/src/layout/AppShell.tsx` is mounted as TWO SIBLING layout routes -- one holding the public
@@ -145,22 +177,48 @@
  *       regress the routing version; the name is described rather than written here so that a
  *       search proving this module does not depend on it stays clean.
  */
-import { Button, Result, Spin } from 'antd';
+import { Button, Flex, Spin, Typography } from 'antd';
 import { lazy, Suspense } from 'react';
 import type { ReactElement } from 'react';
 import { createBrowserRouter, Navigate, Outlet, useNavigate } from 'react-router';
 import type { RouteObject } from 'react-router';
 
-import { AppShell } from './layout/AppShell';
+/*
+ * WHY : Assumptions: the session hook is imported HERE as well as by `./routes/guards`, and that is
+ *       one reader of one module rather than a second copy of the decision. Both read the same signed
+ *       claim through the same hook, which holds its snapshot in module scope behind
+ *       `useSyncExternalStore` with no provider -- so two callers observe one session and cannot
+ *       disagree about it. What this file does with it is choose a DESTINATION at the bare origin and
+ *       at the two out-of-frame surfaces; what the guards do with it is refuse. Neither can grant
+ *       anything: the hook publishes no setter for the groups or for the derived flag.
+ */
+import { useAuth } from './hooks/useAuth';
+import { AppShell, useShellSlot } from './layout/AppShell';
+import { ScreenTitle } from './layout/ScreenTitle';
 import { BoundedShellOutlet } from './layout/ShellContentBoundary';
+import { usePfKeys } from './layout/usePfKeys';
 import {
-  OPEN_CARD_BROWSE_LABEL,
+  ADMIN_MENU_OPTIONS,
+  MAIN_MENU_HEADINGS,
+  MAIN_MENU_OPTIONS,
   SCREEN_NOT_AVAILABLE_DETAIL,
   SCREEN_NOT_AVAILABLE_TITLE,
+  SIGN_ON_SUBMIT_LABEL,
+  USER_LIST_KEY_LABELS,
 } from './messages/messages';
 import { CARD_DETAIL_ROUTE, CARD_EDIT_ROUTE } from './routes/cards';
 import { RequireAdmin, RequireSignOn, SIGN_ON_ROUTE } from './routes/guards';
-import { ADMIN_MENU_ROUTE, MAIN_MENU_ROUTE, navigateSafely } from './routes/navigation';
+import {
+  ADMIN_MENU_ROUTE,
+  CARD_DETAIL_ENTRY_ROUTE,
+  CARD_UPDATE_ENTRY_ROUTE,
+  MAIN_MENU_ROUTE,
+  TRANSACTION_DETAIL_ENTRY_ROUTE,
+  navigateSafely,
+  navigationHandler,
+  roleLandingRoute,
+} from './routes/navigation';
+import { routeForProgram } from './routes/programRoutes';
 import { SignOnScreen } from './screens/signon';
 
 /*
@@ -613,18 +671,26 @@ export interface RouteTableEntry {
  * reader check it against `app/cpy/COMEN02Y.cpy` and `app/cpy/COADM02Y.cpy` by counting. The extra
  * row is withdrawn with the route it described.
  *
- * ⚠️ Refactoring Rationale: `/admin` is `authenticated` here, where it was `administrative`. The
- * administrative class is reserved for exactly the six options of `app/cpy/COADM02Y.cpy`, and the
- * menu that lists them is not one of them. Trade-offs: a signed-on non-administrator can therefore
- * RENDER the administrative menu. What they get is a list of six static option labels transcribed
- * from that copybook -- the screen reads no record and calls no service to paint them -- and every
- * option it dispatches to is one of the six gated paths, so each destination refuses them in turn.
- * Assumptions: that residual is accepted rather than hidden, because a guard here decides only what
- * is RENDERED: each service validates the token and its group claim independently, so nothing behind
- * those six paths is reachable with an ordinary claim whatever this table renders. The reference is
- * stricter -- `app/cbl/COSGN00C.cbl` L230-L240 never puts `COADM01C` in front of a `'U'` operator --
- * and the divergence is the frozen specification's, taken deliberately so that the six gated paths
- * are exactly the six administrative options and nothing else.
+ * ⚠️⚠️ Refactoring Rationale: `/admin` is `administrative` here, where it was `authenticated`. The
+ * withdrawn note argued that the administrative class is reserved for exactly the six options of
+ * `app/cpy/COADM02Y.cpy`, that the menu listing them is not one of them, and that a
+ * non-administrator rendering it obtains nothing because the screen reads no record and every option
+ * refuses them at its destination. Two of those three statements are true and the conclusion is
+ * still wrong. What a `carddemo-user` obtained was the entire administrative capability inventory --
+ * the `COADM01C` identity band, all six option labels, and a live dispatcher that accepted an entry
+ * and moved them to `/users` before anything refused them -- disclosed on a screen whose message band
+ * was EMPTY, so nothing on it said they were not entitled to be there. Disclosure is what a guard on
+ * a menu prevents; the absence of a data read is why the disclosure was silent rather than why it was
+ * harmless.
+ *
+ * Assumptions: the enforcement claim in the withdrawn note stands and is unaffected either way --
+ * each service validates the token and its group claim independently, so no administrative RECORD
+ * was ever reachable with an ordinary claim. This row governs disclosure and refusal placement, and
+ * on both counts `app/cbl/COSGN00C.cbl` L230-L240 is unambiguous: an `'A'` operator is transferred to
+ * `COADM01C`, everyone else to `COMEN01C`, so a `'U'` operator has no path to this menu at all. The
+ * divergence the withdrawn note described as deliberate was therefore a divergence FROM the reference
+ * as well as from the AAP's own rule that the admin/user split comes from the signed claim, and it is
+ * closed.
  */
 export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { path: SIGN_ON_ROUTE, access: 'public', program: 'COSGN00C' },
@@ -641,7 +707,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { path: REPORTS_PATH, access: 'authenticated', program: 'CORPT00C' },
   { path: AUTH_SUMMARY_PATH, access: 'authenticated', program: 'COPAUS0C' },
   { path: AUTH_DETAIL_PATH, access: 'authenticated', program: 'COPAUS1C' },
-  { path: ADMIN_MENU_ROUTE, access: 'authenticated', program: 'COADM01C' },
+  { path: ADMIN_MENU_ROUTE, access: 'administrative', program: 'COADM01C' },
   { path: USER_LIST_PATH, access: 'administrative', program: 'COUSR00C' },
   { path: USER_ADD_PATH, access: 'administrative', program: 'COUSR01C' },
   { path: USER_UPDATE_PATH, access: 'administrative', program: 'COUSR02C' },
@@ -649,6 +715,34 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { path: REF_TYPE_LIST_PATH, access: 'administrative', program: 'COTRTLIC' },
   { path: REF_TYPE_EDIT_PATH, access: 'administrative', program: 'COTRTUPC' },
 ];
+
+/**
+ * The keyless second address of three screens whose primary address carries a record key.
+ *
+ * Purpose: `app/cpy/COMEN02Y.cpy` gives the main menu eleven options naming eleven distinct programs,
+ * and `COCRDSLC`, `COCRDUPC` and `COTRN01C` are addressed per record -- so a menu option, which carries
+ * no record, had nowhere of their own to send an operator and three options resolved to the browse that
+ * mints their key. These three rows are the addresses of each program's OWN first turn, the one the
+ * reference paints when its selection carrier arrives blank.
+ *
+ * ⚠️ Assumptions: they are published as a SEPARATE table rather than as three more rows of
+ * {@link ROUTE_TABLE}, and the reason is that table's one load-bearing property: it is a bijection, one
+ * row per program, which is what lets a reader check it against `app/cpy/COMEN02Y.cpy` and
+ * `app/cpy/COADM02Y.cpy` by counting. A withdrawn `/users/edit` row cost exactly that countability and
+ * is the recorded precedent -- so a second address for a program that already has one goes here, where
+ * it is visibly an ALIAS of a program named there, and `ui/src/routerRoutes.test.tsx` holds each row to
+ * naming a program the primary table declares exactly once and to sharing that row's guard.
+ *
+ * Assumptions: no `access` field. An alias may not sit behind a different guard from the screen it
+ * reaches, so recording one here would create a second place for the guard to be wrong; the test derives
+ * it from the primary row instead, which makes divergence unrepresentable rather than merely unlikely.
+ */
+export const KEYLESS_ENTRY_ROUTES: readonly { readonly path: string; readonly program: string }[] =
+  [
+    { path: CARD_DETAIL_ENTRY_ROUTE, program: 'COCRDSLC' },
+    { path: CARD_UPDATE_ENTRY_ROUTE, program: 'COCRDUPC' },
+    { path: TRANSACTION_DETAIL_ENTRY_ROUTE, program: 'COTRN01C' },
+  ];
 
 /**
  * Renders the authenticated subtree only for a caller holding a session.
@@ -670,6 +764,39 @@ function AuthenticatedSubtree(): ReactElement {
       <Outlet />
     </RequireSignOn>
   );
+}
+
+/**
+ * Sends the bare origin to the menu the operator's own claim entitles them to.
+ *
+ * Purpose: reproduce the reference's entry branch for the one address that has no reference
+ * equivalent. `app/cbl/COSGN00C.cbl` L230-L240 transfers an `'A'` operator to `COADM01C` and everyone
+ * else to `COMEN01C`; sign-on performs that branch on the response it authenticated with, and this
+ * performs the same branch for an operator who arrives at `/` with a session already held.
+ *
+ * ⚠️ Refactoring Rationale: this component replaces a fixed `<Navigate to={MAIN_MENU_ROUTE} replace />`
+ * written inline in the route table. That redirect was role-independent, so an administrator who
+ * opened the bare origin landed on the ORDINARY main menu -- `COMEN01C`, transaction `CM00` -- which
+ * is a screen the reference never puts in front of an `'A'` operator. The argument for the fixed form
+ * was that the origin is reachable with no session, so choosing between the menus would mean reading
+ * a claim that might be absent; that is not a cost, because `useAuth` answers `isAdmin: false` with no
+ * session held and the main menu's own guard then bounces the anonymous arrival to sign-on, which is
+ * exactly what the fixed redirect did.
+ *
+ * Assumptions: the claim is READ and never asserted. `isAdmin` derives from the signed
+ * `cognito:groups` claim through `ui/src/hooks/useAuth.ts`, which publishes no setter for it, so this
+ * component chooses a destination and grants nothing -- and the destination it chooses is itself
+ * guarded, so a claim a caller could somehow influence would change which guard refuses them rather
+ * than whether one does.
+ *
+ * Assumptions: the transition is `replace`, so the bare origin does not become a history entry the
+ * browser's own back control can return an operator to -- which would bounce them forward again.
+ * @returns {ReactElement} A redirect to the administrative menu for an administrator, and to the main
+ *   menu for every other caller including an anonymous one.
+ */
+function RootRedirect(): ReactElement {
+  const { isAdmin } = useAuth();
+  return <Navigate to={roleLandingRoute(isAdmin)} replace />;
 }
 
 /*
@@ -694,40 +821,177 @@ export const NOT_FOUND_TITLE = SCREEN_NOT_AVAILABLE_TITLE;
 export const NOT_FOUND_SUBTITLE = SCREEN_NOT_AVAILABLE_DETAIL;
 
 /**
- * Renders a bounded not-found result without reflecting the rejected path.
+ * PF3 legend the not-found surface paints, re-published from the message catalogue.
  *
- * Assumptions: the rejected address is deliberately NOT echoed. The catch-all is reachable by an
- * unauthenticated caller with any address, so interpolating the requested path into the rendered
- * document would put caller-chosen text on a page this application serves, and it would tell an
- * operator nothing they did not type.
+ * Assumptions: the label is BORROWED from a delivered screen rather than authored here. `F3=Back` is
+ * the legend `app/bms/COUSR00.bms` paints on its row-24 field and five of the delivered screens carry
+ * it, so an operator meeting it on this surface reads the key they already know. Authoring a new
+ * sentence for an additive surface is what Rule T8 exists to prevent, and the alternative catalogued
+ * spelling -- `F3=Exit` on the two menus -- would be wrong here, because this key returns the operator
+ * to the application rather than ending their session the way `app/cbl/COADM01C.cbl` L100-L102 does.
+ */
+const RECOVERY_EXIT_KEY_LABEL = USER_LIST_KEY_LABELS.PFK03;
+
+/** One destination an out-of-frame surface offers: the label it paints and the route it opens. */
+interface RecoveryDestination {
+  /** Operator-visible label, taken from the message catalogue and never composed here. */
+  readonly label: string;
+  /** Route the label opens, resolved from the reference program the option names. */
+  readonly path: string;
+}
+
+/**
+ * Lists the screens the operator's own claim entitles them to, one entry per destination.
  *
- * Trade-offs: the single control returns to the card browse rather than to the menu. The browse is
- * reachable by every operator, administrator or not, whereas offering the menu would mean choosing
- * between `/menu` and `/admin` from a claim this surface has deliberately not read -- and this
- * surface is reachable with no session at all, where neither menu can be rendered. The cost is one
- * extra hop for an operator who wanted the menu.
- * @returns {ReactElement} The not-found result.
+ * Purpose: supply the list {@link NOT_FOUND_SUBTITLE} promises. That sentence ends `Use a listed
+ * screen below.` and nothing was listed -- the surface offered one control -- so the sentence
+ * described a list the operator could not see.
+ *
+ * Assumptions: the entries are derived from the reference's own option tables rather than authored
+ * here, so every label is a verbatim transcription: `app/cpy/COADM02Y.cpy` for an administrator and
+ * `app/cpy/COMEN02Y.cpy` for everyone else, through the catalogue's `ADMIN_MENU_OPTIONS` and
+ * `MAIN_MENU_OPTIONS`. Deriving them is what keeps this surface free of invented screen names, which
+ * is Rule T8's requirement even for a surface the reference has no equivalent of.
+ *
+ * Assumptions: entries are DEDUPLICATED by destination, keeping the first label that reaches each
+ * route. Several options share a route by design -- the three card options and the two transaction
+ * browse options resolve to the browse that acquires the selector each screen needs, which
+ * `ui/src/routes/programRoutes.ts` records -- so listing every option would paint the same
+ * destination three times under three names. A menu must show all eleven because an operator types an
+ * option number; a list of destinations must show each destination once.
+ *
+ * Assumptions: an option this delivery carries no screen for is DROPPED rather than listed as
+ * unavailable. `routeForProgram` answers `null` for exactly that case, and the not-installed sentence
+ * belongs to the menu that dispatched the option, not to a surface offering somewhere to go.
+ * @param {boolean} isAdmin - Whether the operator's signed claim carries the administrative group.
+ * @returns {readonly RecoveryDestination[]} One entry per reachable destination, in the option
+ *   table's own order.
+ */
+function recoveryDestinations(isAdmin: boolean): readonly RecoveryDestination[] {
+  const options = isAdmin ? ADMIN_MENU_OPTIONS : MAIN_MENU_OPTIONS;
+  const claimed = new Set<string>();
+  const destinations: RecoveryDestination[] = [];
+
+  for (const option of options) {
+    const path = routeForProgram(option.programName);
+    if (path !== null && !claimed.has(path)) {
+      claimed.add(path);
+      /*
+       * WHY : Assumptions: the name is TRIMMED for display. Every option name is stored at the
+       *       35-character width `app/cpy/COMEN02Y.cpy` and `app/cpy/COADM02Y.cpy` declare, and the
+       *       two menu screens render it padded inside a fixed-pitch composed line so the option
+       *       list aligns on its separator exactly as the terminal's did. A control label has no
+       *       column to align with and HTML collapses the padding anyway, so the padding would be
+       *       invisible weight on the value. `ui/index.html` takes the same decision for the same
+       *       reason with the browser tab's copy of the `PIC X(40)` application title.
+       */
+      destinations.push({ label: option.name.trim(), path });
+    }
+  }
+
+  return destinations;
+}
+
+/**
+ * Renders the not-found surface inside the frame, without reflecting the rejected path.
+ *
+ * Assumptions: the rejected address is deliberately NOT echoed, and this is the one property of the
+ * previous surface that is preserved unchanged. The catch-all is reachable by an unauthenticated
+ * caller with any address, so interpolating the requested path into the rendered document would put
+ * caller-chosen text on a page this application serves, and it would tell an operator nothing they
+ * did not type.
+ *
+ * ⚠️ Refactoring Rationale: this replaces an antd `Result status="404"` mounted OUTSIDE the frame,
+ * and both halves of that were measured defects. Outside the frame, the surface had no header, no
+ * footer, no message row, no key legend and no skip link -- every one of them measured absent -- so
+ * an operator who mistyped an address lost the whole application chrome and had only the browser's
+ * own back control to recover with. And the result's `extra` slot held ONE outlined control opening
+ * the card browse, while its own subtitle promised a list of screens: the weakest available emphasis
+ * on the only way out, beneath a sentence describing something that was not there.
+ *
+ * Assumptions: it delegates a message slot whose text is `null` and a key legend, and NO screen
+ * identity. The empty message slot reserves the row-23 line, which is how all 21 screens ask for the
+ * frame's message channel without having anything to say; the legend puts a real control in the
+ * row-24 zone and binds PF3 to it. Identity is withheld because there is no program here -- the
+ * reference paints `Tran:` and `Prog:` from a program's own `WS-TRANID` and `WS-PGMNAME`, and this
+ * surface replaces no program, so naming one would report an operator into a transaction that does
+ * not exist.
+ *
+ * Trade-offs: the primary control opens the MAIN menu for every signed-on operator, administrator or
+ * not, rather than the menu their claim lands them on. `app/bms/COADM01.bms`'s `'Admin Menu'` caption
+ * is authored in the administrative screen's own lazily-loaded module rather than in the shared
+ * catalogue, and importing it here would pull that whole chunk into the entry bundle -- so this
+ * surface can name the ordinary menu and not the administrative one. The cost is bounded: every
+ * administrative destination listed below returns to `/admin` on its own PF3, so an administrator is
+ * one key from their menu from any of them.
+ * @returns {ReactElement} The not-found surface, painted inside the frame's content region.
  */
 function NotFoundScreen(): ReactElement {
   const navigate = useNavigate();
+  const { signedOn, isAdmin } = useAuth();
+
+  /*
+   * WHY : Assumptions: an operator holding NO session is offered sign-on and nothing else. Every
+   *       other route in the table is guarded, so listing screens to an anonymous caller would list
+   *       destinations that immediately bounce them here-adjacent -- to sign-on -- with a redirect
+   *       they did not ask for. The label is the catalogue's own sign-on control label, so the
+   *       wording matches the button they are about to meet.
+   */
+  const primary: RecoveryDestination = signedOn
+    ? { label: MAIN_MENU_HEADINGS.SCREEN, path: MAIN_MENU_ROUTE }
+    : { label: SIGN_ON_SUBMIT_LABEL, path: SIGN_ON_ROUTE };
+  const alternatives = signedOn ? recoveryDestinations(isAdmin) : [];
+
+  const { bindings, invoke } = usePfKeys({
+    PFK03: {
+      /**
+       * Leaves the not-found surface for the primary destination.
+       * @returns {void} Nothing; the transition is performed as a side effect on the router.
+       */
+      onInvoke: (): void => {
+        navigateSafely(navigate, primary.path);
+      },
+      label: RECOVERY_EXIT_KEY_LABEL,
+    },
+  });
+
+  useShellSlot({
+    message: { text: null },
+    pfKeys: { keys: bindings, onInvoke: invoke },
+  });
+
   return (
-    <Result
-      status="404"
-      title={NOT_FOUND_TITLE}
-      subTitle={NOT_FOUND_SUBTITLE}
-      extra={
-        <Button
-          onClick={
-            /** Returns the operator to the card browse from the not-found result. */
-            () => {
-              navigateSafely(navigate, CARD_LIST_PATH);
-            }
-          }
-        >
-          {OPEN_CARD_BROWSE_LABEL}
+    <Flex vertical gap="middle" align="flex-start">
+      <ScreenTitle>{NOT_FOUND_TITLE}</ScreenTitle>
+      <Typography.Text>{NOT_FOUND_SUBTITLE}</Typography.Text>
+      {/*
+        Assumptions: the destinations are laid out with the design system's own primitives and each
+        one is a `Button`, so no raw element and no bespoke CSS appears on this surface. The primary
+        variant marks the one destination that leads everywhere else; the rest are `type="link"`,
+        which is antd's low-emphasis variant rather than a colour written here.
+      */}
+      <Flex vertical gap="small" align="flex-start">
+        <Button type="primary" onClick={navigationHandler(navigate, primary.path)}>
+          {primary.label}
         </Button>
-      }
-    />
+        {alternatives.map(
+          /**
+           * Renders one alternative destination as a low-emphasis control.
+           * @param {RecoveryDestination} destination - The label and route to offer.
+           * @returns {ReactElement} The control that opens it.
+           */
+          (destination: RecoveryDestination): ReactElement => (
+            <Button
+              key={destination.label}
+              type="link"
+              onClick={navigationHandler(navigate, destination.path)}
+            >
+              {destination.label}
+            </Button>
+          ),
+        )}
+      </Flex>
+    </Flex>
   );
 }
 
@@ -748,13 +1012,21 @@ function NotFoundScreen(): ReactElement {
  * part of the signed payload, so a group a caller adds locally changes what is RENDERED and never
  * what is permitted.
  *
- * Assumptions: exactly SIX paths sit in this subtree, and they are exactly the six options of
- * `app/cpy/COADM02Y.cpy` -- user list, user add, user update, user delete, transaction-type list and
- * transaction-type maintenance. That record (L51-L55) carries no user-type field at all, because
- * every administrative option is administrative by construction, unlike the main-menu record whose
- * every entry is explicitly `'U'`. Nothing else is gated: `/admin` renders the menu that lists these
- * six and is authenticated rather than administrative, for the reason {@link ROUTE_TABLE} records,
- * and `/transactions/new` is a main-menu option whose user type is `'U'`.
+ * Assumptions: SEVEN paths sit in this subtree -- the six options of `app/cpy/COADM02Y.cpy` (user
+ * list, user add, user update, user delete, transaction-type list and transaction-type maintenance)
+ * and `/admin`, the menu that lists them. That record (L51-L55) carries no user-type field at all,
+ * because every administrative option is administrative by construction, unlike the main-menu record
+ * whose every entry is explicitly `'U'`.
+ *
+ * ⚠️ Refactoring Rationale: `/admin` was NOT in this subtree and now is. It was excluded on the
+ * ground that the option table names six options and the menu is not one of them; what that reading
+ * missed is that the same copybook is a list of administrative capabilities, so rendering it to an
+ * operator who may use none of them discloses the inventory and defers the refusal by one screen.
+ * `app/cbl/COSGN00C.cbl` L230-L240 is the boundary the reference draws, and it draws it at the menu.
+ *
+ * Assumptions: nothing else is gated. `/transactions/new` in particular stays outside, because it is
+ * main-menu option 8 with user type `'U'` -- the `'(Admin Only)'` wording at `app/cpy/COMEN02Y.cpy`
+ * L69 sits on a commented-out variant that no live entry asserts.
  * @returns {ReactElement} The administrative subtree wrapped in the administrative guard.
  */
 function AdminSubtree(): ReactElement {
@@ -795,12 +1067,13 @@ function AdminSubtree(): ReactElement {
  * correspondence; keeping the order identical as well as the content is what makes the comparison a
  * reading rather than a search.
  *
- * Assumptions: the root redirect and the not-found result are the only two entries outside the
- * frame, and deliberately so. Both are router artifacts rather than migrated screens -- the
- * reference has no concept of either -- so framing them would wrap a redirect in a title band for
- * the one render before it leaves, and would report a transaction identifier for a screen that does
- * not exist. Neither shows a sign-off control in any case: the shell renders that only while a
- * session is held.
+ * ⚠️ Assumptions: the bare-origin redirect is the ONLY entry outside the frame, where the not-found
+ * result used to be outside it too. A redirect is genuinely unframeable -- it renders for one commit
+ * and then leaves, so a frame around it would paint a title band for a screen nobody sees -- while an
+ * unmatched address is a surface an operator READS, and reading it with no chrome cost them the
+ * message row, the key legend and the skip link. {@link NotFoundScreen} records the measurement.
+ * Neither shows a sign-off control unless a session is held: the shell renders that from the session,
+ * not from the route.
  *
  * Exceptions or errors: none are raised from here. A path matching nothing resolves to
  * {@link NotFoundScreen}, and a chunk that fails to load surfaces through the one `Suspense`
@@ -815,17 +1088,14 @@ export const CARD_DEMO_ROUTES: readonly RouteObject[] = [
     ),
     children: [
       /*
-       * WHY : Assumptions: the bare root redirects to the MAIN MENU because that is the reference's
-       *       own entry sequence -- `app/cbl/COSGN00C.cbl` L230-L240 transfers to a MENU program and
+       * WHY : Assumptions: the bare root redirects to a MENU because that is the reference's own
+       *       entry sequence -- `app/cbl/COSGN00C.cbl` L230-L240 transfers to a menu program and
        *       never to a browse -- so an operator who lands here sees the screen a sign-on would
-       *       have taken them to. It resolves to `/menu` rather than choosing between the two menus,
-       *       because choosing would mean reading a claim at a route that is reachable with no
-       *       session; the guard on `/menu` then redirects an unauthenticated arrival to sign-on,
-       *       and the sign-on screen performs the `'A'`-versus-`'U'` branch itself.
-       * WHY : Assumptions: the redirect is `replace`, so the bare root does not become a history
-       *       entry an operator can be bounced back to by the browser's own back control.
+       *       have taken them to. WHICH menu is the claim's decision and not this table's, which is
+       *       why the element is a component: {@link RootRedirect} records what the previous fixed
+       *       `/menu` destination cost an administrator.
        */
-      { path: ROOT_PATH, element: <Navigate to={MAIN_MENU_ROUTE} replace /> },
+      { path: ROOT_PATH, element: <RootRedirect /> },
       /*
        * WHY : ⚠️ Refactoring Rationale: sign-on has its OWN frame branch, a SIBLING of the guarded
        *       branch below, where it was previously a child of one shell mount shared with the
@@ -860,7 +1130,34 @@ export const CARD_DEMO_ROUTES: readonly RouteObject[] = [
         children: [
           {
             element: <BoundedShellOutlet />,
-            children: [{ path: SIGN_ON_ROUTE, element: <SignOnScreen /> }],
+            children: [
+              { path: SIGN_ON_ROUTE, element: <SignOnScreen /> },
+              /*
+               * WHY : ⚠️ Refactoring Rationale: the catch-all is a child of THIS branch, where it was
+               *       a top-level sibling of both `<AppShell />` mounts. Mounted outside the frame it
+               *       had no header, no footer, no message row, no key legend and no skip link --
+               *       every one measured absent -- so mistyping an address cost an operator the whole
+               *       chrome and left the browser's back control as the only way out. The note that
+               *       stood here argued the surface "replaces no program" so framing it would report a
+               *       transaction identifier for a screen that does not exist; that conclusion does not
+               *       follow from its premise, because the frame paints identity only when a screen
+               *       DELEGATES it, and {@link NotFoundScreen} delegates none. What it delegates is the
+               *       message row and a legend, so the operator keeps every zone and gains a control.
+               * WHY : Assumptions: it is in the PUBLIC branch, so it stays reachable with no session --
+               *       which it must be, because an unmatched address is the one surface an
+               *       unauthenticated caller reaches without passing a guard, and bouncing them to
+               *       sign-on instead would answer a mistyped URL with a credential prompt. The frame
+               *       renders its sign-off control only while a session is held, so an anonymous
+               *       arrival is still offered nothing they cannot do.
+               * WHY : Assumptions: a splat cannot shadow a declared route. React Router scores a
+               *       dynamic splat below every static and every parameterised segment, so all 21
+               *       paths continue to match their own screens whichever branch they sit in; the
+               *       reachability census in `ui/src/routerReachability.test.tsx` renders each of them
+               *       through the shipped table and would report any shadowing as a not-found result
+               *       in place of a screen.
+               */
+              { path: NOT_FOUND_PATH, element: <NotFoundScreen /> },
+            ],
           },
         ],
       },
@@ -897,6 +1194,30 @@ export const CARD_DEMO_ROUTES: readonly RouteObject[] = [
                   { path: ACCOUNT_VIEW_PATH, element: <AccountViewScreen /> },
                   { path: ACCOUNT_UPDATE_PATH, element: <AccountUpdateScreen /> },
                   { path: CARD_LIST_PATH, element: <CardListScreen /> },
+                  /*
+                   * WHY : ⚠️ Purpose: the two KEYLESS card addresses are mounted here, beside the keyed
+                   *       ones, because they reach the same two screens with no selector -- which is the
+                   *       arrival `app/cbl/COCRDSLC.cbl` L490-L491 paints when it falls back to
+                   *       `WS-PROMPT-FOR-INPUT` on an empty map with account and card fields to type
+                   *       into. Main-menu options 4 and 5 name `COCRDSLC` and `COCRDUPC` and carry no
+                   *       record, so without these two addresses both options resolved to the browse and
+                   *       eleven options reached eight destinations.
+                   * WHY : Assumptions: no ordering rule is needed against the dynamic siblings below,
+                   *       for the reason already recorded at `/transactions/new`: React Router scores a
+                   *       static segment above a dynamic one, so `/cards/view` and `/cards/edit` reach
+                   *       their own routes and only a real selector reaches `/cards/:cardKey`. They are
+                   *       declared in reading order rather than in a precedence order.
+                   * WHY : ⚠️ Assumptions: they are their own ROUTES rather than sentinel values matched
+                   *       by `/cards/:cardKey`, and `ui/src/screens/cardDetail/index.tsx` is why -- it
+                   *       distinguishes a parameter that is present but unusable from one that is absent,
+                   *       painting invalid-link guidance for the first. A sentinel would tell an operator
+                   *       who chose a menu option that their link was broken. `ui/src/routes/navigation.ts`
+                   *       records the measurement behind the third alternative, an empty segment: React
+                   *       Router matches none, so `/cards//edit` falls through to the catch-all below and
+                   *       paints `Screen not available`.
+                   */
+                  { path: CARD_DETAIL_ENTRY_ROUTE, element: <CardDetailScreen /> },
+                  { path: CARD_UPDATE_ENTRY_ROUTE, element: <CardUpdateScreen /> },
                   { path: CARD_DETAIL_ROUTE, element: <CardDetailScreen /> },
                   { path: CARD_EDIT_ROUTE, element: <CardUpdateScreen /> },
                   /*
@@ -920,6 +1241,21 @@ export const CARD_DEMO_ROUTES: readonly RouteObject[] = [
                    */
                   { path: TRANSACTION_LIST_PATH, element: <TransactionListScreen /> },
                   { path: TRANSACTION_ADD_PATH, element: <TransactionAddScreen /> },
+                  /*
+                   * WHY : ⚠️ Purpose: the KEYLESS transaction-detail address, which main-menu option 7
+                   *       names. `app/cbl/COTRN01C.cbl` L103-L108 reads its selection carrier and L109
+                   *       paints the EMPTY map when it arrives blank, with the transaction identifier as
+                   *       a field to type into -- so the program has a first turn that needs no
+                   *       selection, and option 7 previously entered the screen option 6 enters.
+                   * WHY : ⚠️ Assumptions: a route of its own rather than a sentinel under
+                   *       `/transactions/:id`, and this screen forces it more strongly than the card
+                   *       screens do: `ui/src/screens/transactionDetail/index.tsx` seeds its lookup
+                   *       control from the parameter and reads on a present one, so a sentinel arrival
+                   *       would issue a lookup for the literal sentinel text and paint a not-found
+                   *       sentence about a record nobody asked for. A static path leaves the parameter
+                   *       `undefined`, which that screen already documents as its selector-free arrival.
+                   */
+                  { path: TRANSACTION_DETAIL_ENTRY_ROUTE, element: <TransactionDetailScreen /> },
                   { path: TRANSACTION_DETAIL_PATH, element: <TransactionDetailScreen /> },
                   { path: BILL_PAY_PATH, element: <BillPayScreen /> },
                   /*
@@ -940,22 +1276,32 @@ export const CARD_DEMO_ROUTES: readonly RouteObject[] = [
                    */
                   { path: AUTH_SUMMARY_PATH, element: <AuthSummaryScreen /> },
                   { path: AUTH_DETAIL_PATH, element: <AuthDetailScreen /> },
-                  /*
-                   * WHY : ⚠️ Refactoring Rationale: the administrative MENU is mounted here, outside the
-                   *       gated subtree below, where it used to be the first route inside it. The gated
-                   *       set is exactly the six options of `app/cpy/COADM02Y.cpy` and the menu that
-                   *       lists them is not one of them, so it is authenticated like every other screen
-                   *       an ordinary operator may render. {@link ROUTE_TABLE} records what that
-                   *       concedes and why it is acceptable: the screen paints six static option labels
-                   *       transcribed from the copybook and reads nothing, and each option dispatches to
-                   *       one of the six paths below, every one of which refuses a caller without the
-                   *       claim -- in the browser by the guard, and at every service by independent
-                   *       token validation.
-                   */
-                  { path: ADMIN_MENU_ROUTE, element: <AdminMenuScreen /> },
                   {
                     element: <AdminSubtree />,
                     children: [
+                      /*
+                       * WHY : ⚠️⚠️ Refactoring Rationale: the administrative MENU is mounted INSIDE the
+                       *       gated subtree, where it sat outside it as a sibling declared just above
+                       *       this element. The note that stood there argued the gated set is exactly
+                       *       the six options of `app/cpy/COADM02Y.cpy` and the menu listing them is
+                       *       not one of them, so it could be authenticated like any screen an
+                       *       ordinary operator may render, conceding only that such an operator would
+                       *       see "six static option labels" and be refused at each destination. What
+                       *       an ordinary operator actually got was the whole administrative menu --
+                       *       `CA00`/`COADM01C` in the title band, all six labels, and a focused option
+                       *       field that accepted an entry and dispatched it -- with an EMPTY message
+                       *       band, and the refusal then arrived at `/users` rather than here. That is
+                       *       a disclosure the reference does not make: `app/cbl/COSGN00C.cbl`
+                       *       L230-L240 transfers only an `'A'` operator to `COADM01C`.
+                       * WHY : Assumptions: it is the FIRST child of the subtree, which is both the
+                       *       administrative option table's own reading order -- the menu, then its
+                       *       six options -- and the position that makes the boundary visible: every
+                       *       administrative path is now inside one element, so a seventh added later
+                       *       is gated by where it is written rather than by remembering to classify
+                       *       it. `ui/src/routerRoutes.test.tsx` pins the class of all 21 paths by
+                       *       name, so an omission fails a case.
+                       */
+                      { path: ADMIN_MENU_ROUTE, element: <AdminMenuScreen /> },
                       /*
                        * Assumptions: the user browse is declared INSIDE this administrative subtree, so
                        * it inherits the one `RequireAdmin` above rather than carrying a guard of its
@@ -996,16 +1342,6 @@ export const CARD_DEMO_ROUTES: readonly RouteObject[] = [
           },
         ],
       },
-      /*
-       * Assumptions: the not-found result stays OUTSIDE the frame, and so does the root redirect
-       * above it. Both are router artifacts rather than migrated screens -- the reference has no
-       * concept of an unmatched address -- so framing them would wrap a redirect in a title band for
-       * the one render before it leaves, and would report a transaction identifier for a screen that
-       * does not exist. The nearest reference behaviour is `app/cbl/COMEN01C.cbl` L127-L134, which
-       * refuses an out-of-range option number on the menu it was typed into; there is no menu to
-       * return an unmatched URL to, so the refusal becomes a surface of its own.
-       */
-      { path: NOT_FOUND_PATH, element: <NotFoundScreen /> },
     ],
   },
 ];

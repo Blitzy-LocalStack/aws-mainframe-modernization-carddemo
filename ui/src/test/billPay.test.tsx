@@ -29,14 +29,15 @@
  *
  * Returns (module analogue)
  * -------------------------
- * Nothing. Evaluating this module registers seven suites with the runner; the outcome is the
- * runner's pass or fail verdict, reported per case.
+ * Nothing. Evaluating this module registers eight suites with the runner; the outcome is the
+ * runner's pass or fail verdict, reported per case. The eighth is `account entry edits`, added with
+ * the edit that refuses a malformed identifier instead of extracting digits from it.
  *
  * Exceptions (module analogue)
  * ----------------------------
- * A failing assertion throws, which is how a case reports. `requestOfCall` and `answerInDialogue`
- * below throw deliberately when a fixture is used against a state that cannot satisfy it, so a
- * mis-wired case fails at its own line rather than several assertions later.
+ * A failing assertion throws, which is how a case reports. `inquiryOfCall`, `paymentOfCall` and
+ * `confirmationEntry` below throw deliberately when a fixture is used against a state that cannot
+ * satisfy it, so a mis-wired case fails at its own line rather than several assertions later.
  *
  * Documentation obligation, and why two documents are cited for it
  * ---------------------------------------------------------------
@@ -83,13 +84,17 @@
  * screens that do carry it — card update, transaction detail, user update — keep it because their
  * programs do.
  *
- * Refactoring Rationale: the brief asked for `'Invalid value. Valid values are (Y/N)...'` to be
- * provoked by an invalid confirmation character. The single-character `CONFIRM` field is replaced
- * by a confirmation dialogue whose two controls send `'Y'` and `'N'` and nothing else, so no third
- * character can be submitted and the branch at `app/cbl/COBIL00C.cbl` L187 is unreachable from this
- * screen. What is asserted instead is the pair of properties that actually hold: the dialogue
- * offers exactly the two answers the mapset's own `(Y/N)` hint names, and the catalog carries L187's
- * sentence byte-for-byte for the case where the service raises it.
+ * ⚠️ Refactoring Rationale: the second divergence recorded here is WITHDRAWN, and this paragraph
+ * records the withdrawal rather than deleting it, because the divergence was the CRITICAL defect's
+ * own footprint in this file. It read that `'Invalid value. Valid values are (Y/N)...'` at
+ * `app/cbl/COBIL00C.cbl` L187 could not be provoked, because the single-character `CONFIRM` field
+ * had been replaced by a confirmation dialogue whose two controls could send only `'Y'` and `'N'`.
+ * That was true, and it was a symptom: measured in a browser, both of those controls focused
+ * themselves on appearing, so an operator who typed only the eleven account digits and pressed Enter
+ * three times paid the whole balance without ever typing an affirmative character. The field the
+ * mapset declares is restored — `CONFIRM LENGTH=1 ATTRB=(FSET,NORM,UNPROT)` with no `IC` at
+ * `app/bms/COBIL00.bms` L115-L119 — so L187's arm is reachable again and IS provoked below, from a
+ * character the operator supplied.
  *
  * Trade-offs: the in-flight keyboard lock is deliberately NOT re-asserted here.
  * `ui/src/screens/mutationTurnLock.test.tsx` already drives this screen's reporting turn, its
@@ -105,8 +110,9 @@ import { useLocation } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 import type { ReactElement } from 'react';
 
-import type { BillPaymentOutcome, BillPaymentRequest } from '../api/types';
+import type { BillPaymentOutcome, BillPaymentPreview, BillPaymentResponse } from '../api/types';
 import { CARDDEMO_ADMIN_GROUP, CARDDEMO_USER_GROUP } from '../hooks/useAuth';
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
 import type { CicsAid } from '../layout/usePfKeys';
@@ -121,13 +127,14 @@ import {
   PROGRAM_MESSAGES,
   PROGRAM_MESSAGE_SOURCES,
   PROGRAM_SOURCE_FILES,
+  REQUEST_IN_PROGRESS,
   SCREEN_TITLES,
   SHARED_MESSAGES,
   SHARED_MESSAGE_SOURCES,
   messageBandWidthForMapset,
 } from '../messages/messages';
 import { BILL_PAY_PATH } from '../router';
-import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
+import { FIELD_ERROR_TOKENS, MONEY_SIGN_TEXT_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 import {
   apiError,
   expectMaxLength,
@@ -147,15 +154,27 @@ import type { HarnessRenderResult } from './setup';
  * temporal dead zone at registration time — the same reason
  * `ui/src/screens/accountView/accountViewShell.test.tsx` writes its factory this way.
  *
- * Assumptions: ONE function, because the screen imports one. `ui/src/screens/billPay/index.tsx`
- * takes `payAccountBalanceInFull` from `../../api/transactions` and reaches
- * `ui/src/api/accounts.ts` not at all — the balance arrives on the payment contract's own preview
- * rather than from a separate account read — so mocking a second module would substitute a
- * collaborator this screen never calls.
- * @returns {Record<string, unknown>} The one transport function this screen imports, as a spy.
+ * ⚠️ Refactoring Rationale: TWO functions, where this factory published one. The screen no longer
+ * takes `payAccountBalanceInFull` at all: it takes `inquireAccountPayableBalance` for the turn that
+ * reads a balance and `payAccountBalanceConfirmed` for the turn that writes a payment, because a
+ * single entry point whose only difference was whether a `confirmation` member was present made
+ * "this turn cannot move money" a property of a conditional rather than of the call. Mocking the two
+ * is what lets a case assert WHICH composition a turn used, which is the only way to state that a
+ * reading turn cannot post.
+ *
+ * Trade-offs: the request BODY is therefore no longer observable from this file — the two wrappers
+ * compose it, and they are the collaborators being replaced. What a case asserts instead is stronger
+ * in the respect that matters: `inquireAccountPayableBalance` takes an account identifier and NOTHING
+ * else, so there is no parameter through which a held confirmation could reach a reading turn, and
+ * `payAccountBalanceConfirmed` refuses a non-confirming answer before it sends. The body composition
+ * belongs to `ui/src/api/transactions.ts` and is asserted by that module's own suite.
+ *
+ * Assumptions: no third export is supplied, because nothing in the mounted tree imports one. The
+ * screen's only other reference to the module is the `BillPaymentPreview` TYPE, which is erased.
+ * @returns {Record<string, unknown>} The two transport functions this screen imports, as spies.
  */
 function mockTransactionTransportModule(): Record<string, unknown> {
-  return { payAccountBalanceInFull: vi.fn() };
+  return { inquireAccountPayableBalance: vi.fn(), payAccountBalanceConfirmed: vi.fn() };
 }
 
 vi.mock('../api/transactions', mockTransactionTransportModule);
@@ -175,13 +194,39 @@ const BILL_PAY_MESSAGES = PROGRAM_MESSAGES.COBIL00C;
 const BILL_PAY_MESSAGE_LINES = PROGRAM_MESSAGE_SOURCES.COBIL00C;
 
 /**
+ * The sentence this screen refuses a malformed or zero account entry with.
+ *
+ * ⚠️ Refactoring Rationale: this screen had no such edit at all, and the consequence was measured
+ * twice. A paste of `{{7*7}} and ${7*7}` had its digits EXTRACTED to `'7777'`, which reached the wire,
+ * returned a real balance for an account the operator never named and armed the payment; and an entry
+ * of `'0'` was accepted here while the read-only account-view screen refuses it locally with zero
+ * requests. A money-moving screen laxer than its read-only sibling is the wrong way round, so the
+ * sibling's edit is adopted.
+ *
+ * Assumptions: the sentence is `COACTVWC`'s and is READ from the catalog, never retyped, because it
+ * carries a DOUBLE SPACE after "must" — `app/cbl/COACTVWC.cbl` L672 — and any whitespace-collapsing
+ * edit destroys it silently, the result still reading as correct English.
+ *
+ * Alternatives Considered: composing a sentence in this program's own voice, since the refusal is new
+ * to this screen. Rejected under transformation rule T8: `app/cbl/COBIL00C.cbl` declares no such
+ * literal, so a sentence written here would be text no line of the baseline holds. Borrowing the one
+ * the baseline already emits for precisely this condition on precisely this field is transcription.
+ */
+const ACCOUNT_FILTER_REFUSAL =
+  PROGRAM_MESSAGES.COACTVWC.ACCOUNT_FILTER_MUST_BE_A_NON_ZERO_11_DIGIT_NUMBER;
+
+/** The line the borrowed refusal is transcribed from, asserted so the citation cannot drift. */
+const ACCOUNT_FILTER_REFUSAL_LINES =
+  PROGRAM_MESSAGE_SOURCES.COACTVWC.ACCOUNT_FILTER_MUST_BE_A_NON_ZERO_11_DIGIT_NUMBER;
+
+/**
  * Declared width of the confirmation field, `CONFIRMI PIC X(1)`.
  *
  * Assumptions: one character, from `app/cpy-bms/COBIL00.CPY` L72 and `CONFIRM LENGTH=1` at
- * `app/bms/COBIL00.bms` L115-L119. The field itself is replaced by a dialogue, so the width
- * survives as a constraint on the ANSWERS rather than on a control: each of the two the dialogue
- * offers is exactly this wide, which is what makes them values the reference's `EVALUATE CONFIRMI`
- * at `app/cbl/COBIL00C.cbl` L173-L191 could have received.
+ * `app/bms/COBIL00.bms` L115-L119. It is a constraint on the CONTROL again: the restored field
+ * accepts one character, which is what makes every value it can hold a value the reference's
+ * `EVALUATE CONFIRMI` at `app/cbl/COBIL00C.cbl` L173-L191 could have received — and what makes that
+ * evaluate's four arms total, since one position admits no multi-character value to disambiguate.
  */
 const CONFIRMATION_DECLARED_WIDTH = 1;
 
@@ -327,12 +372,26 @@ function writtenPaymentOf(transactionId: string): BillPaymentOutcome {
  * `ui/vitest.config.ts` sets `restoreMocks`, which clears a spy's implementation between cases. A
  * case that drove a turn without installing one would call a function returning `undefined`, and the
  * screen's `.then` would fail on that rather than on anything it asserts.
+ *
+ * Refactoring Rationale: the fixture is still written as a whole `BillPaymentOutcome` and this
+ * installer routes it, where it used to arm one spy unconditionally. Keeping the outcome shape is
+ * what lets every existing case name what the SERVICE reports rather than which client function the
+ * screen happens to call to get it; the tag on the outcome already says which turn it answers, so
+ * the routing is a fact about the fixture rather than a decision this helper makes.
+ *
+ * Assumptions: a case needing both turns calls this twice, once per outcome, and the order does not
+ * matter because the two spies are independent.
  * @param {BillPaymentOutcome} outcome - The outcome the service is to report.
  * @returns {Promise<void>} Resolves once the mocked module has been resolved and armed.
  */
 async function answerWith(outcome: BillPaymentOutcome): Promise<void> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
-  vi.mocked(payAccountBalanceInFull).mockResolvedValue(outcome);
+  const { inquireAccountPayableBalance, payAccountBalanceConfirmed } =
+    await import('../api/transactions');
+  if (outcome.outcome === 'PREVIEWED') {
+    vi.mocked(inquireAccountPayableBalance).mockResolvedValue(outcome.preview);
+    return;
+  }
+  vi.mocked(payAccountBalanceConfirmed).mockResolvedValue(outcome.payment);
 }
 
 /**
@@ -354,8 +413,20 @@ async function answerWith(outcome: BillPaymentOutcome): Promise<void> {
  * @returns {Promise<void>} Resolves once the mocked module has been resolved and armed.
  */
 async function refuseWithATransportThatDidNotComplete(): Promise<void> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
-  vi.mocked(payAccountBalanceInFull).mockRejectedValue(new Error('the request did not complete'));
+  const { inquireAccountPayableBalance, payAccountBalanceConfirmed } =
+    await import('../api/transactions');
+  /*
+   * WHY : Assumptions: BOTH compositions are armed to reject, because a case using this fixture is
+   *       stating that the transport did not complete -- which is a property of the transport and not
+   *       of which turn happened to be taken. Arming one would make a case pass or fail on the
+   *       screen's internal choice of entry point rather than on the outcome it asserts.
+   */
+  vi.mocked(inquireAccountPayableBalance).mockRejectedValue(
+    new Error('the request did not complete'),
+  );
+  vi.mocked(payAccountBalanceConfirmed).mockRejectedValue(
+    new Error('the request did not complete'),
+  );
 }
 
 /**
@@ -453,22 +524,33 @@ function paintedBalance(): HTMLElement {
 }
 
 /**
- * Locates the control that opens the confirmation dialogue.
+ * Locates the single-position confirmation field the mapset declares.
  *
- * Assumptions: the handle is a literal for the same reason the balance's is —
- * `ui/src/screens/billPay/index.tsx` L1545 paints `data-testid="billpay-confirm"` inline and exports
- * no constant. It is queried by test identifier rather than by caption because the trigger and the
- * dialogue's own affirmative answer both carry the `'Y'` caption of `app/cbl/COBIL00C.cbl` L174, so
- * a query by name is ambiguous the moment the dialogue is open.
- * @returns {HTMLButtonElement} The trigger.
- * @throws {Error} If the trigger is absent or is not a button.
+ * ⚠️ Refactoring Rationale: this returns an INPUT, where it returned the button that opened a
+ * confirmation dialogue. The dialogue is withdrawn: `CONFIRM` at `app/bms/COBIL00.bms` L115-L119 is
+ * `ATTRB=(FSET,NORM,UNPROT) LENGTH=1` and `app/cbl/COBIL00C.cbl` L173-L191 pays only on a character
+ * the operator typed into it, so the answer is a keystroke rather than a control an Enter can fall
+ * onto. Asserting the element TYPE here is what makes that structural: a case cannot pass against a
+ * button again without this helper failing first.
+ *
+ * Assumptions: the handle is the one the screen publishes, and the screen deliberately kept the
+ * value the withdrawn trigger carried — `ui/src/screens/billPay/index.tsx` exports it as
+ * `CONFIRMATION_CONTROL_TEST_ID` — so a cross-screen suite that locates "the control that answers
+ * the confirmation" still finds the control that answers it.
+ *
+ * Trade-offs: queried by test identifier rather than by its label, even though the field HAS a label
+ * now. The label is the 53-character prompt `app/bms/COBIL00.bms` L109-L113 paints, and the prompt is
+ * also the sentence the row-23 line carries on the same turn, so a label query would be satisfied by
+ * two different elements' worth of the same text and would stop being a statement about the control.
+ * @returns {HTMLInputElement} The confirmation field.
+ * @throws {Error} If the field is absent or is not an input.
  */
-function confirmationTrigger(): HTMLButtonElement {
-  const trigger = screen.getByTestId('billpay-confirm');
-  if (!(trigger instanceof HTMLButtonElement)) {
-    throw new Error('the confirmation trigger is not a button element');
+function confirmationEntry(): HTMLInputElement {
+  const control = screen.getByTestId('billpay-confirm');
+  if (!(control instanceof HTMLInputElement)) {
+    throw new Error('the confirmation control is not an input element');
   }
-  return trigger;
+  return control;
 }
 
 /**
@@ -489,19 +571,88 @@ function legendControl(caption: string): HTMLElement {
 }
 
 /**
- * Reads the request the mocked transport received on one turn.
- * @param {number} turn - Zero-based index of the turn, in call order.
- * @returns {Promise<BillPaymentRequest>} The request that turn sent.
+ * Counts every request the screen has made in the current case, across both compositions.
+ *
+ * Purpose: let a case state "no request was made" and "exactly one request was made" without
+ * knowing which entry point the screen chose, which is what the zero-request assertions are about.
+ * @returns {Promise<number>} The total number of turns that reached the transport.
+ */
+async function turnsTaken(): Promise<number> {
+  const { inquireAccountPayableBalance, payAccountBalanceConfirmed } =
+    await import('../api/transactions');
+  return (
+    vi.mocked(inquireAccountPayableBalance).mock.calls.length +
+    vi.mocked(payAccountBalanceConfirmed).mock.calls.length
+  );
+}
+
+/**
+ * Counts only the turns that could have written a payment.
+ *
+ * Purpose: this is the count a money-safety case cares about. A screen that read a balance twice has
+ * done nothing an operator can object to; a screen that reached the paying composition once without
+ * being told to has moved money.
+ * @returns {Promise<number>} The number of payment requests the screen composed.
+ */
+async function paymentsComposed(): Promise<number> {
+  const { payAccountBalanceConfirmed } = await import('../api/transactions');
+  return vi.mocked(payAccountBalanceConfirmed).mock.calls.length;
+}
+
+/**
+ * Reads the account identifier one reading turn sent.
+ * @param {number} turn - Zero-based index of the reading turn, in call order.
+ * @returns {Promise<string>} The identifier that turn looked up.
  * @throws {Error} If no such turn was taken, which names the index rather than failing later on a
  *   property of `undefined`.
  */
-async function requestOfCall(turn: number): Promise<BillPaymentRequest> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
-  const request = vi.mocked(payAccountBalanceInFull).mock.calls[turn]?.[0];
-  if (request === undefined) {
-    throw new Error(`no turn was taken at index ${String(turn)}`);
+async function inquiryOfCall(turn: number): Promise<string> {
+  const { inquireAccountPayableBalance } = await import('../api/transactions');
+  const sent = vi.mocked(inquireAccountPayableBalance).mock.calls[turn];
+  if (sent === undefined) {
+    throw new Error(`no reading turn was taken at index ${String(turn)}`);
   }
-  return request;
+  return sent[0];
+}
+
+/**
+ * Reads every argument one reading turn sent, so a case can assert what it did NOT send.
+ *
+ * ⚠️ Assumptions: the argument COUNT is the assertion that matters here, not just the identifier.
+ * `inquireAccountPayableBalance` at `ui/src/api/transactions.ts` L1023 takes one parameter and calls
+ * the shared transport with `{ accountId }` alone, so a reading turn structurally cannot carry a
+ * confirmation. Asserting the arity is therefore how a case proves the screen reached the READ-ONLY
+ * composition and not the paying one with a defaulted answer — the paying wrapper at L1059 defaults
+ * its second parameter to the confirming character, so an argument list of length one is a different
+ * fact there and would move money.
+ * @param {number} turn - Zero-based index of the reading turn, in call order.
+ * @returns {Promise<readonly unknown[]>} Every argument that turn passed, in order.
+ * @throws {Error} If no such turn was taken, which names the index rather than failing later on a
+ *   property of `undefined`.
+ */
+async function inquiryArgumentsOfCall(turn: number): Promise<readonly unknown[]> {
+  const { inquireAccountPayableBalance } = await import('../api/transactions');
+  const sent = vi.mocked(inquireAccountPayableBalance).mock.calls[turn];
+  if (sent === undefined) {
+    throw new Error(`no reading turn was taken at index ${String(turn)}`);
+  }
+  return sent;
+}
+
+/**
+ * Reads the arguments one paying turn sent.
+ * @param {number} turn - Zero-based index of the paying turn, in call order.
+ * @returns {Promise<readonly unknown[]>} Every argument that turn passed, in order.
+ * @throws {Error} If no such turn was taken, which names the index rather than failing later on a
+ *   property of `undefined`.
+ */
+async function paymentOfCall(turn: number): Promise<readonly unknown[]> {
+  const { payAccountBalanceConfirmed } = await import('../api/transactions');
+  const sent = vi.mocked(payAccountBalanceConfirmed).mock.calls[turn];
+  if (sent === undefined) {
+    throw new Error(`no paying turn was taken at index ${String(turn)}`);
+  }
+  return sent;
 }
 
 /**
@@ -524,22 +675,32 @@ async function takeReportingTurn(
 }
 
 /**
- * Opens the confirmation dialogue and answers it.
+ * Types one character into the confirmation field and takes the turn with the Enter key.
  *
- * Assumptions: the answer is located INSIDE the dialogue rather than by name across the document,
- * because the trigger carries the same `'Y'` caption as the confirming control — the mapset's own
- * `(Y/N)` domain, offered twice by design — so an unscoped query would match two elements and a
- * first-match query could activate the trigger a second time instead of answering.
+ * ⚠️ Refactoring Rationale: the answer is TYPED and then Enter is pressed, where this helper used
+ * to click a dialogue trigger and then click the dialogue's own answer. That is not a mechanical
+ * translation of the same gesture: it is the difference the CRITICAL finding turns on. Both of the
+ * clicked controls focused themselves on appearing, so Enter alone reached both of them in sequence,
+ * and an operator who typed only the account digits and pressed Enter three times paid the full
+ * balance without supplying an affirmative character. A typed answer cannot be supplied by the Enter
+ * key, which is the property `app/cbl/COBIL00C.cbl` L173-L191 relies on.
+ *
+ * Assumptions: the field is FOCUSED before the character is typed, and the case does not need to
+ * arrange that — a settled turn that offers payment places the cursor there itself, which is
+ * `MOVE -1 TO CONFIRML` at L239. It is focused explicitly here anyway so that this helper works
+ * whether or not the case under it has moved the cursor in between.
  * @param {HarnessRenderResult['user']} user - The keyboard operator from the render result.
- * @param {string} answer - The single character to answer with, `'Y'` or `'N'`.
- * @returns {Promise<void>} Resolves once the answer has been activated.
- * @throws {Error} If the dialogue does not offer that answer, which names it.
+ * @param {string} answer - The single character to answer with, such as `'Y'` or `'N'`.
+ * @returns {Promise<void>} Resolves once the answer has been typed and the turn dispatched.
+ * @throws {Error} If the confirmation field is absent, which {@link confirmationEntry} raises.
  */
-async function answerInDialogue(user: HarnessRenderResult['user'], answer: string): Promise<void> {
-  await user.click(confirmationTrigger());
-  const dialogue = await screen.findByRole('tooltip');
-  const control = within(dialogue).getByRole('button', { name: answer });
-  await user.click(control);
+async function answerConfirmation(
+  user: HarnessRenderResult['user'],
+  answer: string,
+): Promise<void> {
+  await user.click(confirmationEntry());
+  await user.keyboard(answer);
+  await user.keyboard('{Enter}');
 }
 
 /**
@@ -575,14 +736,47 @@ async function waitForBandToRead(sentence: string): Promise<void> {
 }
 
 /**
+ * Asserts that the document's active element is the single-position confirmation field.
+ *
+ * ⚠️ Refactoring Rationale: this exists so the CRITICAL finding's reproduction can assert the cursor
+ * after EVERY press rather than once at the end. What was measured in a browser as the defect was not
+ * "money moved" — that was the consequence — it was that a control whose activation COMMITS held the
+ * cursor when a bare Enter arrived. Asserting the resting place per press is therefore asserting the
+ * mechanism, and a future edit that re-focuses a commit control at any one of the three turns fails
+ * here even if the paying composition happens to be unreachable for some other reason that day.
+ *
+ * Assumptions: `document.activeElement` is compared by identity against the element `confirmationEntry`
+ * returns, and that helper already refuses anything that is not an `HTMLInputElement`. So this asserts
+ * both "the cursor is on the confirmation field" and "the confirmation field is still an input", which
+ * together are the whole of the withdrawn dialogue's absence.
+ *
+ * Assumptions: the comparison is wrapped in a wait because the screen applies the cursor move in an
+ * effect rather than inside the turn — `ui/src/screens/billPay/index.tsx` defers it through
+ * `pendingFocus` because focusing a control that is still disabled by the busy window does nothing.
+ * @returns {Promise<void>} Resolves once the cursor has been observed on the confirmation field.
+ */
+async function expectCursorOnTheConfirmationField(): Promise<void> {
+  await waitFor(
+    /**
+     * Compares the active element with the confirmation field.
+     * @returns {void} Nothing; the assertion either passes or the wait retries.
+     */
+    (): void => {
+      expect(document.activeElement).toBe(confirmationEntry());
+    },
+  );
+}
+
+/**
  * The account entry refuses a twelfth character and refuses a non-digit.
  *
  * Assumptions: eleven is asserted individually rather than through a table of the screen's three
- * fields, and the reason is that only one of the three is an editable control: the balance is
- * `ATTRB=(ASKIP,FSET,NORM)` at `app/bms/COBIL00.bms` L103-L106 and the confirmation is replaced by a
- * dialogue. Trade-offs: a table would have to carry a per-row "how do I assert this" column for
- * three rows, which is more machinery than three named assertions and hides the citation each row
- * exists to carry.
+ * fields, and the reason is that the three are asserted by three different means: the balance is
+ * `ATTRB=(ASKIP,FSET,NORM)` at `app/bms/COBIL00.bms` L103-L106 and so has no attribute to read, the
+ * confirmation is one position wide and is asserted with its own domain below, and only this field
+ * has both a width and a content edit. Trade-offs: a table would have to carry a per-row "how do I
+ * assert this" column for three rows, which is more machinery than three named assertions and hides
+ * the citation each row exists to carry.
  *
  * Assumptions: three independent declarations in the reference agree on eleven — `ACTIDIN LENGTH=11`
  * at `app/bms/COBIL00.bms` L85-L89, `ACTIDINI PIC X(11)` at `app/cpy-bms/COBIL00.CPY` L60, and the
@@ -608,13 +802,19 @@ async function theAccountEntryIsBoundedAndNumeric(): Promise<void> {
 
   await user.clear(accountEntry());
 
-  // WHY : Assumptions: a non-digit is filtered on the way in, not flagged. The receiving field is
-  //       `PIC 9(11)` and COBOL's `IS NUMERIC` on it admits digits and nothing else — no sign, no
-  //       separator, no space — so a value containing any of them is one the reference field could
-  //       not have held. Trade-offs: filtering rather than refusing means a paste of mixed
-  //       characters yields the digits it contained instead of a refusal the operator did not earn.
+  // WHY : ⚠️ Refactoring Rationale: a non-digit is kept in the control and REFUSED on the turn, where
+  //       it used to be filtered out on the way in. The filter's failure was measured rather than
+  //       theorised: `'ab12cd34'` became `'1234'`, and a paste of `{{7*7}} and ${7*7}` became `'7777'`
+  //       — an entry the operator never typed, which was then looked up and returned a real balance
+  //       for a real account with the payment armed against it. A 3270 numeric field DISCARDED a
+  //       non-numeric keystroke; it never compacted the digits out of a longer string into a different
+  //       well-formed identifier. So the characters survive and the edit refuses them.
   await user.type(accountEntry(), 'ab12cd34');
-  expect(accountEntry().value).toBe('1234');
+  expect(accountEntry().value).toBe('ab12cd34');
+
+  await user.keyboard('{Enter}');
+  await waitForBandToRead(ACCOUNT_FILTER_REFUSAL);
+  expect(await turnsTaken()).toBe(0);
 }
 
 /**
@@ -637,11 +837,13 @@ async function theAccountEntryIsTheOnlyInitialCursor(): Promise<void> {
 
   expect(document.activeElement).toBe(accountEntry());
 
-  // WHY : Assumptions: the confirmation control's own focus move is a DIFFERENT thing and must not
-  //       be mistaken for a second `IC`. It is the `MOVE -1 TO CONFIRML` of
-  //       `app/cbl/COBIL00C.cbl` L239, issued alongside the confirmation prompt on a later turn, on
-  //       a panel that does not exist until the operator opens it.
-  expect(confirmationTrigger()).not.toHaveFocus();
+  // WHY : Assumptions: the confirmation field's own focus move is a DIFFERENT thing and must not be
+  //       mistaken for a second `IC`. It is the `MOVE -1 TO CONFIRML` of `app/cbl/COBIL00C.cbl` L239,
+  //       issued alongside the confirmation prompt on a LATER turn; `CONFIRM` at
+  //       `app/bms/COBIL00.bms` L115-L119 carries no `IC` of its own, so the field is present from the
+  //       first paint and holds the cursor on none of it.
+  expect(confirmationEntry()).not.toHaveFocus();
+  expect(confirmationEntry()).toBeDisabled();
   expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).not.toHaveFocus();
   expect(legendControl(BILL_PAY_KEY_LABELS.PFK03)).not.toHaveFocus();
   expect(legendControl(UNIFORM_PF_KEY_LABELS.PFK04)).not.toHaveFocus();
@@ -679,8 +881,15 @@ async function theBalanceIsPaintedAtItsDeclaredWidthAndIsReadOnly(): Promise<voi
   //       controls rather than a check on this element's tag, because the count is what would change
   //       if the figure the operator is being asked to pay ever became editable. The mapset makes it
   //       auto-skip, so the 3270 cursor could not enter it either.
-  expect(screen.getAllByRole('textbox')).toHaveLength(1);
-  expect(screen.getAllByRole('textbox')[0]).toBe(accountEntry());
+  // WHY : Refactoring Rationale: the count is TWO, where it was one. The mapset declares two
+  //       unprotected fields — `ACTIDIN` at L85-L89 and `CONFIRM` at L115-L119 — and the second was
+  //       missing from the rendered screen while the confirmation was a dialogue. Asserting the pair
+  //       by identity rather than only by count is what states which two they are.
+  const controls = screen.getAllByRole('textbox');
+  expect(controls).toHaveLength(2);
+  expect(controls).toContain(accountEntry());
+  expect(controls).toContain(confirmationEntry());
+  expect(controls).not.toContain(paintedBalance());
 }
 
 /**
@@ -688,25 +897,37 @@ async function theBalanceIsPaintedAtItsDeclaredWidthAndIsReadOnly(): Promise<voi
  *
  * Assumptions: `CONFIRM` is `LENGTH=1` at `app/bms/COBIL00.bms` L115-L119 and `CONFIRMI PIC X(1)` at
  * `app/cpy-bms/COBIL00.CPY` L72, and `app/cbl/COBIL00C.cbl` L173-L191 accepts `'Y'`/`'y'`, `'N'`/`'n'`
- * or blank there and refuses everything else. The dialogue that replaces the field offers two
- * answers, each exactly one character, so every answer it can send is one that `EVALUATE CONFIRMI`
- * admits.
+ * or blank there and refuses everything else. All four of those arms are asserted against the
+ * screen's own exported classifier, which is the function the Enter handler dispatches on, so the
+ * case states the DOMAIN rather than one path through it.
  *
- * Refactoring Rationale: this is why L187's refusal is unreachable from this screen. The field
- * existed because a terminal had no modal; a dialogue asks the question directly and cannot receive
- * a third character, so the branch that rejected one has no way to fire. The sentence is still
- * asserted — in the message suite below, against the catalog and for the case where the service
- * raises it — rather than dropped.
+ * ⚠️ Refactoring Rationale: the four arms are asserted because a dialogue could express only two of
+ * them. Its two controls sent `'Y'` and `'N'`, which left the never-answered arm at L182-L184 with no
+ * representation at all — and a turn with no representation for "the operator has not answered yet"
+ * is a turn on which Enter has to mean something else, which is how Enter came to mean pay.
+ *
+ * Assumptions: the width is asserted on the CONTROL and the domain on the classifier, because they
+ * are two different contracts. One position is what the mapset declares; which characters that
+ * position admits is what the program evaluates.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function theConfirmationDomainIsTheTwoAnswersTheMapsetNames(): Promise<void> {
+  const { classifyConfirmationAnswer } = await import('../screens/billPay');
   await answerWith(payableBalanceOf('1234.56'));
   const { user } = await mountBillPay();
 
-  // WHY : Assumptions: the five-character domain hint survives the field it annotated, because it
-  //       still names the two answers the dialogue offers. It is `LENGTH=5` at
-  //       `app/bms/COBIL00.bms` L122-L126, and its parentheses are part of the literal.
+  // WHY : Assumptions: the five-character domain hint names the two answers the field admits. It is
+  //       `LENGTH=5` at `app/bms/COBIL00.bms` L122-L126, and its parentheses are part of the literal.
   expect(screen.getByText(BILL_PAY_CONFIRM_DOMAIN_HINT)).toBeInTheDocument();
+  expectMaxLength(confirmationEntry(), CONFIRMATION_DECLARED_WIDTH);
+
+  expect(classifyConfirmationAnswer('Y')).toBe('PAY');
+  expect(classifyConfirmationAnswer('y')).toBe('PAY');
+  expect(classifyConfirmationAnswer('N')).toBe('DECLINE');
+  expect(classifyConfirmationAnswer('n')).toBe('DECLINE');
+  expect(classifyConfirmationAnswer('')).toBe('PREVIEW');
+  expect(classifyConfirmationAnswer('X')).toBe('REFUSE');
+  expect(classifyConfirmationAnswer(' ')).toBe('REFUSE');
 
   await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
   await waitFor(
@@ -715,20 +936,16 @@ async function theConfirmationDomainIsTheTwoAnswersTheMapsetNames(): Promise<voi
      * @returns {void} Nothing; the assertion either passes or the wait retries.
      */
     (): void => {
-      expect(confirmationTrigger()).toBeEnabled();
+      expect(confirmationEntry()).toBeEnabled();
     },
   );
 
-  await user.click(confirmationTrigger());
-  const dialogue = await screen.findByRole('tooltip');
-  const answers = within(dialogue).getAllByRole('button');
-
-  expect(answers).toHaveLength(2);
-  for (const answer of answers) {
-    expect(answer.textContent).toHaveLength(CONFIRMATION_DECLARED_WIDTH);
-  }
-  expect(within(dialogue).getByRole('button', { name: 'Y' })).toBeInTheDocument();
-  expect(within(dialogue).getByRole('button', { name: 'N' })).toBeInTheDocument();
+  // WHY : Assumptions: NO dialogue is opened by the field receiving the cursor, which is the property
+  //       that makes an Enter arriving here harmless. A panel would carry its own default action, and
+  //       an empty one-position input carries none.
+  expect(screen.queryByRole('tooltip')).toBeNull();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(confirmationEntry().value).toBe('');
 }
 
 /**
@@ -804,7 +1021,11 @@ async function theScreenComposesThroughTheDesignSystem(): Promise<void> {
   expect(screen.getByRole('heading', { name: BILL_PAY_TITLE })).toBeInTheDocument();
 
   expect(accountEntry().className).toContain('ant-input');
-  expect(confirmationTrigger().className).toContain('ant-btn');
+  // WHY : Refactoring Rationale: the confirmation carries the design system's INPUT class, where it
+  //       carried its button class. The mapset declares an unprotected one-position field, so the
+  //       library primitive that maps onto it is `Input`; `Button` is what the withdrawn dialogue's
+  //       trigger was, and that trigger is the control an Enter could fall onto.
+  expect(confirmationEntry().className).toContain('ant-input');
   for (const caption of [
     BILL_PAY_KEY_LABELS.ENTER,
     BILL_PAY_KEY_LABELS.PFK03,
@@ -820,7 +1041,7 @@ async function theScreenComposesThroughTheDesignSystem(): Promise<void> {
  */
 function fieldConstraintCases(): void {
   it(
-    'bounds the account entry at eleven digits and filters the rest',
+    'bounds the account entry at eleven positions and refuses the rest',
     theAccountEntryIsBoundedAndNumeric,
   );
   it(
@@ -832,7 +1053,7 @@ function fieldConstraintCases(): void {
     theBalanceIsPaintedAtItsDeclaredWidthAndIsReadOnly,
   );
   it(
-    'offers exactly the two single-character confirmation answers',
+    'evaluates the confirmation field over all four of its arms',
     theConfirmationDomainIsTheTwoAnswersTheMapsetNames,
   );
   it(
@@ -847,6 +1068,156 @@ function fieldConstraintCases(): void {
 }
 
 describe('BillPayScreen field constraints', fieldConstraintCases);
+
+/**
+ * A pasted template-injection string is refused whole, with no digits extracted from it.
+ *
+ * ⚠️ Refactoring Rationale: this is the reproduction the HIGH finding was raised on, and the
+ * measurement is what makes it a finding rather than a preference. A paste of `{{7*7}} and ${7*7}` had
+ * its digits EXTRACTED into `'7777'`; the screen then looked that up, received a real payable balance
+ * for an account the operator had never named, and armed the payment against it. Nothing on screen
+ * said the value had been altered. Silent digit extraction from a malformed identifier is never
+ * acceptable on a screen that moves money — and it is not what the terminal did either: a 3270 numeric
+ * field DISCARDED a non-numeric keystroke, it never compacted a longer string into a different
+ * well-formed identifier.
+ *
+ * Assumptions: the value is PASTED rather than typed, because `user.type` parses `{` as the opening of
+ * a key descriptor and the finding's own input begins with two of them. Pasting is also the gesture
+ * the finding used, so the case reproduces it rather than an approximation of it.
+ *
+ * Assumptions: the declared width still truncates the paste — eleven positions, from `ACTIDIN
+ * LENGTH=11` at `app/bms/COBIL00.bms` L85-L89 — so what lands in the field is the first eleven
+ * characters as supplied. That is the terminal's own behaviour and it is asserted alongside the
+ * refusal, because the property under test is that the characters are the operator's and the refusal
+ * names them, not that the control accepts an unbounded value.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function aPastedInjectionStringIsRefusedWhole(): Promise<void> {
+  const { user } = await mountBillPay();
+
+  await user.click(accountEntry());
+  await user.paste('{{7*7}} and ${7*7}');
+
+  /*
+   * WHY : Refactoring Rationale: the entry is compared against the WHOLE measured value rather than
+   *       tested for the absence of `'7777'` and the presence of a fragment. `'{{7*7}} and'` is the
+   *       first eleven characters of the paste, and it is what was read out of the control in a
+   *       browser after the fix -- so this is the finding's own measurement, not a paraphrase of it.
+   *       Alternatives Considered: keeping the three looser assertions. They pass against a screen
+   *       that extracted `'7'` alone, or one that dropped the space, or one that kept twelve
+   *       characters -- every one of those is a silent substitution of a value the operator did not
+   *       type, which is the whole of what the finding is about.
+   */
+  expect(accountEntry().value).toBe('{{7*7}} and');
+  expect(accountEntry().value).toHaveLength(11);
+
+  await user.keyboard('{Enter}');
+
+  /*
+   * WHY : Alternatives Considered: `expectVerbatimMessage`, which is the helper this file reaches for
+   *       elsewhere to defeat whitespace collapsing. It cannot be used here: this turn paints the
+   *       sentence TWICE by design -- once on the row-23 line and once as the marked field's help text
+   *       -- so an unscoped query matches both and raises before it can compare anything.
+   *       `waitForBandToRead` is the stronger assertion in any case, because it compares the band's
+   *       RAW `textContent` rather than a normalised form, so the doubled space is asserted by it.
+   */
+  await waitForBandToRead(ACCOUNT_FILTER_REFUSAL);
+  /*
+   * WHY : Trade-offs: the field's copy is read off the design system's own explain container and
+   *       compared as RAW text, rather than located with `getByText`. Testing Library's default
+   *       normaliser collapses a run of spaces before comparing, so a query for this sentence would
+   *       not match the element that renders it -- the very collapsing the doubled space is at risk
+   *       of. Reading the container's `textContent` is the comparison that can see the two spaces.
+   */
+  const explain = accountFormRow().querySelector('.ant-form-item-explain');
+  expect(explain?.textContent).toBe(ACCOUNT_FILTER_REFUSAL);
+
+  // WHY : Assumptions: BOTH counts are asserted, not just the total. The finding's harm was that the
+  //       extracted identifier reached the service and came back with a real balance, which armed the
+  //       payment against a record nobody named — so the paying composition's own count is named
+  //       here as well as the total, because that is the count the CRITICAL finding composed with.
+  expect(await turnsTaken()).toBe(0);
+  expect(await paymentsComposed()).toBe(0);
+
+  // WHY : Assumptions: the refusal carries a DOUBLE SPACE after "must" and the assertion names it,
+  //       because the sentence still reads as correct English without it — so a whitespace-collapsing
+  //       edit anywhere between the catalog and the band would be invisible to a reader and to every
+  //       matcher that normalises. The line it is transcribed from is asserted with it.
+  expect(ACCOUNT_FILTER_REFUSAL).toContain('must  be');
+  expect(ACCOUNT_FILTER_REFUSAL_LINES).toContain(672);
+
+  expect(paintedBalance()).toBeEmptyDOMElement();
+  expect(confirmationEntry()).toBeDisabled();
+  expect(accountFormRow().className).toContain(ERROR_ROW_CLASS);
+}
+
+/**
+ * An all-zeroes entry is refused locally, as the read-only sibling screen already refuses it.
+ *
+ * ⚠️ Refactoring Rationale: this screen accepted `'0'` and looked it up, while
+ * `app/cbl/COACTVWC.cbl` L666-L680 refuses the identical value on the identical field with no file
+ * access at all — so the money-moving screen was laxer than the read-only one, which is the wrong way
+ * round. The sibling's edit is adopted here and its sentence borrowed with it.
+ *
+ * Assumptions: the zero test compares against a run of zeroes at the DECLARED WIDTH rather than
+ * converting the entry to a number. `app/cpy/CVCRD01Y.cpy` L34-L36 declares `CC-ACCT-ID PIC X(11)`
+ * with a numeric `REDEFINES`, so the identifier is characters on the wire and a number only inside
+ * arithmetic; converting it would discard the leading zeroes the declared width owns and would put an
+ * eleven-digit value through an IEEE-754 double on the way.
+ *
+ * Assumptions: both the single `'0'` and the eleven-position `'00000000000'` are driven, because they
+ * are refused by two different halves of one edit — the first fails the width, the second passes the
+ * width and fails the non-zero test — and a screen could implement one without the other.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function anAllZeroesEntryIsRefusedLocally(): Promise<void> {
+  const { user } = await mountBillPay();
+
+  await user.type(accountEntry(), '0');
+  await user.keyboard('{Enter}');
+  await waitForBandToRead(ACCOUNT_FILTER_REFUSAL);
+  expect(await turnsTaken()).toBe(0);
+
+  await user.clear(accountEntry());
+  await user.type(accountEntry(), '00000000000');
+  expect(accountEntry().value).toHaveLength(11);
+
+  await user.keyboard('{Enter}');
+  await waitForBandToRead(ACCOUNT_FILTER_REFUSAL);
+  expect(await turnsTaken()).toBe(0);
+  expect(paintedBalance()).toBeEmptyDOMElement();
+  expect(confirmationEntry()).toBeDisabled();
+}
+
+/**
+ * An entry narrower than the declared width is refused rather than looked up.
+ *
+ * Assumptions: a `PIC 9(11)` field cannot hold a shorter value — a three-digit entry does not fill it
+ * — so a wrong width is refused by the same edit that refuses a non-digit, which is how
+ * `app/cbl/COACTVWC.cbl` L666-L680 expresses the rule with one `NOT NUMERIC` test.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function aShortEntryIsRefusedLocally(): Promise<void> {
+  const { user } = await mountBillPay();
+
+  await user.type(accountEntry(), '11');
+  await user.keyboard('{Enter}');
+
+  await waitForBandToRead(ACCOUNT_FILTER_REFUSAL);
+  expect(await turnsTaken()).toBe(0);
+}
+
+/**
+ * Registers the account-entry edit cases.
+ * @returns {void} Nothing; cases are registered as a side effect.
+ */
+function accountEntryEditCases(): void {
+  it('refuses a pasted injection string whole', aPastedInjectionStringIsRefusedWhole);
+  it('refuses an all-zeroes entry without reaching the service', anAllZeroesEntryIsRefusedLocally);
+  it('refuses an entry narrower than its declared width', aShortEntryIsRefusedLocally);
+}
+
+describe('BillPayScreen account entry edits', accountEntryEditCases);
 
 /**
  * The two spellings of the account concept are both live in one program and neither is normalised.
@@ -939,7 +1310,6 @@ function theBaselineCapitalisationAndPunctuationSurvive(): void {
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function aBlankEntryIsRefusedWithoutReachingTheService(): Promise<void> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
   const { user } = await mountBillPay();
 
   await user.keyboard('{Enter}');
@@ -950,7 +1320,7 @@ async function aBlankEntryIsRefusedWithoutReachingTheService(): Promise<void> {
   //       line carry one wording between them. An unscoped query for it matches both, and the field
   //       copy is asserted in the field-error suite where it belongs.
   await waitForBandToRead(BILL_PAY_MESSAGES.ACCT_ID_CAN_NOT_BE_EMPTY);
-  expect(vi.mocked(payAccountBalanceInFull)).not.toHaveBeenCalled();
+  expect(await turnsTaken()).toBe(0);
 }
 
 /**
@@ -1008,7 +1378,7 @@ async function aWrittenPaymentIsReportedVerbatim(): Promise<void> {
   await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
 
   await answerWith(writtenPaymentOf(transactionId));
-  await answerInDialogue(user, 'Y');
+  await answerConfirmation(user, 'Y');
 
   await waitForBandToRead(paymentSuccessMessage(transactionId));
   expectVerbatimMessage(paymentSuccessMessage(transactionId));
@@ -1047,7 +1417,7 @@ async function eachFailedStepIsReportedInItsOwnWords(): Promise<void> {
   await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
 
   await refuseWithATransportThatDidNotComplete();
-  await answerInDialogue(user, 'Y');
+  await answerConfirmation(user, 'Y');
 
   await waitForBandToRead(BILL_PAY_MESSAGES.UNABLE_TO_ADD_BILL_PAY_TRANSACTION);
   expectVerbatimMessage(BILL_PAY_MESSAGES.UNABLE_TO_ADD_BILL_PAY_TRANSACTION);
@@ -1182,6 +1552,15 @@ async function theBalanceIsCarriedAsTextThroughout(): Promise<void> {
   //       presentation and the account screens', whose `+ZZZ,ZZZ,ZZZ.99` suppresses leading zeros and
   //       groups with commas — so a small balance here paints its full width.
   await answerWith(payableBalanceOf('1.05'));
+  /*
+   * WHY : Refactoring Rationale: the entry is RE-TYPED before the second turn, where the second turn
+   *       used to be a bare press of the legend control. With a payment standing from the first turn,
+   *       a bare Enter is answered locally and makes no request at all — which is the CRITICAL fix
+   *       working, not an obstacle to it. Editing the entry withdraws the standing offer, so the
+   *       screen is back on its reading turn and the legend control dispatches one.
+   */
+  await user.clear(accountEntry());
+  await user.type(accountEntry(), FIXTURE_ACCOUNT_ID);
   await user.click(legendControl(BILL_PAY_KEY_LABELS.ENTER));
   await waitFor(
     /**
@@ -1219,6 +1598,37 @@ async function theBalanceIsPaintedInTheFixedPitchToken(): Promise<void> {
 }
 
 /**
+ * The balance keeps the colour declaration its own sign resolved to.
+ *
+ * Purpose: hold the narrowing that resolves the sign's token name against the theme's token map. The
+ * renderer answers a token NAME, the screen resolves it through that map, and the resolved reference
+ * is the value the style carries. A narrowing that lost the reference would leave the field painted
+ * in inherited text and nothing else about the screen would change, so the declaration is asserted
+ * rather than inferred.
+ *
+ * Assumptions: the fixture balance is positive, so the sign resolves to
+ * `MONEY_SIGN_TEXT_TOKENS.positive`. That is the baseline's own resolution for an unmarked money
+ * field, which is why the case names the token through the money module's map rather than writing a
+ * token name out: a change to which token a positive balance takes is then a change this case follows
+ * instead of one it contradicts.
+ *
+ * Alternatives Considered: asserting a resolved colour. Rejected because jsdom resolves no custom
+ * property and AAP section 0.3.2 admits no literal design value in this tree, which is the same
+ * reasoning recorded on the fixed-pitch case above.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theBalanceKeepsItsSignsColourDeclaration(): Promise<void> {
+  await answerWith(payableBalanceOf('1234.56'));
+  const { user } = await mountBillPay();
+  await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+
+  const painted = paintedBalance();
+
+  expect(painted.style.color).toContain(customPropertySegmentOf(MONEY_SIGN_TEXT_TOKENS.positive));
+}
+
+/**
  * A zero balance reaches the nothing-to-pay advisory and withholds the payment control.
  *
  * Assumptions: `app/cbl/COBIL00C.cbl` L198 tests `IF ACCT-CURR-BAL <= ZEROS`, so the guard is
@@ -1252,7 +1662,7 @@ async function aZeroBalanceReachesTheNothingToPayAdvisory(): Promise<void> {
   expect(BILL_PAY_MESSAGE_LINES.YOU_HAVE_NOTHING_TO_PAY).toContain(201);
 
   expect(paintedBalance().textContent).toBe('+0000000000.00');
-  expect(confirmationTrigger()).toBeDisabled();
+  expect(confirmationEntry()).toBeDisabled();
 
   // WHY : Assumptions: the cursor returns to the account entry on this turn and NOT to the
   //       confirmation control, which is the reference's own split — L203 moves `-1` to `ACTIDINL`
@@ -1270,7 +1680,7 @@ async function aZeroBalanceReachesTheNothingToPayAdvisory(): Promise<void> {
   await answerWith(nothingToPayOn('0'));
   await user.click(legendControl(BILL_PAY_KEY_LABELS.ENTER));
   await waitForBandToRead(BILL_PAY_MESSAGES.YOU_HAVE_NOTHING_TO_PAY);
-  expect(confirmationTrigger()).toBeDisabled();
+  expect(confirmationEntry()).toBeDisabled();
 
   // WHY : Assumptions: an off-contract value is painted UNCHANGED rather than coerced into the mask,
   //       which is the same discipline `ui/src/format/money.ts` records for a figure its own mask
@@ -1305,7 +1715,7 @@ async function oneCentIsPayable(): Promise<void> {
      * @returns {void} Nothing; the assertion either passes or the wait retries.
      */
     (): void => {
-      expect(confirmationTrigger()).toBeEnabled();
+      expect(confirmationEntry()).toBeEnabled();
     },
   );
 }
@@ -1332,7 +1742,7 @@ async function aCreditBalanceReachesTheSameAdvisory(): Promise<void> {
   await waitForBandToRead(BILL_PAY_MESSAGES.YOU_HAVE_NOTHING_TO_PAY);
 
   expect(paintedBalance().textContent).toBe('-0000000025.00');
-  expect(confirmationTrigger()).toBeDisabled();
+  expect(confirmationEntry()).toBeDisabled();
 }
 
 /**
@@ -1356,7 +1766,7 @@ async function editingTheEntryDiscardsTheReportedBalance(): Promise<void> {
      * @returns {void} Nothing; the assertion either passes or the wait retries.
      */
     (): void => {
-      expect(confirmationTrigger()).toBeEnabled();
+      expect(confirmationEntry()).toBeEnabled();
     },
   );
 
@@ -1367,7 +1777,7 @@ async function editingTheEntryDiscardsTheReportedBalance(): Promise<void> {
   await user.clear(accountEntry());
 
   expect(paintedBalance()).toBeEmptyDOMElement();
-  expect(confirmationTrigger()).toBeDisabled();
+  expect(confirmationEntry()).toBeDisabled();
 }
 
 /**
@@ -1377,6 +1787,10 @@ async function editingTheEntryDiscardsTheReportedBalance(): Promise<void> {
 function balanceCases(): void {
   it('carries the balance as text with no numeric conversion', theBalanceIsCarriedAsTextThroughout);
   it('paints the balance in the fixed-pitch token', theBalanceIsPaintedInTheFixedPitchToken);
+  it(
+    'keeps the colour declaration the balance sign resolved to',
+    theBalanceKeepsItsSignsColourDeclaration,
+  );
   it(
     'reaches the nothing-to-pay advisory for a zero balance',
     aZeroBalanceReachesTheNothingToPayAdvisory,
@@ -1455,7 +1869,6 @@ async function theLegendAdvertisesExactlyThreeCaptions(): Promise<void> {
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function theUnadvertisedIdentifiersAreBoundToNothing(): Promise<void> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
   const { user } = await mountBillPay();
   const legend = screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL });
 
@@ -1469,8 +1882,9 @@ async function theUnadvertisedIdentifiersAreBoundToNothing(): Promise<void> {
 
   // WHY : Assumptions: none of the four reached the service, which is the assertion that matters for
   //       PF5 specifically — an unbound key that nonetheless submitted a turn would move money on a
-  //       keystroke the reference discards.
-  expect(vi.mocked(payAccountBalanceInFull)).not.toHaveBeenCalled();
+  //       keystroke the reference discards. The count covers BOTH compositions, so a key that reached
+  //       the paying one is caught by the same assertion as one that only read a balance.
+  expect(await turnsTaken()).toBe(0);
 }
 
 /**
@@ -1486,16 +1900,21 @@ async function theUnadvertisedIdentifiersAreBoundToNothing(): Promise<void> {
  * descriptor list the screen publishes. Rejected because the descriptor list proves the wiring and
  * not the dispatch — the frame's control and the document's keydown listener are two different
  * routes into it, and only running both shows that both arrive.
+ *
+ * ⚠️ Refactoring Rationale: the fixture is the nothing-to-pay one, where it was a payable balance,
+ * and the substitution is the CRITICAL fix showing through. With a payment standing, a second bare
+ * Enter is answered locally and reaches nothing — deliberately, because that is the state in which an
+ * Enter used to pay. A turn that reports no payable balance leaves the screen on its reading turn, so
+ * both channels dispatch a reading turn and the case can still state that both arrive.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function enterTakesTheTurnFromBothChannels(): Promise<void> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
-  await answerWith(payableBalanceOf('1234.56'));
+  await answerWith(nothingToPayOn('0.00'));
   const { user } = await mountBillPay();
 
   await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
-  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
-  expect(vi.mocked(payAccountBalanceInFull)).toHaveBeenCalledTimes(1);
+  await waitForBandToRead(BILL_PAY_MESSAGES.YOU_HAVE_NOTHING_TO_PAY);
+  expect(await turnsTaken()).toBe(1);
 
   await user.click(legendControl(BILL_PAY_KEY_LABELS.ENTER));
   await waitFor(
@@ -1503,36 +1922,75 @@ async function enterTakesTheTurnFromBothChannels(): Promise<void> {
      * Waits for the second turn to be dispatched.
      * @returns {void} Nothing; the assertion either passes or the wait retries.
      */
-    (): void => {
-      expect(vi.mocked(payAccountBalanceInFull)).toHaveBeenCalledTimes(2);
+    async (): Promise<void> => {
+      expect(await turnsTaken()).toBe(2);
     },
   );
 
-  // WHY : Assumptions: the two turns carry the SAME request, which is what shows the legend control
-  //       and the key press ran one handler rather than two that merely look alike.
-  expect(await requestOfCall(1)).toEqual(await requestOfCall(0));
+  // WHY : Assumptions: the two turns looked up the SAME identifier, which is what shows the legend
+  //       control and the key press ran one handler rather than two that merely look alike.
+  expect(await inquiryOfCall(1)).toBe(await inquiryOfCall(0));
+  // WHY : Assumptions: neither channel reached the PAYING composition, which is the half of this case
+  //       that matters for money. A control wired to the wrong dispatcher would still take a turn.
+  expect(await paymentsComposed()).toBe(0);
 }
 
 /**
- * Enter is rendered with the primary emphasis and the other two with the default.
+ * The legend's emphasis follows what each key will DO, and Enter's changes with the answer.
  *
- * Assumptions: the pairing is the design system's rather than the mapset's. AAP section 0.3.2 maps the
- * action keys onto `Button` with `type="primary"` for ENTER and PF5 and `type="default"` for PF3, PF4
- * and PF12, and `ui/src/layout/PfKeyBar.tsx` publishes that decision as `PRIMARY_ACTION_AIDS`. The
- * 3270 expressed emphasis with `ATTRB=BRT`, which this tree resolves to font weight rather than to a
- * button variant, so terminal brightness and button emphasis are independent decisions and only the
- * latter is asserted here.
+ * ⚠️ Refactoring Rationale: this asserted that Enter is always primary and the other two always
+ * default, which was the `PRIMARY_ACTION_AIDS` fallback in `ui/src/layout/PfKeyBar.tsx` — a table keyed
+ * on the attention identifier. That table cannot express this screen: `ENTER=Continue` is one caption
+ * over two actions, and `app/cbl/COBIL00C.cbl` L182-L184 writes nothing while L173-L176 into L210-L235
+ * writes the ledger row and reduces the balance. Emphasis keyed on the AID therefore said "strongest
+ * control on the bar" on the reading turn, where nothing is at stake, and said exactly the same thing
+ * on the paying turn — so the signal carried no information at either.
+ *
+ * Assumptions: the screen now declares a risk per entry and the bar resolves emphasis from it —
+ * `'mutating'` to solid primary, `'read-only'` to default — so the assertion is on that mapping and it
+ * is driven through the two states the screen actually has. On the reading turn Enter is DEFAULT, which
+ * is the change this case records; once the confirming character is in the field it is PRIMARY.
+ *
+ * Assumptions: `'destructive'` is asserted ABSENT on the paying turn, and that is a contract rather
+ * than an omission. `pfKeyEmphasisFor` resolves destructive to `danger:true`, and
+ * `ui/src/layout/PfKeyBar.tsx` wraps a dangerous control in `destructiveFocusTheme` — a treatment this
+ * screen declines, because that theme overrides only `components.Button.colorPrimaryBorder` and there
+ * is no destructive `Button` left on the screen for it to act on since the confirmation dialogue was
+ * withdrawn.
  *
  * Assumptions: the variant is read off the rendered class rather than from a prop, because a prop is
  * not observable from a test and the class is what a browser actually styles from.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
-async function theEmphasisMatchesTheDesignSystemMapping(): Promise<void> {
-  await mountBillPay();
+async function theEmphasisFollowsWhatEachKeyWillDo(): Promise<void> {
+  await answerWith(payableBalanceOf('1234.56'));
+  const { user } = await mountBillPay();
 
-  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER).className).toContain('ant-btn-primary');
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER).className).toContain('ant-btn-default');
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER).className).not.toContain('ant-btn-primary');
   expect(legendControl(BILL_PAY_KEY_LABELS.PFK03).className).toContain('ant-btn-default');
   expect(legendControl(UNIFORM_PF_KEY_LABELS.PFK04).className).toContain('ant-btn-default');
+
+  await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+
+  // WHY : Assumptions: an OFFERED payment is still not an emphatic one. The offer stands and the field
+  //       is empty, so the next Enter takes the never-answered arm and reads — which is read-only, and
+  //       is why the emphasis is asserted here as well as before the lookup.
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER).className).toContain('ant-btn-default');
+
+  await user.clear(confirmationEntry());
+  await user.type(confirmationEntry(), 'Y');
+
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER).className).toContain('ant-btn-primary');
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER).className).not.toContain('ant-btn-dangerous');
+  expect(legendControl(BILL_PAY_KEY_LABELS.PFK03).className).toContain('ant-btn-default');
+  expect(legendControl(UNIFORM_PF_KEY_LABELS.PFK04).className).toContain('ant-btn-default');
+
+  // WHY : Assumptions: correcting the answer withdraws the emphasis again, so the paint tracks the
+  //       state rather than latching on the first confirming keystroke of the session.
+  await user.clear(confirmationEntry());
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER).className).toContain('ant-btn-default');
 }
 
 /**
@@ -1561,7 +2019,7 @@ async function theClearKeyReinitialisesEveryField(): Promise<void> {
      * @returns {void} Nothing; the assertion either passes or the wait retries.
      */
     (): void => {
-      expect(confirmationTrigger()).toBeEnabled();
+      expect(confirmationEntry()).toBeEnabled();
     },
   );
 
@@ -1570,7 +2028,7 @@ async function theClearKeyReinitialisesEveryField(): Promise<void> {
   expect(accountEntry().value).toBe('');
   expect(paintedBalance()).toBeEmptyDOMElement();
   expect(messageBand().textContent).toBe('');
-  expect(confirmationTrigger()).toBeDisabled();
+  expect(confirmationEntry()).toBeDisabled();
 
   // WHY : Assumptions: the legend control clears just as the key does, asserted on a second populated
   //       turn rather than on the already-cleared screen — clearing an empty screen would pass whether
@@ -1601,7 +2059,6 @@ async function theClearKeyReinitialisesEveryField(): Promise<void> {
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function theBackKeyReturnsToTheMainMenu(): Promise<void> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
   const { user } = await mountBillPayWithAddressProbe();
 
   expect(screen.getByTestId('probed-address')).toHaveTextContent(BILL_PAY_PATH);
@@ -1617,7 +2074,7 @@ async function theBackKeyReturnsToTheMainMenu(): Promise<void> {
       expect(screen.getByTestId('probed-address')).toHaveTextContent(MAIN_MENU_DESTINATION);
     },
   );
-  expect(vi.mocked(payAccountBalanceInFull)).not.toHaveBeenCalled();
+  expect(await turnsTaken()).toBe(0);
 }
 
 /**
@@ -1659,7 +2116,7 @@ function pfKeyCases(): void {
     'takes the reporting turn from the key and from the control',
     enterTakesTheTurnFromBothChannels,
   );
-  it('emphasises Enter and defaults the other two', theEmphasisMatchesTheDesignSystemMapping);
+  it('emphasises Enter only on the turn that pays', theEmphasisFollowsWhatEachKeyWillDo);
   it('reinitialises every field on the clear key', theClearKeyReinitialisesEveryField);
   it('returns to the main menu on the back key', theBackKeyReturnsToTheMainMenu);
   it('returns to the main menu on the back control', theBackControlReturnsToTheMainMenu);
@@ -1668,86 +2125,298 @@ function pfKeyCases(): void {
 describe('BillPayScreen function keys', pfKeyCases);
 
 /**
- * Payment is offered only once a balance has been reported, and only behind a confirmation.
+ * Arms the reading turn with a promise this file settles, so the in-flight state can be observed.
  *
- * Assumptions: AAP section 0.4.1.4 composes this screen from a form and a confirmation dialogue, and
- * the dialogue is the "confirmation before destructive action" mapping — which a balance-affecting
- * write is, since it moves real money and cannot be undone from this screen. It replaces the 3270
- * re-key-to-confirm convention that L237's prompt and L187's domain refusal together express.
+ * Purpose: hold one reading turn open for as long as a case needs, so the affordances the screen
+ * shows while a turn is locked can be asserted rather than inferred.
  *
- * Assumptions: the dialogue's title is the mapset's own 53-character literal, trailing space and full
- * stop included. `'Do you want to pay your balance now. Please confirm: '` is `LENGTH=53` at
+ * Assumptions: a promise held open is the only way to observe the locked state at all. An armed
+ * resolution settles inside the same act-flush as the keystroke that dispatched it, so by the time a
+ * case's next line runs the turn is already over and every busy affordance has been released.
+ * @returns {Promise<(preview: BillPaymentPreview) => void>} A function that settles the held turn
+ *   with the reported balance.
+ */
+async function deferTheReadingTurn(): Promise<(preview: BillPaymentPreview) => void> {
+  const { inquireAccountPayableBalance } = await import('../api/transactions');
+  let release: (preview: BillPaymentPreview) => void =
+    /**
+     * Stands in for the resolver until the promise's own executor supplies the real one.
+     *
+     * Assumptions: the placeholder is never the value returned. A promise executor runs synchronously
+     * inside the constructor, so the capture below has replaced this by the time the helper returns.
+     * @returns {void} Nothing; the placeholder discards the settling value.
+     */
+    (): void => undefined;
+  vi.mocked(inquireAccountPayableBalance).mockReturnValue(
+    new Promise<BillPaymentPreview>(
+      /**
+       * Captures the resolver so the case can settle the turn when it chooses.
+       * @param {(preview: BillPaymentPreview) => void} resolve - The promise's own resolver.
+       * @returns {void} Nothing; the captured resolver is the helper's result.
+       */
+      (resolve: (preview: BillPaymentPreview) => void): void => {
+        release = resolve;
+      },
+    ),
+  );
+  return release;
+}
+
+/**
+ * Arms the paying turn with a promise this file settles, for the same reason as the reading one.
+ * @returns {Promise<(payment: BillPaymentResponse) => void>} A function that settles the held
+ *   payment with the row the service wrote.
+ */
+async function deferThePayingTurn(): Promise<(payment: BillPaymentResponse) => void> {
+  const { payAccountBalanceConfirmed } = await import('../api/transactions');
+  let release: (payment: BillPaymentResponse) => void =
+    /**
+     * Stands in for the resolver until the promise's own executor supplies the real one.
+     *
+     * Assumptions: the placeholder is never the value returned, for the reason recorded on the reading
+     * turn's equivalent -- a promise executor runs synchronously inside the constructor.
+     * @returns {void} Nothing; the placeholder discards the settling value.
+     */
+    (): void => undefined;
+  vi.mocked(payAccountBalanceConfirmed).mockReturnValue(
+    new Promise<BillPaymentResponse>(
+      /**
+       * Captures the resolver so the case can settle the payment when it chooses.
+       * @param {(payment: BillPaymentResponse) => void} resolve - The promise's own resolver.
+       * @returns {void} Nothing; the captured resolver is the helper's result.
+       */
+      (resolve: (payment: BillPaymentResponse) => void): void => {
+        release = resolve;
+      },
+    ),
+  );
+  return release;
+}
+
+/**
+ * Locates the form row that surrounds the confirmation field.
+ *
+ * Assumptions: the row is reached from the control rather than by a class query, for the same reason
+ * the account entry's is — the control is the element a case has a stable handle on, and the design
+ * system's own row is what carries the refused state.
+ * @returns {HTMLElement} The form row.
+ * @throws {Error} If the control is not inside a form row, which would mean the confirmation is no
+ *   longer composed through the design system's form primitive at all.
+ */
+function confirmationFormRow(): HTMLElement {
+  const row = confirmationEntry().closest('.ant-form-item');
+  if (!(row instanceof HTMLElement)) {
+    throw new Error('the confirmation field is not inside a design-system form row');
+  }
+  return row;
+}
+
+/**
+ * Payment is offered only once a balance has been reported, and only from a typed answer.
+ *
+ * ⚠️ Refactoring Rationale: the gate asserted here is the mapset's own FIELD, where it was a
+ * confirmation dialogue. AAP section 0.4.1.4 maps a destructive confirmation onto a dialogue in
+ * general, and this screen is the documented exception rather than a lapse from it: the reference
+ * already carries a confirmation gate of its own, and `app/cbl/COBIL00C.cbl` L173-L191 pays only on a
+ * character the operator typed into `CONFIRM`. A dialogue on top of a typed answer would ask one
+ * question twice, which trains an operator to answer without reading; a dialogue INSTEAD of it was
+ * measured moving a full balance on three bare presses of Enter.
+ *
+ * Assumptions: the 53-character prompt is the field's LABEL, trailing space and full stop included.
+ * `'Do you want to pay your balance now. Please confirm: '` is `LENGTH=53` at
  * `app/bms/COBIL00.bms` L109-L114 as a BMS continuation across two lines, and it ends its first
  * sentence with a full stop rather than a question mark. Both read like transcription slips and
  * neither is corrected, so the literal is taken from the catalog and never retyped.
+ *
+ * Assumptions: the record the question is about is painted BESIDE the question and is never occluded
+ * by it, which a dialogue could not guarantee — measured, the panel covered the balance it asked
+ * about. The label and the control sit in the same form row as the balance's own line, so the figure
+ * and the amount stay readable while the answer is typed.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function theConfirmationGatesThePayment(): Promise<void> {
   await answerWith(payableBalanceOf('1234.56'));
   const { user } = await mountBillPay();
 
-  // WHY : Assumptions: the trigger starts UNAVAILABLE, because the reference reaches its confirmation
+  // WHY : Assumptions: the field starts UNAVAILABLE, because the reference reaches its confirmation
   //       prompt at L236-L240 only after a balance has been read — L208's `IF NOT ERR-FLG-ON` gate
   //       means no turn that failed or reported nothing to pay ever offers it.
-  expect(confirmationTrigger()).toBeDisabled();
+  expect(confirmationEntry()).toBeDisabled();
   expect(screen.queryByRole('tooltip')).toBeNull();
+  expect(screen.queryByRole('dialog')).toBeNull();
 
   await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
   await waitFor(
     /**
-     * Waits for the payment control to be offered.
+     * Waits for the payment to be offered.
      * @returns {void} Nothing; the assertion either passes or the wait retries.
      */
     (): void => {
-      expect(confirmationTrigger()).toBeEnabled();
+      expect(confirmationEntry()).toBeEnabled();
     },
   );
 
-  await user.click(confirmationTrigger());
-  const dialogue = await screen.findByRole('tooltip');
+  // WHY : Assumptions: the record the confirmation is about is NAMED on the screen the answer is
+  //       typed on — the identifier in its own entry and the amount in the balance field — and both
+  //       are readable at the moment of answering. That is the umbrella confirmation contract this
+  //       screen satisfies with an in-place gate rather than with a panel.
+  expect(accountEntry().value).toBe(FIXTURE_ACCOUNT_ID);
+  expect(paintedBalance().textContent).toBe('+0000001234.56');
+  expect(screen.queryByRole('tooltip')).toBeNull();
+  expect(screen.queryByRole('dialog')).toBeNull();
 
-  expect(
-    within(dialogue).getByText(BILL_PAY_FIELD_LABELS.confirmPrompt.trim()),
-  ).toBeInTheDocument();
+  const label = confirmationFormRow().querySelector('.ant-form-item-label');
+  expect(label?.textContent).toContain(BILL_PAY_FIELD_LABELS.confirmPrompt.trim());
 }
 
 /**
- * Declining the confirmation reaches no service and clears the screen.
+ * Three bare presses of Enter after a preview move no money at all.
+ *
+ * ⚠️ Refactoring Rationale: this is the CRITICAL finding's own reproduction, transcribed from what was
+ * measured in a browser. The operator typed ONLY the eleven account digits and pressed Enter three
+ * times; the letter `'Y'` was never typed and nothing was clicked. Press one read the balance and then
+ * moved the cursor onto the control that opened the confirmation; press two activated that control and
+ * the panel's own affirmative answer took the cursor; press three activated THAT, and the whole
+ * current balance was paid. Two defects composed: the screen focused a destructive control after a
+ * preview, and the gate behind it also focused its affirmative answer, so "commit" was the default
+ * action at two consecutive turns on a key the row-24 legend advertises as `ENTER=Continue`.
+ *
+ * Assumptions: the cursor may safely land on the confirmation FIELD after a preview, and that is the
+ * whole distinction. `MOVE -1 TO CONFIRML` at `app/cbl/COBIL00C.cbl` L239 puts it there in the
+ * reference too — but the field it points at is empty, and focus cannot type a character into it, so
+ * the never-answered arm at L182-L184 is what an Enter arriving there reaches.
+ *
+ * Assumptions: the assertion is on the PAYING composition's call count and not merely on the absence
+ * of a success sentence. A payment that was composed and then failed would leave no success sentence
+ * either, and it would still have reached the service.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function threeBarePressesOfEnterMoveNoMoney(): Promise<void> {
+  await answerWith(payableBalanceOf('1234.56'));
+  const { user } = await mountBillPay();
+
+  await user.type(accountEntry(), FIXTURE_ACCOUNT_ID);
+  await user.keyboard('{Enter}');
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+  expect(await turnsTaken()).toBe(1);
+
+  // WHY : Assumptions: the one turn the three presses produced is the READ-ONLY composition carrying
+  //       the account and nothing else. Both halves are asserted — the identifier, so the turn is
+  //       about the record the operator named, and the argument COUNT, because the paying wrapper
+  //       defaults its answer when called with one argument, so arity is the difference between a
+  //       balance read and a payment.
+  expect(await inquiryOfCall(0)).toBe(FIXTURE_ACCOUNT_ID);
+  expect(await inquiryArgumentsOfCall(0)).toHaveLength(1);
+
+  // WHY : Refactoring Rationale: the cursor is asserted after EVERY press, not once at the end. The
+  //       measured defect was a commit control holding the cursor at presses two and three; a case
+  //       that only checks the final resting place would pass against a screen that focused the
+  //       affirmative at press two and happened to be re-rendered back onto the field afterwards.
+  await expectCursorOnTheConfirmationField();
+
+  await user.keyboard('{Enter}');
+  await expectCursorOnTheConfirmationField();
+
+  await user.keyboard('{Enter}');
+  await expectCursorOnTheConfirmationField();
+
+  expect(await paymentsComposed()).toBe(0);
+  expect(await turnsTaken()).toBe(1);
+  expect(screen.queryByRole('tooltip')).toBeNull();
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  // WHY : Assumptions: the standing offer is INTACT after the two bare presses — the balance still
+  //       painted, the field still empty and still offered, the prompt still standing. The reference's
+  //       never-answered arm re-reads the record and repaints exactly that, so the turn is a no-op an
+  //       operator can see rather than a state they have to recover from.
+  expect(paintedBalance().textContent).toBe('+0000001234.56');
+  expect(accountEntry().value).toBe(FIXTURE_ACCOUNT_ID);
+  expect(confirmationEntry().value).toBe('');
+  expect(confirmationEntry()).toBeEnabled();
+  expect(messageBand().textContent).toBe(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT.trim());
+}
+
+/**
+ * The cursor a preview places lands on the confirmation field and on nothing else.
+ *
+ * Assumptions: this is `MOVE -1 TO CONFIRML` at `app/cbl/COBIL00C.cbl` L239 and it is asserted
+ * POSITIVELY as well as negatively, because both halves are contracts. The reference does place the
+ * cursor there, so a screen that left it on the account entry would have dropped the only per-field
+ * signal this program produces; and a screen that placed it on a control whose activation pays is the
+ * defect above.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function aPreviewPlacesTheCursorOnTheConfirmationField(): Promise<void> {
+  await answerWith(payableBalanceOf('1234.56'));
+  const { user } = await mountBillPay();
+
+  await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+  await waitFor(
+    /**
+     * Waits for the recorded cursor move to be applied.
+     * @returns {void} Nothing; the assertion either passes or the wait retries.
+     */
+    (): void => {
+      expect(confirmationEntry()).toHaveFocus();
+    },
+  );
+
+  // WHY : Assumptions: the control the cursor arrives on is an INPUT and is empty, which is what makes
+  //       the arrival harmless. Every other candidate on the screen is asserted not to hold it, so a
+  //       future edit that moved the cursor onto the legend's `ENTER=Continue` control — the one that
+  //       actually commits — fails here rather than in a browser.
+  expect(confirmationEntry().value).toBe('');
+  expect(accountEntry()).not.toHaveFocus();
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).not.toHaveFocus();
+  expect(legendControl(BILL_PAY_KEY_LABELS.PFK03)).not.toHaveFocus();
+  expect(legendControl(UNIFORM_PF_KEY_LABELS.PFK04)).not.toHaveFocus();
+}
+
+/**
+ * Declining the confirmation reaches no service and destroys none of the operator's work.
  *
  * Assumptions: the decline is answered LOCALLY because the reference reaches no file either —
- * `app/cbl/COBIL00C.cbl` L178-L181 performs `CLEAR-CURRENT-SCREEN` and sets the error flag, which
- * suppresses every later sentence, so the turn is silent as well as requestless. Sending the answer
- * would spend a request to be told what is already known and would let an unrelated transport failure
- * paint an error on a turn the reference answers in silence.
+ * `app/cbl/COBIL00C.cbl` L178-L181 sets the error flag, which suppresses every later sentence, so the
+ * turn is requestless. Sending the answer would spend a request to be told what is already known and
+ * would let an unrelated transport failure paint an error on a turn the reference answers in silence.
  *
- * ⚠️ Assumptions: the call count is asserted against the count BEFORE the dialogue opened rather than
- * against zero, because the reporting turn that made the payment available is itself a call. Asserting
- * zero would be asserting that the balance was never looked up.
+ * ⚠️ Refactoring Rationale: the operator's work SURVIVES the decline, where the reference performs
+ * `CLEAR-CURRENT-SCREEN` at L179 and the migration reproduced it literally. Measured, that erased the
+ * account identifier and discarded the fetched balance with no acknowledgement anywhere on screen, so
+ * an operator who declined once had to retype the identifier and spend a second lookup to get back to
+ * where they were. Declining a payment is a SAFE act, and a safe act must not destroy work. This is a
+ * deliberate, documented divergence and it is asserted rather than absorbed.
+ *
+ * Assumptions: what is re-asserted afterwards is the standing PROMPT and not a cancellation
+ * acknowledgement, because `app/cbl/COBIL00C.cbl` declares no such literal — its declining arm sets
+ * the error flag precisely so that no sentence is emitted — and transformation rule T8 forbids putting
+ * words on the screen that no line of the baseline holds. The offer genuinely does still stand, so the
+ * sentence that states it is the honest one to leave standing.
+ *
+ * Assumptions: the call count is asserted against the count BEFORE the answer rather than against
+ * zero, because the reading turn that made the payment available is itself a call. Asserting zero
+ * would be asserting that the balance was never looked up.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function decliningTheConfirmationReachesNoService(): Promise<void> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
   await answerWith(payableBalanceOf('1234.56'));
   const { user } = await mountBillPay();
 
   await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
   await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
-  expect(vi.mocked(payAccountBalanceInFull)).toHaveBeenCalledTimes(1);
+  expect(await turnsTaken()).toBe(1);
+  const paintedBefore = paintedBalance().textContent;
 
-  await answerInDialogue(user, 'N');
+  await answerConfirmation(user, 'N');
 
-  await waitFor(
-    /**
-     * Waits for the declining answer to clear the screen.
-     * @returns {void} Nothing; the assertion either passes or the wait retries.
-     */
-    (): void => {
-      expect(accountEntry().value).toBe('');
-    },
-  );
-  expect(vi.mocked(payAccountBalanceInFull)).toHaveBeenCalledTimes(1);
-  expect(paintedBalance()).toBeEmptyDOMElement();
-  expect(messageBand().textContent).toBe('');
+  expect(await turnsTaken()).toBe(1);
+  expect(await paymentsComposed()).toBe(0);
+
+  expect(accountEntry().value).toBe(FIXTURE_ACCOUNT_ID);
+  expect(paintedBalance().textContent).toBe(paintedBefore);
+  expect(confirmationEntry()).toBeEnabled();
+  expect(confirmationEntry().value).toBe('');
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
 }
 
 /**
@@ -1765,13 +2434,13 @@ async function decliningTheConfirmationReachesNoService(): Promise<void> {
  * performs the equivalent inside one database transaction — so splitting it client-side would make a
  * partially applied payment observable, a state the baseline never exhibits.
  *
- * Assumptions: the answer is the upper-case `'Y'`, which is inside the set `EVALUATE CONFIRMI` admits
- * at L173-L176. The reference accepts either case there; sending the upper-case form keeps the request
- * inside the set the service's own confirmation validator admits as well.
+ * Assumptions: the answer travels as the character the operator TYPED, which is inside the set
+ * `EVALUATE CONFIRMI` admits at L173-L176. The reference accepts either case there, and the commit
+ * wrapper validates the same domain before it sends, so a non-confirming answer cannot reach this
+ * composition at all.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function confirmingSubmitsExactlyOnePayment(): Promise<void> {
-  const { payAccountBalanceInFull } = await import('../api/transactions');
   const { paymentSuccessMessage } = await import('../screens/billPay');
   const transactionId = '0000000000000101';
 
@@ -1781,114 +2450,451 @@ async function confirmingSubmitsExactlyOnePayment(): Promise<void> {
   await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
 
   await answerWith(writtenPaymentOf(transactionId));
-  await answerInDialogue(user, 'Y');
+  await answerConfirmation(user, 'Y');
   await waitForBandToRead(paymentSuccessMessage(transactionId));
 
-  expect(vi.mocked(payAccountBalanceInFull)).toHaveBeenCalledTimes(2);
-  expect(await requestOfCall(1)).toEqual({
-    accountId: FIXTURE_ACCOUNT_ID,
-    confirmation: 'Y',
-  });
+  expect(await paymentsComposed()).toBe(1);
+  expect(await paymentOfCall(0)).toEqual([FIXTURE_ACCOUNT_ID, 'Y']);
 
-  // WHY : Assumptions: the payment control is withdrawn again afterwards, so the settled turn cannot
-  //       be re-confirmed. `INITIALIZE-ALL-FIELDS` at L524 runs before the success sentence is composed
-  //       at L527, which leaves the entry blank and nothing left to pay.
-  expect(confirmationTrigger()).toBeDisabled();
+  /*
+   * WHY : Assumptions: the success sentence carries a DOUBLE SPACE after "successful." and the
+   *       assertion names it. `MESSAGE_TEMPLATES.PAYMENT_SUCCESSFUL` joins a first literal that ENDS
+   *       with a space to a second that BEGINS with one -- `app/cbl/COBIL00C.cbl` L527-L530 -- and the
+   *       sentence reads as correct English without the second one, so a whitespace-tidying edit
+   *       anywhere between the catalog and the band would be invisible to a reader. Rule T8 makes the
+   *       doubled space a contract, so it is asserted on the composed sentence AND, through
+   *       `waitForBandToRead`'s raw `textContent` comparison above, on what the band actually painted.
+   *       Alternatives Considered: querying the band with `getByText`. Testing Library normalises a
+   *       run of spaces in the CANDIDATE before comparing, so such a query cannot see the difference
+   *       between one space and two and would pass against the tidied sentence.
+   */
+  expect(paymentSuccessMessage(transactionId)).toContain('successful.  Your Transaction ID is ');
+  expect(paymentSuccessMessage(transactionId)).toBe(
+    `Payment successful.  Your Transaction ID is ${transactionId}.`,
+  );
+
+  // WHY : Assumptions: the payment is withdrawn again afterwards, so the settled turn cannot be
+  //       re-confirmed. `INITIALIZE-ALL-FIELDS` at L524 runs before the success sentence is composed
+  //       at L527, which leaves the entry blank, the answer blank and nothing left to pay.
+  expect(confirmationEntry()).toBeDisabled();
+  expect(confirmationEntry().value).toBe('');
 }
 
 /**
- * The reporting turn omits the confirmation member rather than sending it empty.
+ * A lower-case confirming answer pays, because the reference accepts both cases.
+ *
+ * Assumptions: `app/cbl/COBIL00C.cbl` L174-L175 is one branch with two arms, `'Y'` and `'y'`, so a
+ * lower-case answer is HONOURED rather than corrected on the way in. A screen that upper-cased the
+ * keystroke would agree with the reference by accident; one that filtered it to the upper-case form
+ * only would refuse an answer the terminal took.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function aLowerCaseConfirmingAnswerPays(): Promise<void> {
+  const { paymentSuccessMessage } = await import('../screens/billPay');
+  const transactionId = '0000000000000202';
+
+  await answerWith(payableBalanceOf('1234.56'));
+  const { user } = await mountBillPay();
+  await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+
+  await answerWith(writtenPaymentOf(transactionId));
+  await answerConfirmation(user, 'y');
+  await waitForBandToRead(paymentSuccessMessage(transactionId));
+
+  expect(await paymentOfCall(0)).toEqual([FIXTURE_ACCOUNT_ID, 'y']);
+}
+
+/**
+ * The reading turn is composed by a function that has no parameter a confirmation could travel in.
+ *
+ * ⚠️ Refactoring Rationale: this is asserted structurally now, where it used to be asserted on the
+ * request body. The two turns were one call whose only difference was whether a `confirmation` member
+ * was present, which made "this turn cannot move money" a property of a conditional — so the case
+ * could only ever state that the conditional had gone the right way on that occasion.
+ * `inquireAccountPayableBalance` takes an account identifier and nothing else, so there is no
+ * parameter through which a held answer could reach a reading turn at all.
  *
  * Assumptions: absence and an explicit empty value are DIFFERENT to the service. The contract declares
  * the member optional and the service reads its absence the way the reference reads a blank `CONFIRMI`
  * at `app/cbl/COBIL00C.cbl` L182-L184 — read the account and report the balance without writing —
  * whereas a value it does not recognise is the L185-L190 refusal. `ui/tsconfig.json` sets
  * `exactOptionalPropertyTypes`, under which an explicit `undefined` and an absent member are different
- * types, so the distinction is enforced at compile time as well as asserted here.
+ * types, and `ui/src/api/transactions.ts` composes the body under that setting.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
-async function theReportingTurnOmitsTheConfirmation(): Promise<void> {
+async function theReportingTurnCannotCarryAConfirmation(): Promise<void> {
+  const { inquireAccountPayableBalance } = await import('../api/transactions');
   await answerWith(payableBalanceOf('1234.56'));
   const { user } = await mountBillPay();
 
   await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
   await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
 
-  const request = await requestOfCall(0);
-  expect(Object.keys(request)).toEqual(['accountId']);
-  expect('confirmation' in request).toBe(false);
+  const sent = vi.mocked(inquireAccountPayableBalance).mock.calls[0];
+  expect(sent).toEqual([FIXTURE_ACCOUNT_ID]);
+  expect(await paymentsComposed()).toBe(0);
 }
 
 /**
- * The domain refusal is carried verbatim in the catalog and cannot be provoked from this screen.
+ * A character outside the domain is refused in the reference's own words, and the offer survives it.
  *
  * ⚠️ Refactoring Rationale: `'Invalid value. Valid values are (Y/N)...'` at `app/cbl/COBIL00C.cbl`
- * L187 is UNREACHABLE here, and that is a consequence of replacing the single-character field with a
- * dialogue rather than an omission. The field existed because a 3270 terminal had no modal, and the
- * program re-read the whole map to discover what had been typed into it; a dialogue asks the question
- * directly and can only send the two answers it offers, so the branch that rejected a third character
- * has nothing to reject.
+ * L187 is REACHABLE again and is provoked here. It was dead code while the answer came from a dialogue
+ * offering two controls: nothing but `'Y'` or `'N'` could be submitted, so no third character existed
+ * to refuse. Restoring the mapset's one-position field restores the arm, and the arm is the thing that
+ * tells an operator their keystroke was not understood instead of guessing at it.
  *
- * Assumptions: the sentence is kept anyway, for two reasons that are both live. `app/cbl/COTRN02C.cbl`
- * still emits it, and the service still validates the member independently — so a refusal carrying it
- * can still arrive, and `billPayFailure` renders whatever sentence the service sent rather than
- * substituting one of its own.
+ * Assumptions: the reported balance and the standing offer both SURVIVE the refusal, and the reference
+ * is what settles that. The arm sends the map at L190, before the balance move at L193-L194 has run,
+ * so the operator keeps looking at the balance the previous turn read and the field stays open for a
+ * second attempt. Withdrawing the offer here would make a typo cost the operator the lookup as well.
+ *
+ * Assumptions: the typed character stays IN the field. The reference re-sends the map with whatever
+ * `CONFIRMI` received, so the operator can see what was not understood; clearing it would leave them
+ * guessing at what they had typed.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
-async function theDomainRefusalIsCarriedButUnreachable(): Promise<void> {
+async function anInvalidAnswerIsRefusedAndTheOfferSurvives(): Promise<void> {
   await answerWith(payableBalanceOf('1234.56'));
   const { user } = await mountBillPay();
 
   await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+
+  await answerConfirmation(user, 'X');
+
+  /*
+   * WHY : Alternatives Considered: `expectVerbatimMessage`, rejected for the same reason as on the
+   *       account refusal above -- this turn paints the sentence on the row-23 line AND as the field's
+   *       help text, so an unscoped query matches two elements. `waitForBandToRead` compares the
+   *       band's raw `textContent`, which is the non-collapsing comparison this sentence needs.
+   */
+  await waitForBandToRead(SHARED_MESSAGES.INVALID_VALUE_VALID_VALUES_ARE_Y_N);
+  expect(SHARED_MESSAGE_SOURCES.INVALID_VALUE_VALID_VALUES_ARE_Y_N).toContainEqual({
+    file: PROGRAM,
+    lines: [187],
+  });
+
+  expect(await turnsTaken()).toBe(1);
+  expect(await paymentsComposed()).toBe(0);
+
+  expect(paintedBalance().textContent).toBe('+0000001234.56');
+  expect(accountEntry().value).toBe(FIXTURE_ACCOUNT_ID);
+  expect(confirmationEntry()).toBeEnabled();
+  expect(confirmationEntry().value).toBe('X');
+
+  expect(confirmationFormRow().className).toContain(ERROR_ROW_CLASS);
+  expect(confirmationEntry()).toHaveAttribute('aria-invalid', 'true');
+  /*
+   * WHY : Trade-offs: the sentence is located inside the field's own ROW rather than asserted as the
+   *       control's whole accessible description. The control is described by two elements at once --
+   *       the `(Y/N)` domain hint and this refusal -- so the description is a concatenation whose
+   *       order belongs to `ui/src/layout/fieldHelp.tsx` rather than to this contract. What this case
+   *       is entitled to state is that the refusal is one of them and that the control announces
+   *       itself described, which is what these two assertions say between them.
+   */
+  expect(
+    within(confirmationFormRow()).getByText(SHARED_MESSAGES.INVALID_VALUE_VALID_VALUES_ARE_Y_N),
+  ).toBeInTheDocument();
+  expect(confirmationEntry()).toHaveAttribute('aria-describedby');
+
   await waitFor(
     /**
-     * Waits for the payment control to be offered.
+     * Waits for the recorded cursor move to be applied.
      * @returns {void} Nothing; the assertion either passes or the wait retries.
      */
     (): void => {
-      expect(confirmationTrigger()).toBeEnabled();
+      expect(confirmationEntry()).toHaveFocus();
     },
   );
-
-  await user.click(confirmationTrigger());
-  const dialogue = await screen.findByRole('tooltip');
-  const answers = within(dialogue)
-    .getAllByRole('button')
-    .map(
-      /**
-       * Reads one answer control's caption.
-       * @param {HTMLElement} control - One rendered answer control.
-       * @returns {string} Its text content, or the empty string if it has none.
-       */
-      (control: HTMLElement): string => control.textContent ?? '',
-    );
-
-  // WHY : Assumptions: the two answers are exactly the two the reference's `EVALUATE CONFIRMI` accepts
-  //       at L174 and L178, so no submission this dialogue can make reaches L185's `WHEN OTHER` arm.
-  //       That, and not the absence of the sentence from the catalog, is why the refusal cannot appear.
-  //       The pair is compared as a SET, sorted into a stable order, because the panel's document
-  //       order puts the declining control first and that ordering is the design system's rather than
-  //       this contract's. A copy is sorted rather than the array itself, so the query's own result is
-  //       not mutated for any later reader.
-  expect([...answers].sort()).toEqual(['N', 'Y']);
-  expect(screen.queryByText(SHARED_MESSAGES.INVALID_VALUE_VALID_VALUES_ARE_Y_N)).toBeNull();
 }
 
 /**
- * Registers the confirmation-dialogue cases.
+ * Correcting the refused answer clears the mark the refusal left on that field alone.
+ *
+ * Assumptions: the field's own sentence disappears as the operator starts correcting it, exactly as
+ * the account entry's does, while the row-23 line is left standing until a turn replaces it — because
+ * the reference repaints that line only when it sends the map.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function correctingTheAnswerClearsItsMark(): Promise<void> {
+  await answerWith(payableBalanceOf('1234.56'));
+  const { user } = await mountBillPay();
+
+  await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+  await answerConfirmation(user, 'X');
+  await waitForBandToRead(SHARED_MESSAGES.INVALID_VALUE_VALID_VALUES_ARE_Y_N);
+  expect(confirmationFormRow().className).toContain(ERROR_ROW_CLASS);
+
+  await user.clear(confirmationEntry());
+  await user.keyboard('Y');
+
+  expect(confirmationFormRow().className).not.toContain(ERROR_ROW_CLASS);
+  expect(accountFormRow().className).not.toContain(ERROR_ROW_CLASS);
+}
+
+/**
+ * The turn's busy affordance lands on the control that owns the turn, and never on the money.
+ *
+ * ⚠️ Refactoring Rationale: the indicator used to be a spinner on the control that PAINTED the
+ * balance. Measured, that put a loading affordance on a figure — the one number the operator has to
+ * read before answering — while the control they had actually operated showed nothing. The affordance
+ * now travels with the turn: the account entry owns a reading turn and the confirmation field owns a
+ * paying one.
+ *
+ * Assumptions: `aria-busy` is the assertion rather than a rendered spinner, because
+ * `ui/src/layout/fieldHelp.tsx` publishes exactly that and nothing visual — a busy control is one an
+ * assistive reader is told is busy, and jsdom has no layout engine to show anything else in.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theBusyAffordanceLandsOnTheControlThatOwnsTheTurn(): Promise<void> {
+  const releaseReading = await deferTheReadingTurn();
+  const { user } = await mountBillPay();
+
+  await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+
+  expect(accountEntry()).toHaveAttribute('aria-busy', 'true');
+  expect(confirmationEntry()).not.toHaveAttribute('aria-busy', 'true');
+  // WHY : Assumptions: the money is asserted to carry NO busy affordance and to be no control at all,
+  //       which is the half of this case the finding was raised on.
+  expect(paintedBalance()).not.toHaveAttribute('aria-busy', 'true');
+  expect(paintedBalance().className).not.toContain('ant-btn');
+
+  releaseReading({
+    accountId: FIXTURE_ACCOUNT_ID,
+    payableBalance: '1234.56',
+    paid: false,
+    returnMessage: BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT,
+  });
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+  expect(accountEntry()).not.toHaveAttribute('aria-busy', 'true');
+
+  const releasePaying = await deferThePayingTurn();
+  await answerConfirmation(user, 'Y');
+
+  expect(confirmationEntry()).toHaveAttribute('aria-busy', 'true');
+  expect(accountEntry()).not.toHaveAttribute('aria-busy', 'true');
+  expect(paintedBalance()).not.toHaveAttribute('aria-busy', 'true');
+
+  releasePaying({
+    transactionId: '0000000000000303',
+    accountId: FIXTURE_ACCOUNT_ID,
+    currentBalance: '0.00',
+    paid: true,
+    returnMessage: null,
+  });
+  const { paymentSuccessMessage } = await import('../screens/billPay');
+  await waitForBandToRead(paymentSuccessMessage('0000000000000303'));
+}
+
+/**
+ * The key whose turn is outstanding reports busy; the two keys being withheld report disabled.
+ *
+ * ⚠️ Refactoring Rationale: all three legend controls were greyed for the duration of a turn. That
+ * conflated two different events. `ui/src/layout/PfKeyBar.tsx` records the reference behaviour: a 3270
+ * ANNOUNCED a running task and withdrew nothing, so the control the operator pressed must stay present,
+ * focusable and named while it declines the next press — which is what the busy channel expresses.
+ * Greying it removed it from the tab order at the one moment a keyboard operator is most likely to be
+ * pressing keys, and told them the key does not work when the truth is that they were early.
+ *
+ * Assumptions: the two withheld keys keep the DISABLED channel, and the split is the point of this
+ * case. The busy channel says "the key you pressed is running"; PF3 and PF4 are not running, they are
+ * unavailable because a write they have nothing to do with is in flight, and greying them is the honest
+ * statement of that. Both channels decline in silence, which is asserted here by the message band still
+ * reading the standing offer rather than the invalid-key sentence.
+ *
+ * Assumptions: `ui/src/layout/usePfKeys.ts` tests `disabled` BEFORE `busy`, so an entry declaring both
+ * would resolve as disabled and this case would fail on the enabled assertion. That ordering is why the
+ * screen replaced Enter's `disabled` rather than adding to it, and asserting the enabled state here is
+ * what stops a future edit from reinstating the pair.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theOutstandingKeyReportsBusyAndTheWithheldKeysReportDisabled(): Promise<void> {
+  const releaseReading = await deferTheReadingTurn();
+  const { user } = await mountBillPay();
+
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toHaveAttribute('aria-busy', 'false');
+
+  await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toBeEnabled();
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toHaveAttribute('aria-busy', 'true');
+  expect(legendControl(BILL_PAY_KEY_LABELS.PFK03)).toBeDisabled();
+  expect(legendControl(UNIFORM_PF_KEY_LABELS.PFK04)).toBeDisabled();
+
+  // WHY : Assumptions: the busy control still carries its caption, so the accessible name is unchanged
+  //       by the affordance. `ui/src/layout/PfKeyBar.tsx` passes the loading glyph in object form for
+  //       exactly this reason, and a name that changed mid-turn would leave a screen-reader operator
+  //       unable to find the control they had just pressed.
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER).textContent).toBe(BILL_PAY_KEY_LABELS.ENTER);
+
+  // WHY : Assumptions: a second press while the turn is outstanding takes NO further turn and paints NO
+  //       sentence. Silence is the reference's behaviour — the terminal inhibited the keyboard, so the
+  //       program never saw the keystroke and composed no message for it — and the count is the half of
+  //       this that protects money.
+  await user.keyboard('{Enter}');
+  expect(await turnsTaken()).toBe(1);
+  expect(messageBand().textContent).not.toBe(INVALID_KEY_PRESSED.trim());
+
+  releaseReading({
+    accountId: FIXTURE_ACCOUNT_ID,
+    payableBalance: '1234.56',
+    paid: false,
+    returnMessage: BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT,
+  });
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+
+  expect(legendControl(BILL_PAY_KEY_LABELS.ENTER)).toHaveAttribute('aria-busy', 'false');
+  expect(legendControl(BILL_PAY_KEY_LABELS.PFK03)).toBeEnabled();
+  expect(legendControl(UNIFORM_PF_KEY_LABELS.PFK04)).toBeEnabled();
+}
+
+/**
+ * The busy window is announced in words, from a region that is mounted on every turn.
+ *
+ * ⚠️ Refactoring Rationale: the screen reported the busy state only as `aria-busy` on the field that
+ * owned the turn. That is a state with no remedy attached: an operator hears that a control is busy and
+ * is told nothing about what to do. `REQUEST_IN_PROGRESS` — "Working on your request. Wait for the
+ * screen to answer." — is the sentence, and it matters most on the paying turn, where the operator has
+ * just committed money and both fields and both withheld keys have gone quiet at once.
+ *
+ * ⚠️ Assumptions: the region is asserted PRESENT AND EMPTY before any turn, and that is the load-bearing
+ * half of this case rather than a completeness check. A `role="status"` element inserted at the moment
+ * it acquires text is frequently not announced at all, because the assistive reader has no live region
+ * to observe until the text is already in it; one present from the first render and changed in place is
+ * announced. So a future edit that conditionally rendered the region would still show the right words
+ * in the DOM and would say nothing out loud, which only the empty-then-filled sequence can catch.
+ *
+ * Assumptions: the sentence is compared against the catalog constant rather than a retyped string, so a
+ * case cannot drift from the authored wording, and the region is located by the layout module's own
+ * exported handle rather than a literal.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theBusyWindowIsAnnouncedInWords(): Promise<void> {
+  const releaseReading = await deferTheReadingTurn();
+  const { user } = await mountBillPay();
+
+  /**
+   * Reads the scoped busy region out of the rendered tree on each call.
+   *
+   * Assumptions: the region is re-queried rather than captured once, because the assertions below span
+   * a state change and a captured node would be asserted against after it had been replaced.
+   * @returns {HTMLElement} The always-mounted status region the screen announces the busy window in.
+   */
+  const announcement = (): HTMLElement => screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+
+  expect(announcement()).toHaveAttribute('role', 'status');
+  expect(announcement().textContent).toBe('');
+
+  await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
+  expect(announcement().textContent).toBe(REQUEST_IN_PROGRESS);
+
+  releaseReading({
+    accountId: FIXTURE_ACCOUNT_ID,
+    payableBalance: '1234.56',
+    paid: false,
+    returnMessage: BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT,
+  });
+  await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+  expect(announcement().textContent).toBe('');
+
+  const releasePaying = await deferThePayingTurn();
+  await answerConfirmation(user, 'Y');
+  expect(announcement().textContent).toBe(REQUEST_IN_PROGRESS);
+
+  // WHY : Assumptions: the row-23 line is asserted to STILL hold the reference's own standing offer
+  //       while the authored sentence is announced. The two channels are separate by design: row 23 is
+  //       a parity surface under rule T8 and this screen owns no transcribed sentence for "working",
+  //       so publishing the authored one there would overwrite the offer the operator is answering.
+  expect(messageBand().textContent).toBe(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT.trim());
+
+  releasePaying({
+    transactionId: '0000000000000404',
+    accountId: FIXTURE_ACCOUNT_ID,
+    currentBalance: '0.00',
+    paid: true,
+    returnMessage: null,
+  });
+  const { paymentSuccessMessage } = await import('../screens/billPay');
+  await waitForBandToRead(paymentSuccessMessage('0000000000000404'));
+  expect(announcement().textContent).toBe('');
+}
+
+/**
+ * The domain hint is separated from the field by a real gap, and the prompt owns its own line.
+ *
+ * ⚠️ Refactoring Rationale: the hint sat in the design system's `Space` primitive with a design token
+ * passed as its `size`. Measured, that produced a 0.0px gap and the `(Y/N)` butted directly against
+ * the control. The cause is in the pinned package: `antd/lib/_util/gapSize.js` accepts only the four
+ * preset names or a number, so a custom-property reference was accepted and then dropped. `Flex`
+ * assigns its `gap` straight to the CSS property, where such a reference resolves — so the assertion
+ * is on WHICH primitive wraps the pair, which is the thing that decides whether the token is honoured.
+ *
+ * ⚠️ Refactoring Rationale: the prompt is the row's LABEL, where it was an inline block beside the
+ * control. Measured at a 375px viewport, the 53-character prompt rendered as a fixed 333.7px block
+ * that filled the line, so the control wrapped below it and came to rest flush at x=0 with its focus
+ * ring clipped. A label owns its own line and takes the control's width with it.
+ *
+ * Assumptions: a gap belongs there at all because the mapset declares one — `CONFIRM` occupies column
+ * 60 and the `(Y/N)` literal starts at `POS=(15,63)` on `app/bms/COBIL00.bms` L121-L125, so the
+ * terminal left two character cells between them.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theHintIsSpacedAndThePromptOwnsItsLine(): Promise<void> {
+  await mountBillPay();
+
+  const flex = confirmationEntry().closest('.ant-flex');
+  expect(flex).not.toBeNull();
+  expect(confirmationEntry().closest('.ant-space')).toBeNull();
+  expect(flex?.textContent).toContain(BILL_PAY_CONFIRM_DOMAIN_HINT);
+
+  const row = confirmationFormRow();
+  const label = row.querySelector('.ant-form-item-label');
+  const control = row.querySelector('.ant-form-item-control');
+  expect(label?.textContent).toContain(BILL_PAY_FIELD_LABELS.confirmPrompt.trim());
+  expect(control?.contains(confirmationEntry())).toBe(true);
+  // WHY : Assumptions: the prompt is NOT inside the control wrapper, which is what makes it a label
+  //       rather than an inline block that has to share the control's line.
+  expect(control?.textContent).not.toContain(BILL_PAY_FIELD_LABELS.confirmPrompt.trim());
+}
+
+/**
+ * Registers the confirmation cases.
  * @returns {void} Nothing; cases are registered as a side effect.
  */
 function confirmationCases(): void {
-  it('offers payment only behind a confirmation', theConfirmationGatesThePayment);
+  it('offers payment only from a typed answer', theConfirmationGatesThePayment);
+  it('moves no money on three bare presses of Enter', threeBarePressesOfEnterMoveNoMoney);
   it(
-    'reaches no service when the confirmation is declined',
+    'places the cursor on the confirmation field after a preview',
+    aPreviewPlacesTheCursorOnTheConfirmationField,
+  );
+  it(
+    'reaches no service and destroys no work when the confirmation is declined',
     decliningTheConfirmationReachesNoService,
   );
   it('submits exactly one payment when confirmed', confirmingSubmitsExactlyOnePayment);
-  it('omits the confirmation member on the reporting turn', theReportingTurnOmitsTheConfirmation);
+  it('honours a lower-case confirming answer', aLowerCaseConfirmingAnswerPays);
+  it('cannot carry a confirmation on the reporting turn', theReportingTurnCannotCarryAConfirmation);
   it(
-    'carries the domain refusal without being able to provoke it',
-    theDomainRefusalIsCarriedButUnreachable,
+    'refuses an out-of-domain answer and keeps the offer standing',
+    anInvalidAnswerIsRefusedAndTheOfferSurvives,
+  );
+  it('clears the answer mark when the answer is corrected', correctingTheAnswerClearsItsMark);
+  it(
+    'lands the busy affordance on the control that owns the turn',
+    theBusyAffordanceLandsOnTheControlThatOwnsTheTurn,
+  );
+  it(
+    'reports busy on the outstanding key and disabled on the withheld keys',
+    theOutstandingKeyReportsBusyAndTheWithheldKeysReportDisabled,
+  );
+  it('announces the busy window in words', theBusyWindowIsAnnouncedInWords);
+  it(
+    'spaces the domain hint and gives the prompt its own line',
+    theHintIsSpacedAndThePromptOwnsItsLine,
   );
 }
 
@@ -1934,7 +2940,7 @@ async function aNonAdminOperatorCanUseTheScreen(): Promise<void> {
   await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
 
   await answerWith(writtenPaymentOf(transactionId));
-  await answerInDialogue(user, 'Y');
+  await answerConfirmation(user, 'Y');
 
   await waitForBandToRead(paymentSuccessMessage(transactionId));
 }
@@ -1966,14 +2972,16 @@ async function theSelectionTravelsAsARequestMember(): Promise<void> {
   await takeReportingTurn(user, FIXTURE_ACCOUNT_ID);
   await waitForBandToRead(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
 
-  const reporting = await requestOfCall(0);
-  expect(reporting.accountId).toBe(FIXTURE_ACCOUNT_ID);
-  expect(Object.keys(reporting)).toEqual(['accountId']);
+  // WHY : Refactoring Rationale: the reading turn is inspected through its ARGUMENTS rather than
+  //       through a composed body, because the body is composed by the client wrapper now. The
+  //       property under assertion is unchanged and is in fact stronger: the identifier is the only
+  //       thing that travels, and there is no second parameter for anything else to travel in.
+  expect(await inquiryOfCall(0)).toBe(FIXTURE_ACCOUNT_ID);
 
   const { paymentSuccessMessage } = await import('../screens/billPay');
   const transactionId = '0000000000000042';
   await answerWith(writtenPaymentOf(transactionId));
-  await answerInDialogue(user, 'Y');
+  await answerConfirmation(user, 'Y');
 
   // WHY : Assumptions: the settled turn is awaited through the SENTENCE it paints rather than through
   //       a call count, because the sentence is the observable an operator gets and it can only appear
@@ -1981,12 +2989,11 @@ async function theSelectionTravelsAsARequestMember(): Promise<void> {
   //       is before the member set under assertion has been recorded on a completed turn.
   await waitForBandToRead(paymentSuccessMessage(transactionId));
 
-  const paying = await requestOfCall(1);
-  // WHY : Assumptions: the member names are sorted before comparison because the ENUMERATION order of
-  //       an object's own properties is not part of any contract here, while the member SET is exactly
-  //       what this case is asserting. A copy is sorted so the enumeration result is left untouched.
-  expect([...Object.keys(paying)].sort()).toEqual(['accountId', 'confirmation']);
-  expect(paying.accountId).toBe(FIXTURE_ACCOUNT_ID);
+  // WHY : Assumptions: the paying turn carries the identifier and the answer and NOTHING else, which
+  //       is asserted as a whole argument list rather than a member set. An extra argument -- an
+  //       operator identifier, a remembered turn counter -- would be the session struct reappearing on
+  //       the wire, and a list comparison fails on it where a per-member check would not.
+  expect(await paymentOfCall(0)).toEqual([FIXTURE_ACCOUNT_ID, 'Y']);
 }
 
 /**
@@ -2016,8 +3023,8 @@ async function noCardDataIsPaintedOrSent(): Promise<void> {
   const body = screen.getByRole('main');
   expect(within(body).queryByText(/card/iu)).toBeNull();
 
-  const request = await requestOfCall(0);
-  expect(Object.keys(request)).toEqual(['accountId']);
+  expect(await inquiryOfCall(0)).toBe(FIXTURE_ACCOUNT_ID);
+  expect(await paymentsComposed()).toBe(0);
 }
 
 /**
@@ -2163,8 +3170,10 @@ async function aCorrectionClearsTheMark(): Promise<void> {
  * literal `'*'` into the field's own output subfield when it is BLANK, at L24. That copybook is not
  * reachable from this program: `app/cbl/COBIL00C.cbl` copies `COCOM01Y`, `COBIL00`, `COTTL01Y`,
  * `CSDAT01Y`, `CSMSG01Y`, `CVACT01Y`, `CVACT03Y`, `CVTRA05Y`, `DFHAID` and `DFHBMSCA`, and a
- * repository-wide search for the templated copybook finds exactly one program that copies it,
- * `app/cbl/COACTUPC.cbl`.
+ * repository-wide search for the templated copybook finds exactly two programs that copy it,
+ * `app/cbl/COACTUPC.cbl` and `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` — and a search for the
+ * `'*'` literal inside `COBIL00C` itself returns nothing, so the marker is unreachable from this
+ * program by either route.
  *
  * Assumptions: the marker's ABSENCE is therefore the faithful outcome and is asserted as such. What
  * this program does produce per field is `MOVE -1 TO ACTIDINL` and `MOVE -1 TO CONFIRML` — the cursor

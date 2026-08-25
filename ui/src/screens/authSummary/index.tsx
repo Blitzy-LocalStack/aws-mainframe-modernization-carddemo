@@ -22,7 +22,8 @@
  * constants transcribed from the mapset. `ui/src/router.tsx` republishes the named export under the
  * `default` key that `React.lazy` requires, so the lazy route reaches it through that adapter. It
  * declares no wire shape of its own and reads no module-level input. Nothing here throws: the one
- * failure source is the listing request, which the shared client normalises into an `ApiError` that
+ * failure source is the listing request, which the shared client normalises into an `ApiRequestError`
+ * -- the CLASSIFIED failure, carrying its problem document beside the transport judgements -- that
  * {@link describeListingFailure} turns into a message-band sentence.
  *
  * Where this screen's text comes from, and why it is not all in one place
@@ -32,7 +33,7 @@
  * a copybook constant or a program literal, and its own file overview excludes "the static text
  * PAINTED BY THE BMS MAPS", assigning `app/bms/*.bms` to `ui/src/screens/**`. So the five sentences
  * this screen can move into its message field are imported from the catalog, while the sub-title, the
- * fourteen panel labels, the eight column headings, the row-22 prompt and the row-24 key legend are
+ * twelve panel labels, the eight column headings, the row-22 prompt and the row-24 key legend are
  * transcribed here from `COPAU00.bms` with the line that declares each one. Adding the painted text
  * to the catalog would breach the boundary that catalog documents; inlining the program literals here
  * would breach Transformation Rule T8's single owner for them.
@@ -81,9 +82,9 @@
  * would paint a second live region and a second legend.
  */
 
-import { Descriptions, Flex, Form, Input, Radio, Table, Typography, theme } from 'antd';
-import type { DescriptionsProps, RadioChangeEvent, TableColumnsType } from 'antd';
-import { useCallback, useRef, useState } from 'react';
+import { Descriptions, Flex, Form, Input, Table, Typography, theme } from 'antd';
+import type { DescriptionsProps, InputRef, TableColumnsType } from 'antd';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactElement } from 'react';
 import { useNavigate } from 'react-router';
 
@@ -105,18 +106,50 @@ import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyRejection } from '../../layout/usePfKeys';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
-import type { PagedQueryRequest } from '../../hooks/usePagedQuery';
+import type { PageBoundary, PagedQueryRequest } from '../../hooks/usePagedQuery';
 import { useServerInstant } from '../../hooks/useServerInstant';
-import { PROGRAM_MESSAGES, SHARED_MESSAGES } from '../../messages/messages';
-import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import { MONEY_PICTURES, renderMoney } from '../../format/money';
+import type { MoneyPicture, RenderedMoney } from '../../format/money';
+import {
+  PERSISTENT_FAILURE_REPORT_IT,
+  PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
+  SHARED_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
+} from '../../messages/messages';
+import {
+  AUTHORIZATION_SUMMARY_ROUTE,
+  MAIN_MENU_ROUTE,
+  navigateSafely,
+} from '../../routes/navigation';
+import {
+  claimRetainedOutcome,
+  isApiRequestError,
+  isTransientFailure,
+  subscribeToRetainedOutcomes,
+  withoutConcurrentDuplicate,
+} from '../../api/client';
+import type { FraudTransitionHandover } from '../authDetail';
 import {
   BMS_TEXT_COLOR_TOKENS,
   DESIGN_GAPS,
-  FIELD_ERROR_TOKENS,
+  TARGET_SIZE_AA_MINIMUM,
   TYPOGRAPHY_TOKENS,
 } from '../../theme/tokens';
-import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
-import { VISUALLY_HIDDEN_STYLE, fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import {
+  RECORD_VIEW_COLUMNS,
+  copybookFieldWidthStyle,
+  monetaryRecordCellStyle,
+} from '../../layout/recordLayout';
+import {
+  BLANK_FIELD_MARKER_CHARACTERS,
+  VISUALLY_HIDDEN_STYLE,
+  busyAnnouncement,
+  busyProps,
+  fieldAriaProps,
+  fieldErrorHelp,
+  fieldRefusalRendering,
+} from '../../layout/fieldHelp';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /**
@@ -211,12 +244,33 @@ export const AUTH_SUMMARY_LABELS = {
 /** Horizontal scroll policy for the eight-column authorization table. */
 export const AUTH_SUMMARY_TABLE_SCROLL = { x: 'max-content' } as const;
 
-/** Accessible names for the two address lines the mapset paints with no label of their own. */
+/**
+ * Accessible names for the values the mapset paints with no label of their own.
+ *
+ * ⚠️ Refactoring Rationale: the five account-status slots and the authorization-status flag were added
+ * to this map because all six now render inside ONE labelled cell, and a run of six one- and
+ * two-character codes under a single caption is unreadable to an assistive technology without a name
+ * per code. The mapset labels none of them individually -- it paints one `ACCSTAT` position -- so each
+ * name is composed from the segment's own field data name and the ordinal the source itself numbers the
+ * slot by, exactly as the two address names are. None of them reaches the screen.
+ */
 export const AUTH_SUMMARY_HIDDEN_LABELS = {
   /** Names `ADDR001`, `COPAU00.bms` L107 to L110. */
   addressLine1: 'Address line 1',
   /** Names `ADDR002`, `COPAU00.bms` L118 to L121. */
   addressLine2: 'Address line 2',
+  /** Names `PA-AUTH-STATUS`, `CIPAUSMY.cpy` L21. */
+  authStatus: 'Authorization status',
+  /** Names `PA-ACCOUNT-STATUS(1)`, `CIPAUSMY.cpy` L22. */
+  accountStatus1: 'Account status 1',
+  /** Names `PA-ACCOUNT-STATUS(2)`, `CIPAUSMY.cpy` L22. */
+  accountStatus2: 'Account status 2',
+  /** Names `PA-ACCOUNT-STATUS(3)`, `CIPAUSMY.cpy` L22. */
+  accountStatus3: 'Account status 3',
+  /** Names `PA-ACCOUNT-STATUS(4)`, `CIPAUSMY.cpy` L22. */
+  accountStatus4: 'Account status 4',
+  /** Names `PA-ACCOUNT-STATUS(5)`, `CIPAUSMY.cpy` L22. */
+  accountStatus5: 'Account status 5',
 } as const;
 
 /**
@@ -297,17 +351,24 @@ export const AUTH_SUMMARY_KEY_LABELS = {
 /**
  * Declared character widths of the fields whose width is part of their contract.
  *
- * Trade-offs: the six monetary widths are kept DISTINCT at 12, 9 and 10 even though all six values
- * share one underlying precision, and unifying them would be the tempting simplification. The
+ * Assumptions: the three monetary widths are RECORDED distinctly at 12, 9 and 10 because that is what
+ * the mapset declares, and the record is worth keeping even where the rendering no longer uses it. The
  * segment declares every one of `PA-CREDIT-LIMIT`, `PA-CASH-LIMIT`, `PA-CREDIT-BALANCE`,
  * `PA-CASH-BALANCE`, `PA-APPROVED-AUTH-AMT` and `PA-DECLINED-AUTH-AMT` as `PIC S9(09)V99 COMP-3`
  * (`CIPAUSMY.cpy` L23 to L26 and L29 to L30), so the differing widths cannot be precision -- they are
- * the map's presentation contract, and the program proves it by editing the same precision through
- * two different masks: `WS-DISPLAY-AMT12 PIC -zzzzzzz9.99` renders twelve characters into `CREDLIM`
- * and `CREDBAL` while `WS-DISPLAY-AMT9 PIC -zzzz9.99` renders nine into `CASHLIM`, `CASHBAL`,
- * `APPRAMT` and `DECLAMT` (`COPAUS0C.cbl` L56 to L57, applied at L780 to L799). Two masks feeding
- * three field widths is what makes the geometry a contract of its own, so collapsing the three to one
- * would silently re-lay out four of the six columns.
+ * the map's presentation contract, and the program proves it by editing the same precision through two
+ * different masks: `WS-DISPLAY-AMT12 PIC -zzzzzzz9.99` renders twelve characters into `CREDLIM` and
+ * `CREDBAL` while `WS-DISPLAY-AMT9 PIC -zzzz9.99` renders nine into `CASHLIM`, `CASHBAL`, `APPRAMT`
+ * and `DECLAMT` (`COPAUS0C.cbl` L56 to L57, applied at L780 to L799).
+ *
+ * ⚠️ Refactoring Rationale: the three monetary widths no longer SIZE anything, and the reversal is
+ * recorded here rather than left to be discovered. This entry used to close by warning that collapsing
+ * them to one "would silently re-lay out four of the six columns", and that warning turned on the word
+ * silently. Every amount now renders through one declared picture twelve characters wide -- see
+ * {@link AUTH_SUMMARY_MONEY_PICTURE} for why that picture and no other -- so a nine-character box would
+ * either grow to hold a twelve-character value, making the declaration inert, or clip a figure. One
+ * accurate measure replaces three that each fit some cells and not others, the re-layout is stated in
+ * two places instead of being silent, and the declared widths stay here as the contract they are.
  */
 export const AUTH_SUMMARY_FIELD_WIDTHS = {
   /** `ACCTID`, `COPAU00.bms` L84 to L88; `ACCTIDI PIC X(11)` in the symbolic map. */
@@ -369,6 +430,105 @@ export const AUTH_SUMMARY_PAGE_SIZE = 5;
  */
 export const AUTH_SUMMARY_SELECTION_CODE = 'S';
 
+/**
+ * The empty set of selection-cell entries, which is the state every painted page starts in.
+ *
+ * Assumptions: a frozen module-level constant rather than a fresh object literal at each of the three
+ * clearing sites, so the three cannot come to disagree about what "nothing selected" is, and so React
+ * is handed the same reference each time -- clearing an already-clear page then costs no render.
+ */
+const NO_SELECTION_ENTRIES: Readonly<Record<string, string>> = Object.freeze({});
+
+/**
+ * Character columns a selection cell RESERVES, which is one more than it admits.
+ *
+ * ⚠️ Purpose: keep the typed character visible. A browser measurement of the IDENTICAL control on the
+ * user browse -- `ui/src/screens/userList/index.tsx` renders the same one-character `SEL` cell -- found
+ * it twenty-four pixels wide with a `clientWidth` of twenty-two and the design system's own eleven-pixel
+ * padding on each side, giving a CONTENT BOX of zero pixels against a measured glyph advance of 9.078
+ * pixels for the character the operator is instructed to type. The value was genuinely stored and the
+ * caret genuinely at position one; the operator saw nothing. Reserving the character's column alone does
+ * not fix it either -- one column plus that padding leaves about eight pixels against a 9.078-pixel
+ * glyph -- so the reservation is the character AND its caret.
+ *
+ * ⚠️ Assumptions: the extra column is for the CARET specifically. A 3270 cursor was a block occupying
+ * the character cell itself, so one declared column was all the terminal ever needed; a browser draws
+ * its caret BETWEEN character positions, so a content box of exactly one column leaves caret and glyph
+ * competing for the same space and the glyph scrolls out of view.
+ *
+ * Assumptions: this is a DISPLAY reservation and changes nothing about what the field ACCEPTS.
+ * `AUTH_SUMMARY_FIELD_WIDTHS.selection` remains the `maxLength`, so a second character still cannot be
+ * typed, and the two figures are kept apart precisely so a reader cannot mistake the reservation for a
+ * relaxation of the mapset's declared `LENGTH=1`.
+ */
+export const SELECTION_CELL_RESERVED_COLUMNS = AUTH_SUMMARY_FIELD_WIDTHS.selection + 1;
+
+/**
+ * The ordinal the paging hook reports while the FIRST page of a set is on display.
+ *
+ * Assumptions: declared here rather than imported because `ui/src/hooks/usePagedQuery.ts` keeps its own
+ * `FIRST_PAGE_NUMBER` module-private (L128) and publishes the ordinal itself on
+ * `UsePagedQueryResult.pageNumber`. One is the hook's documented starting ordinal, and the value is
+ * named here so the resubmission guard below reads as a statement about the page on display rather
+ * than as a comparison against a bare literal.
+ *
+ * ⚠️ Assumptions: the hook initialises the ordinal to this value BEFORE any read has settled (L922), so
+ * this test alone cannot distinguish "showing page one" from "has never read". The guard therefore pairs
+ * it with the screen's own answered fact, which is the arrived summary.
+ */
+const AUTH_SUMMARY_FIRST_PAGE = 1;
+
+/**
+ * Composes the key one account search is collapsed under.
+ *
+ * Purpose: ⚠️ browser validation counted three activations of the Enter control on an UNCHANGED account
+ * identifier taking `POST /api/v1/authorizations/search` from one request to four, and three further
+ * activations dispatched inside a single millisecond taking it to seven -- one identical request per
+ * press, with no coalescing of any kind on this screen's own dispatch. This is the key that collapses
+ * them.
+ *
+ * Assumptions: the key is the METHOD AND TARGET plus the account, which is the composition
+ * `withoutConcurrentDuplicate` documents for itself in `ui/src/api/client.ts` -- so two searches of the
+ * same account collapse and two searches of different accounts do not. Keeping the account IN the key is
+ * what preserves the correction path: an operator who mistyped an identifier and retypes it while the
+ * first read is outstanding composes a different key and is not made to wait for a read they no longer
+ * want.
+ *
+ * Assumptions: this key cannot collide with the paging hook's own. That hook composes
+ * `BROWSE {identity}.{epoch} {direction} {cursor}` behind the prefix at `usePagedQuery.ts` L139, and
+ * every key here begins with the HTTP method, so the two namespaces are disjoint by construction rather
+ * than by coincidence.
+ * @param {string} accountId - The account identifier the search is scoped to.
+ * @returns {string} The key this screen's search dispatch is collapsed under.
+ */
+export function authSummarySearchKey(accountId: string): string {
+  return `POST ${AUTHORIZATION_SUMMARY_ROUTE}#search ${accountId}`;
+}
+
+/**
+ * Absorbs a settled browse turn, whose outcome is observed through the browse itself.
+ *
+ * Assumptions: a named no-op rather than a `void` discard, because `ui/eslint.config.js` sets
+ * `no-floating-promises` with `ignoreVoid: false` -- so the three dispatch sites below must supply
+ * handlers, and the same shape is what `usePagedQuery.ts` L1479 uses for its own opening read. Making
+ * the calling handlers `async` is not available either: they are void-returning event handlers, which
+ * `no-misused-promises` with `checksVoidReturn` refuses.
+ *
+ * Assumptions: BOTH handlers are supplied at every call site. The turn's outcome -- page, boundary,
+ * failure -- reaches this screen through the browse's own members, and the hook's contract states that
+ * its promise never rejects, so there is nothing here to do with either settlement. Passing this as the
+ * rejection handler as well is what stops a later change inside the hook turning these sites into
+ * unhandled rejections silently.
+ * @returns {void} Nothing; the turn's outcome is read from the browse.
+ */
+function ignoreSettledBrowseTurn(): void {
+  /*
+   * Assumptions: deliberately empty, and empty is the whole implementation. See the block above for why
+   * the handler exists at all; putting a log line here would report every settled page turn on every
+   * paged screen, which is noise rather than a monitoring hook.
+   */
+}
+
 /*
  * WHY : ⚠️ Refactoring Rationale: a row's control is named for the ACTION it performs, where it used to be
  *       named `'S <transaction id>'` -- the selection character followed by the identifier. That name was
@@ -381,12 +541,109 @@ export const AUTH_SUMMARY_SELECTION_CODE = 'S';
  */
 
 /**
- * Builds the accessible name of one row's selection control.
+ * Builds the accessible name of one row's selection cell.
+ *
+ * ⚠️ Refactoring Rationale: the name is the COLUMN HEADING paired with the row's identifier, where it
+ * used to be the action-oriented `Select authorization <id>`. The note above records why the
+ * action-oriented form replaced the terminal's literal `'S <id>'`, and its reasoning turned on one
+ * premise: that the letter `S` names "a field that does not exist in a browser". That premise is no
+ * longer true. The field exists -- `SEL0001` is `ATTRB=(FSET,NORM,UNPROT) ... LENGTH=1` at
+ * `COPAU00.bms` L277 to L282, an unprotected one-character entry, and the screen now renders it as one
+ * -- so the control's name has to say WHICH field it is, exactly as `ui/src/screens/userList/index.tsx`
+ * names its own `SEL` cells `Sel <userId>`. What the field is FOR is carried by the mapset's own row-22
+ * sentence, which the shell paints on every turn, so the name does not have to carry it too.
+ *
+ * Assumptions: the heading is trimmed. It is stored padded because the mapset declares it that way and
+ * Rule T8 keeps the declared literal intact, but an accessible name is read aloud rather than laid out
+ * on a character grid, and leading blanks in a name are noise.
  * @param {string} transactionId - The acquirer's transaction identifier, which names the row.
- * @returns {string} The action-oriented name for that row's control.
+ * @returns {string} The name of that row's selection cell.
  */
-export function selectionActionLabel(transactionId: string): string {
-  return `Select authorization ${transactionId}`;
+export function selectionCellLabel(transactionId: string): string {
+  return `${AUTH_SUMMARY_COLUMN_HEADERS.selection.trim()} ${transactionId}`;
+}
+
+/**
+ * Builds the identifier of one row's selection cell.
+ *
+ * ⚠️ Purpose: this exists because the browser said the cells had no identity. DevTools reported "A form
+ * field element should have an id or name attribute" against exactly five nodes on this screen, and five
+ * is the number of rows a page of this listing paints -- these cells were the only form controls in the
+ * application carrying neither. The two sibling browse screens already publish one per row:
+ * `ui/src/screens/userList/index.tsx` composes `user-list-action-<userId>` and
+ * `ui/src/screens/refTypeList/index.tsx` composes `ref-type-list-action-<typeCd>`, and neither appears in
+ * the browser's report. This screen was the outlier rather than the pattern.
+ *
+ * Assumptions: the transaction identifier is what distinguishes the rows, so it is what distinguishes
+ * the cells. It is the listing's own key -- the same value `selectionCellLabel` puts in the accessible
+ * name and the same value the chosen row's detail path carries -- so two cells on one page cannot
+ * collide, and the identifier of a given row's cell is stable across a re-render.
+ *
+ * Trade-offs: an identifier is published even though nothing in this screen looks the cell up by one
+ * today. That is accepted because the value of having it is not internal: an identifier is what lets the
+ * platform treat the control as a real named field, and the two sibling screens have already paid the
+ * same small cost for the same reason.
+ * @param {string} transactionId - The acquirer's transaction identifier, which names the row.
+ * @returns {string} A control identifier unique to that row's cell.
+ */
+export function selectionCellId(transactionId: string): string {
+  return `auth-summary-action-${transactionId}`;
+}
+
+/**
+ * The row a page's selection cells name, and the character typed beside it.
+ *
+ * Assumptions: two members and no more. The source carries exactly this pair across the turn --
+ * `CDEMO-CPVS-PAU-SEL-FLG` holds the character and `CDEMO-CPVS-PAU-SELECTED` holds the selected key
+ * (`COPAUS0C.cbl` L290 to L308) -- and it evaluates the character only once both are non-blank at
+ * L311. Keeping them together is what lets that guard be one test here as well.
+ */
+export interface AuthRowSelection {
+  /** The sealed selector of the winning row, or `null` when no cell carries an entry. */
+  readonly key: string | null;
+  /** The character typed beside that row, or the empty string when none was. */
+  readonly flag: string;
+}
+
+/**
+ * Reduces a page's selection cells to the single selection the source's ordered evaluation expresses.
+ *
+ * ⚠️ Purpose: the FIRST cell carrying an entry, in display order, wins, and every later entry is
+ * IGNORED without being reported. `PROCESS-ENTER-KEY` is one `EVALUATE TRUE` whose five arms test
+ * `SEL0001I` through `SEL0005I` in that order (`COPAUS0C.cbl` L288 to L308); COBOL ends an `EVALUATE`
+ * at its first matching arm, so a page carrying entries beside rows two and four acts on row two and
+ * never inspects row four.
+ *
+ * ⚠️ Assumptions: this is deliberately NOT the multi-selection refusal the transaction-type browse
+ * uses. `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` counts its marked rows and answers `'Please
+ * select only 1 action'` for more than one; `COPAUS0C` keeps no such count and declares no such
+ * sentence, so refusing a second entry here would invent a message the reference cannot emit and would
+ * add a refusal where it silently proceeds.
+ *
+ * ⚠️ Assumptions: a blank cell is not a selection, and the entry is TRIMMED before the test. Every arm
+ * reads `NOT = SPACES AND LOW-VALUES`, so a cell holding a space is skipped exactly as an untouched one
+ * is -- and a browser control can hold a typed space where the terminal's field held its `INITIAL=' '`.
+ *
+ * ⚠️ Assumptions: the character is returned AS TYPED rather than coerced to the accepted one. The
+ * source moves whatever the operator typed into the flag and only then evaluates it, answering
+ * `'Invalid selection. Valid value is S'` for anything but `S` or `s` (L315 to L330). Coercing here
+ * would make that arm unreachable, which is precisely what the radio control this replaced did.
+ * @param {readonly PendingAuthListItem[]} rows - The page's rows, in the order they are displayed.
+ * @param {Readonly<Record<string, string>>} entries - Cell entries, keyed by the row's sealed selector.
+ * @returns {AuthRowSelection} The winning row and its character, or `null` and the empty string when no
+ *   cell carries an entry.
+ */
+export function reduceAuthRowSelection(
+  rows: readonly PendingAuthListItem[],
+  entries: Readonly<Record<string, string>>,
+): AuthRowSelection {
+  for (const row of rows) {
+    const typed = (entries[row.key] ?? '').trim();
+    if (typed !== '') {
+      return { key: row.key, flag: typed };
+    }
+  }
+  return { key: null, flag: '' };
 }
 
 /**
@@ -506,6 +763,23 @@ interface ScreenNotice {
 }
 
 /**
+ * Name the detail screen's fraud outcome is retained under, and this screen collects.
+ *
+ * ⚠️ Purpose: the detail screen's PF3 is not refused while a fraud write is outstanding, so a reviewer
+ * who confirms a transition and returns here unmounts the screen that was going to report it. Its
+ * continuation then hands the sentence over instead of painting it into a discarded component, and this
+ * is the name it hands it over under.
+ *
+ * Assumptions: COMPOSED from the routing tree's own `AUTHORIZATION_SUMMARY_ROUTE` rather than written
+ * out, and the value import from the detail module is deliberately NOT taken -- every screen is mounted
+ * through `lazy()` in `ui/src/router.tsx`, so importing a constant from that module would fold its chunk
+ * into this one. Only the TYPE crosses, which is erased at build time. This mirrors the arrangement
+ * `ui/src/screens/userList/index.tsx` L463 already uses for the user-update hand-over, so the two pairs
+ * of screens agree on one mechanism.
+ */
+const AUTH_FRAUD_TRANSITION_CLAIM = `${AUTHORIZATION_SUMMARY_ROUTE}#fraud`;
+
+/**
  * Classifies the account entry against the source program's two refusals, in its order.
  *
  * Assumptions: the two tests are ORDERED and the first match wins, matching
@@ -606,14 +880,11 @@ export function resolveSelectionAction(flag: string, key: string | null): Select
 /**
  * The status this operation does not declare, kept as a named value because it is reported as a fault.
  *
- * Assumptions: named rather than written twice as a literal, so the branch below reads as the contract
- * statement it is: the listing has no not-found outcome, so this status can only mean the request
- * reached something other than the operation.
+ * Assumptions: named rather than left as a bare literal at the branch, so the test below reads as the
+ * contract statement it is: the listing has no not-found outcome, so this status can only mean the
+ * request reached something other than the operation.
  */
 const UNDECLARED_NOT_FOUND_STATUS = 404;
-
-/** The lowest status the listing's own fault family starts at. */
-const SERVICE_FAULT_STATUS = 500;
 
 /**
  * Reduces a listing failure to the sentence the target shows for it.
@@ -630,44 +901,93 @@ const SERVICE_FAULT_STATUS = 500;
  * not inventing a code; the specific detail remains recoverable, through `correlationId` on the
  * problem document.
  *
- * Assumptions: the status selects the family, since that is the only member of the problem document
- * that carries the same distinction the source's `EVALUATE WS-RESP-CD` did. A 5xx takes the abend
- * replacement the register gives eight of the ten sites, and any other refusal shows the service's own
- * sentence when it sent one -- it is authored server-side to be read, so rewording it here would be a
- * second voice for one message.
+ * ⚠️ Refactoring Rationale: this takes the CLASSIFIED failure and no longer the bare problem document,
+ * and the status FAMILY no longer selects the sentence. The arrangement it replaces sent every status
+ * at or above 500 to the abend replacement, which made `502`, `503` and `504` -- the three service
+ * statuses `TRANSIENT_STATUSES` in `ui/src/api/client.ts` L223 declares as conditions that may clear
+ * on their own -- indistinguishable from a `500` that will not clear. An operator was told an outage
+ * was an abend and given no reason to press Enter again. The judgement is now read off the failure
+ * itself through `isTransientFailure`, which the client derives ONCE from the kind and that closed
+ * status list, so this screen holds no second copy of it to drift from.
  *
- * ⚠️ Refactoring Rationale: a 404 was mapped to `ACCOUNT_ID_NOT_FOUND` and is now treated as an
- * unexpected condition, because this operation DECLARES NO 404. Its contract settles the absent account
- * twice over: `services/authorization-service/src/main/resources/openapi/authorization-api.yaml` states
- * on the 200 that an account with no summary row answers 200 with zero counts, an empty item array and
- * absent cursors, and that "This operation therefore has no 404" -- following the baseline, which
- * RENDERS the absence rather than reporting it, moving zero into all six aggregate positions at
- * `COPAUS0C.cbl` L800-L807 and skipping the browse at L354-L356. So an operator who reached this screen
- * for an account that does not exist sees an empty summary, and the mapping could not fire for the
- * reason it named. A 404 arriving anyway is a misroute -- a gateway or load-balancer rule that no longer
- * reaches this operation -- which is why it now takes the same unexpected-condition sentence a 5xx takes.
+ * Assumptions: the register's grounding is preserved rather than abandoned by that change, because the
+ * service SENDS the register's replacement. `REDACTED_DIAGNOSTICS` maps `COPAUS0C.cbl` L476 and L509 to
+ * `UNEXPECTED_ABEND_OCCURRED`, the service puts that sentence in `message`, and the verbatim arm below
+ * renders it -- so the sentence an operator sees at those two sites is unchanged, and it arrives from
+ * the one place authorised to author it instead of being substituted here on a status guess.
  *
- * Assumptions: an undeclared 404 does NOT fall through to the service's own sentence, and that is the
- * point of naming it. Whatever answered is not this service, so its body is a proxy's text rather than
- * an authored operator sentence, and showing it would put words on the message band that nothing in this
- * migration wrote.
- * @param {ApiError | null} error - The normalised problem document, or `null` when nothing failed.
+ * Assumptions: reading `message` first is safe SPECIFICALLY because a failure no service described
+ * carries none. `synthesisedProblem` in `ui/src/api/client.ts` sets `message: null` for every
+ * `TIMEOUT`, every `NETWORK` failure and every response whose body was not a problem document -- which
+ * is what a proxy's HTML `500` becomes, earning the `CARDDEMO-UI-BODY` code. So the verbatim arm can
+ * only ever render a sentence a service authored, and a gateway's own text cannot reach the band
+ * through it. The member is tested for being ABSENT as well as blank, because the contract declares it
+ * nullable and testing only the trimmed length would dereference a null.
+ *
+ * ⚠️ Assumptions: a 404 is checked BEFORE the verbatim arm, and that order is the whole point of
+ * keeping the branch. This operation DECLARES NO 404:
+ * `services/authorization-service/src/main/resources/openapi/authorization-api.yaml` states on the 200
+ * that an account with no summary row answers 200 with zero counts, an empty item array and absent
+ * cursors, and that "This operation therefore has no 404" -- following the baseline, which RENDERS the
+ * absence rather than reporting it, moving zero into all six aggregate positions at `COPAUS0C.cbl`
+ * L800-L807 and skipping the browse at L354-L356. A 404 arriving anyway is a misroute, so whatever
+ * answered is not this service and its body is a proxy's text rather than an authored operator
+ * sentence; falling through to it would put words on the message band that nothing in this migration
+ * wrote. It therefore takes the unexpected-condition sentence, and it is not mapped to
+ * `ACCOUNT_ID_NOT_FOUND`, which would make a routing fault look like a business answer.
+ *
+ * Trade-offs: NO repeat control is painted, so `isRepeatableFailure` gates nothing here, and that is a
+ * decision rather than an omission. It would answer false for every failure of this operation whatever
+ * happened -- the listing is a `POST` and carries no `Idempotency-Key`, and `REPEATABLE_METHODS` at
+ * `ui/src/api/client.ts` L235 admits only `get`, `head` and `options` -- so a control behind it would
+ * never appear. The operator's repeat is the key this mapset already paints, `ENTER=Continue` at
+ * `COPAU00.bms` L511, and the resubmission guard deliberately does NOT gate that key on the predicate
+ * either: a `500` is neither transient nor repeatable, and gating would refuse a second press on
+ * exactly the failure most likely to need one.
+ * @param {unknown} failure - The classified failure the browse published, or `null` when nothing
+ *   failed. Typed `unknown` rather than `ApiRequestError | null` for the reason
+ *   {@link isApiRequestError} exists: a caught value's provenance is not guaranteed by its binding, and
+ *   narrowing here is what lets the unclassified case have a sentence of its own.
  * @returns {ScreenNotice | null} The sentence and appearance to show, or `null` when there is no
  *   failure to report.
  */
-export function describeListingFailure(error: ApiError | null): ScreenNotice | null {
-  if (error === null) {
+export function describeListingFailure(failure: unknown): ScreenNotice | null {
+  if (failure === null || failure === undefined) {
     return null;
   }
-  if (error.status === UNDECLARED_NOT_FOUND_STATUS || error.status >= SERVICE_FAULT_STATUS) {
+  /*
+   * WHY : Assumptions: an unclassified value keeps the abend replacement, and it is the one arm that
+   *       still uses it unconditionally. Something reached this screen as a failure and the transport
+   *       module could not describe it, which is the closest target analogue of the baseline's own
+   *       unexpected-condition arm; the two authored sentences below both describe a request that
+   *       reached a classifier, so applying either to a value that did not would assert more than is
+   *       known.
+   */
+  if (!isApiRequestError(failure)) {
     return {
       message: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
       severity: AUTH_SUMMARY_MESSAGE_SEVERITY,
     };
   }
-  const reported = error.message ?? '';
+  if (failure.status === UNDECLARED_NOT_FOUND_STATUS) {
+    return {
+      message: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
+      severity: AUTH_SUMMARY_MESSAGE_SEVERITY,
+    };
+  }
+  const reported = failure.problem.message;
+  if (reported !== null && reported.trim() !== '') {
+    return { message: reported, severity: AUTH_SUMMARY_MESSAGE_SEVERITY };
+  }
+  /*
+   * WHY : Assumptions: both sentences are inside the 75-character work area this screen's message
+   *       field is filled from, so neither can overrun the band -- the catalog width-checks them where
+   *       it declares them, which is why nothing is measured again here.
+   */
   return {
-    message: reported === '' ? SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED : reported,
+    message: isTransientFailure(failure)
+      ? TRANSIENT_FAILURE_TRY_AGAIN
+      : PERSISTENT_FAILURE_REPORT_IT,
     severity: AUTH_SUMMARY_MESSAGE_SEVERITY,
   };
 }
@@ -743,29 +1063,178 @@ function displayText(value: string | null): string {
 }
 
 /**
- * Builds the style for a monetary cell at one of the map's three declared widths.
+ * The positions from which a backward step has nothing to answer with.
  *
- * Trade-offs: the amount is placed in `fontFamilyCode` and right-aligned inside a fixed character
- * width, and no formatting whatsoever is applied to the string. The value arrives as exact decimal
- * text because the underlying field is packed decimal (`PIC S9(09)V99 COMP-3`), and any pass through
- * a JavaScript number would put it through an IEEE-754 binary64 double, which cannot represent most
- * scale-two fractions exactly -- so a cent the service computed could render as a different cent. The
- * failure would be the worst kind available here, a plausible figure rather than an error. What is
- * given up by not reformatting is the source's edit mask, whose visible effect -- blank-suppressed and
- * right-aligned in a fixed column -- is reproduced by the alignment and the width instead of by
- * rewriting the characters.
+ * ⚠️ Refactoring Rationale: the two paging arms below read a NAMED position where they used to read
+ * `browse.hasPrev` and `browse.hasNext` directly. The two are exactly equivalent -- the hook derives all
+ * five positions from those two members -- so which sentence appears when has not changed. What changes
+ * is that the DEAD END is now enumerated instead of falling out of two false flags: a browse with no
+ * rows and no page on either side satisfied `!hasPrev` and `!hasNext` at once and neither guard said so.
+ * `ui/src/hooks/usePagedQuery.ts` records that five screens had five idioms for this, states that a
+ * screen showing a boundary sentence is to branch on the published position, and this is that branch.
+ * `ui/src/screens/refTypeList/index.tsx` L632 and `ui/src/screens/userList/index.tsx` adopt the same two
+ * sets, so a sixth screen has one shape to copy rather than five.
  *
- * Assumptions: the width is expressed in `ch` units taken from the map's declared `LENGTH`, which is a
- * DATA contract and not a design value, so it resolves to no design token and needs none. This is the
- * same treatment `MessageBand` applies to its own mapset width, and it is what keeps the three
- * monetary widths distinguishable on screen.
+ * Assumptions: the two sets are written out rather than derived from one another, because they are not
+ * complements -- `INTERIOR` is in neither and `EMPTY` and `ONLY` are in both -- so an expression
+ * relating them would be longer than the enumeration and harder to check against the hook's own table.
+ */
+const BACKWARD_EXHAUSTED: readonly PageBoundary[] = Object.freeze(['EMPTY', 'ONLY', 'FIRST']);
+
+/**
+ * The positions from which a forward step has nothing to answer with.
+ *
+ * Assumptions: the mirror of {@link BACKWARD_EXHAUSTED} with `LAST` in place of `FIRST`. `EMPTY` is in
+ * both, so a dead-end browse answers either key with that key's own boundary sentence -- which is what
+ * the reference does, since `COPAUS0C.cbl` L380 to L384 and L408 to L411 re-send the screen with the
+ * matching sentence and never test for a record count first.
+ */
+const FORWARD_EXHAUSTED: readonly PageBoundary[] = Object.freeze(['EMPTY', 'ONLY', 'LAST']);
+
+/**
+ * The edit mask every amount on this screen is rendered through.
+ *
+ * ⚠️ Purpose: browser validation counted four mutually incompatible money renderings across the
+ * application and named this screen's as the bare one -- `5000.00` with no sign, no padding and no
+ * column. This constant is what puts these amounts on the application's single money authority,
+ * `ui/src/format/money.ts`, instead of printing the wire string.
+ *
+ * ⚠️ Assumptions: the picture is CHOSEN rather than inherited, and the choice is forced by a property
+ * these mapsets have and no other money surface does: `COPAU00.bms` declares NO `PICOUT` on any of its
+ * seven amount fields -- `CREDLIM` L147 to L151 through `DECLAMT` L192 to L196, and `PAMT001` in the
+ * table -- so there is no mapset mask to transcribe. The mask lives in the PROGRAM instead:
+ * `COPAUS0C.cbl` L56 declares `WS-DISPLAY-AMT12 PIC -zzzzzzz9.99` and applies it to `CREDLIM` and
+ * `CREDBAL` at L780 to L799, and `COPAUS1C.cbl` L52 declares `WS-AUTH-AMT PIC -zzzzzzz9.99` for the
+ * authorization amount. Twelve characters, eight integer positions, ungrouped. Of the three pictures
+ * `MONEY_PICTURES` declares, `transactionAmount` is `+99999999.99` -- eight integer positions,
+ * ungrouped, width twelve -- which matches on all three counts; `accountGrouped` is fifteen wide, nine
+ * integer positions and grouped, and `billPayBalance` is ten integer positions. So this is the one
+ * declared picture the reference justifies.
+ *
+ * ⚠️ Trade-offs: two divergences from the program's own mask are accepted, and both are properties of
+ * the shared picture rather than of this screen. The declared picture zero-FILLS where `-zzzzzzz9.99`
+ * zero-SUPPRESSES, so `5000.00` renders `+00005000.00` where the terminal shows `     5000.00`; and it
+ * prints `+` on a positive where the terminal prints a blank. Reproducing the suppression here would
+ * mean a fourth rendering on a screen the finding exists because of, so the shared picture wins and
+ * the divergence is recorded rather than hidden. Both are visible-form differences only -- the digits
+ * and the sign are the service's own, and `applyMoneyEditMask` PRESERVES a value too wide for its
+ * picture rather than truncating it, so no magnitude can be lost.
+ *
+ * ⚠️ Refactoring Rationale: the four NARROW panel fields no longer take this picture, and the note that
+ * stood here is withdrawn as SATISFIED rather than as wrong. It read that `COPAUS0C.cbl` L57 declares a
+ * second mask, `WS-DISPLAY-AMT9 PIC -zzzz9.99`, that `MONEY_PICTURES` had no counterpart, that adding
+ * one belonged in `ui/src/format/money.ts` beside the others rather than here, and that until it existed
+ * eight integer positions was a superset of five so no magnitude could be lost. The counterpart now
+ * exists -- `MONEY_PICTURES.authorizationSummaryAmount`, citing that same program line -- so the
+ * widening it described is over and the four fields render at their own declared measure through
+ * {@link AUTH_SUMMARY_NARROW_MONEY_PICTURE}.
+ */
+const AUTH_SUMMARY_MONEY_PICTURE = MONEY_PICTURES.transactionAmount;
+
+/**
+ * The edit mask the four NARROW panel amounts are rendered through.
+ *
+ * ⚠️ Purpose: the reference edits one precision through TWO masks, and the difference is visible. Every
+ * one of the six panel amounts is `PIC S9(09)V99 COMP-3` in the segment (`CIPAUSMY.cpy` L23 to L26 and
+ * L29 to L30), so the differing widths are presentation and not precision: `COPAUS0C.cbl` L56 declares
+ * `WS-DISPLAY-AMT12 PIC -zzzzzzz9.99` and L57 declares `WS-DISPLAY-AMT9 PIC -zzzz9.99`, and L780 to
+ * L799 moves the credit limit and the credit balance through the wide one while moving the CASH LIMIT,
+ * the CASH BALANCE, the APPROVED TOTAL and the DECLINED TOTAL through the narrow one. Rendering all six
+ * at twelve characters made four of them a column the terminal never painted.
+ *
+ * ⚠️ Assumptions: `MONEY_PICTURES.authorizationSummaryAmount` is the entry to use and not a fourth
+ * literal, because that entry cites this exact program line as its source and declares the three
+ * properties that distinguish the mask -- five integer positions, four of them suppressed so the units
+ * digit still prints, and a `-` sign character that leaves a blank on a non-negative. Those last two are
+ * what make it a closer transcription than the wide picture is of its own mask, and the wide picture's
+ * two accepted divergences above therefore do NOT apply to these four fields.
+ *
+ * ⚠️ Trade-offs: two amounts on one screen now carry two sign conventions -- a blank on a non-negative
+ * narrow amount against a `+` on a non-negative wide one. `ui/src/format/money.ts` records that exact
+ * consequence as the reason it declined to add a fifth entry for the wide mask, and it is accepted for
+ * the same reason in reverse: the reference itself paints those two conventions side by side, because
+ * `-zzzzzzz9.99` and `-zzzz9.99` differ only in width and the `+` is an artefact of the shared wide
+ * picture rather than of the source. Reproducing one faithfully is better than making both wrong for
+ * symmetry, and the digits are the service's own in either case.
+ */
+const AUTH_SUMMARY_NARROW_MONEY_PICTURE = MONEY_PICTURES.authorizationSummaryAmount;
+
+/**
+ * Builds the style for a monetary cell.
+ *
+ * ⚠️ Assumptions: the amount arrives as exact decimal TEXT and is masked as text, never parsed. The
+ * underlying field is packed decimal -- `PIC S9(09)V99 COMP-3` at `CIPAUSMY.cpy` L23 to L30 -- and any
+ * pass through a JavaScript number would put it through an IEEE-754 binary64 double, which cannot
+ * represent most scale-two fractions exactly, so a cent the service computed could render as a
+ * different cent. The failure would be the worst kind available on a screen of credit limits and
+ * balances: a plausible figure rather than an error.
+ *
+ * ⚠️ Refactoring Rationale: the measure is the PICTURE's width and no longer the map field's declared
+ * `LENGTH`. Every amount now renders at exactly twelve characters, so one measure is the accurate one
+ * and three would each be wrong for some cell -- a nine-character box holding a twelve-character
+ * masked value would either grow, making the declaration inert, or clip a figure. Browser validation
+ * of the previous arrangement measured the three declared widths producing three different left edges,
+ * which is the alignment the source's own two masks produce and the finding read as six unaligned
+ * amounts; with one picture the alignment question does not arise.
+ *
+ * ⚠️ Assumptions: `whiteSpace` comes from the renderer and is not chosen here, because the mask's
+ * leading pad characters ARE the column. Without `pre` the browser collapses them and every amount
+ * starts at its first significant digit, which is the defect this whole change exists to remove.
+ *
+ * ⚠️ Assumptions: the colour is the token the RENDERER returns, for all three sign cases, and it is
+ * taken unconditionally. `MONEY_SIGN_TEXT_TOKENS` in `ui/src/theme/tokens.ts` is the application's one
+ * authority for money hue, and `ui/src/screens/accountView/index.tsx` L1050 and
+ * `ui/src/screens/billPay/index.tsx` L1594 both resolve it the same unconditional way -- so an amount
+ * on this screen now paints the same hue as the same sign of the same magnitude on either of those,
+ * which is precisely the cross-screen agreement the money finding measured the absence of.
+ *
+ * ⚠️ Trade-offs: the mapset's own `COLOR=BLUE` operand is therefore NOT honoured on the seven
+ * amount fields -- `CREDLIM` at `COPAU00.bms` L147 to L151 through `DECLAMT` at L192 to L196 all
+ * declare it, and a positive amount now resolves to `DEFAULT` instead. This is a knowing divergence,
+ * and it is the narrower of the two available ones. Honouring the operand would put a fourth money hue
+ * on the glass and would make an ordinary positive balance here differ from the identical balance on
+ * the account view, which is the defect. The operand itself is not lost: every NON-money value on this
+ * screen still resolves through `BMS_TEXT_COLOR_TOKENS.BLUE`, so the mapset's colour vocabulary is
+ * intact everywhere it is not competing with the money authority. Note also that the sign map's own
+ * rationale grounds its positive entry in `COACTVW`'s money fields carrying no `COLOR=` operand -- a
+ * condition this mapset does not share -- so the divergence is recorded here rather than left to be
+ * inferred from a constant whose stated premise does not hold on this screen.
  * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
- * @param {number} width - The map field's declared character width.
+ * @param {RenderedMoney} rendered - The masked amount, its sign and its colour token.
  * @returns {CSSProperties} The style for that amount's cell.
  */
-function moneyCellStyle(tokens: AntdCssVariables, width: number): CSSProperties {
+function moneyCellStyle(tokens: AntdCssVariables, rendered: RenderedMoney): CSSProperties {
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the resolved reference is narrowed by a `typeof` TEST, where it was
+   *       narrowed by calling `String` on it. `renderMoney` publishes its token as the whole
+   *       `AntdTokenName` surface, so indexing the theme's map with it yields the union of every token
+   *       value the library declares -- numeric durations, radii and heights among them -- which no CSS
+   *       `color` accepts. `String` looked like the narrowing that cannot be wrong, but it is the one
+   *       that cannot FAIL: applied to a member that was not a string it would emit
+   *       `color: [object Object]` and paint nothing, which is exactly why
+   *       `@typescript-eslint/no-base-to-string` refuses it. The test proves the member is a string
+   *       before it is used and DROPS the declaration when it is not, so a mis-typed token name loses a
+   *       hue rather than poisoning the whole style. Adopted from
+   *       `ui/src/screens/billPay/index.tsx` L1685 to L1705, which reached the same conclusion from the
+   *       same rule and records the same reasoning at its own call site.
+   * WHY : Assumptions: at run time this is the same value it always was. Every name the renderer can
+   *       return addresses a colour token, and a resolved reference is already the string
+   *       `var(--ant-...)`, so the test passes on every reachable input and no painted hue changes.
+   * WHY : Alternatives Considered: a type assertion on the indexed access, which the checker accepts
+   *       silently. Rejected because it asserts precisely the thing that would be false in the failing
+   *       case, putting `[object Object]` back with the diagnostic removed.
+   */
+  const colourReference = tokens[rendered.colorToken];
+  const colour = typeof colourReference === 'string' ? colourReference : null;
   return {
-    color: tokens[BMS_TEXT_COLOR_TOKENS.BLUE],
+    /*
+     * WHY : Assumptions: the member is SPREAD conditionally rather than set to `undefined`, because
+     *       `ui/tsconfig.json` sets `exactOptionalPropertyTypes`, under which an explicit `undefined` is
+     *       not assignable to an optional property. Omitting it leaves the cell inheriting the
+     *       surrounding text colour, which is the safe direction for a value whose hue could not be
+     *       resolved.
+     */
+    ...(colour === null ? {} : { color: colour }),
     // WHY : Refactoring Rationale: `display` is set to `inline-block` because `Typography.Text`
     //       renders a `span`, and CSS applies neither `min-inline-size` nor `text-align` to a
     //       non-replaced INLINE box -- such a box is sized by its content. Browser validation of
@@ -784,9 +1253,45 @@ function moneyCellStyle(tokens: AntdCssVariables, width: number): CSSProperties 
     //       none -- the same standing as the `ch` width below.
     display: 'inline-block',
     fontFamily: tokens[TYPOGRAPHY_TOKENS.fixedPitchData],
-    minInlineSize: `${String(width)}ch`,
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the measure is read from the amount's OWN picture, where it used to
+     *       be the module-wide one. The screen renders two pictures now -- twelve characters for the
+     *       credit figures and the row amount, nine for the four cash and total figures -- so a single
+     *       measure would put a nine-character value in a twelve-character box and reinstate exactly
+     *       the column the terminal does not paint. `renderMoney` returns the picture it used on
+     *       `RenderedMoney.picture`, so the box and the mask cannot disagree by construction.
+     */
+    minInlineSize: `${String(rendered.picture.width)}ch`,
     textAlign: 'end',
+    whiteSpace: rendered.whiteSpace,
   };
+}
+
+/**
+ * Renders one amount through the screen's edit mask.
+ *
+ * Purpose: one call site for every amount on the screen -- six in the panel and one per table row --
+ * so the pad preservation, the sign colour, the fixed-pitch token and the column geometry cannot
+ * diverge between them. Divergence between amounts on one screen is what the money finding measured.
+ *
+ * ⚠️ Assumptions: the PICTURE is a parameter and is the only thing that varies between call sites,
+ * because the reference varies exactly that and nothing else -- `COPAUS0C.cbl` L780 to L799 moves six
+ * amounts of one precision through two edit fields. Defaulting it would let a new amount be added at the
+ * wrong measure by omission, which is how all six came to share one picture in the first place.
+ * @param {string} wireAmount - The amount as the contract sent it: exact decimal text.
+ * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
+ * @param {MoneyPicture} picture - The edit mask the reference applies to THIS amount.
+ * @returns {ReactElement} The masked amount, right-aligned in its column.
+ */
+function moneyValue(
+  wireAmount: string,
+  tokens: AntdCssVariables,
+  picture: MoneyPicture,
+): ReactElement {
+  const rendered = renderMoney(wireAmount, picture);
+  return (
+    <Typography.Text style={moneyCellStyle(tokens, rendered)}>{rendered.text}</Typography.Text>
+  );
 }
 
 /**
@@ -805,43 +1310,167 @@ function valueCellStyle(tokens: AntdCssVariables): CSSProperties {
 }
 
 /**
- * Builds the fourteen entries of the account summary panel, in the map's own reading order.
+ * Builds the holder block: the customer's name and the two lines of one postal address.
  *
- * Assumptions: fourteen entries, one per named value field the mapset paints in rows 6 to 12, ordered
- * as the map paints them -- name and customer identifier on row 6, first address line and account
- * status on row 7, second address line on row 8, telephone and the two counts on row 9, the three
- * limit-and-amount fields on row 11 and the three balance-and-amount fields on row 12. Reading order
- * is preserved even though absolute position is not, which is the half of design gap **G1** that is
- * kept.
+ * ⚠️ Purpose: this is the finding this function exists for. The three values were three separate
+ * bordered entries, and two of them had no caption to put in their header cell -- so browser validation
+ * measured two empty grey label cells at every one of the six widths, and, below the medium breakpoint,
+ * the two halves of one postal address separated by an unrelated `Acct Status` row that reflowed
+ * between them. A bordered cell whose header is blank presents as a value belonging to nothing, and an
+ * address split by a foreign row presents as two addresses.
  *
- * ⚠️ Refactoring Rationale: the two address entries carry a label that is present in the accessibility
- * tree and absent from the screen, where they used to carry no label at all. The mapset genuinely paints
- * none -- `ADDR001` at L107 and `ADDR002` at L118 have no preceding `INITIAL=` field, unlike every other
- * value in the panel -- and a visible label would put text on screen that no baseline source declares,
- * which transformation rule T8 forecloses. What the old reasoning got wrong was the sentence that
- * followed: it held that "the association survives structurally because both sit directly beneath the
- * name they continue, exactly as painted". That is positional identification, and positional
- * identification is precisely what design gap G1 surrenders -- these entries reflow to one column below
- * the medium breakpoint, so "directly beneath" is not a property the delivered screen has at every
- * width, and it was never a property a screen reader could use at any width. Two bordered cells whose
- * header cell is empty are announced as a value with no name.
+ * ⚠️ Assumptions: the mapset paints these three as ONE labelled block, and that is why they become one
+ * cell rather than three tidier ones. `COPAU00.bms` L92 to L95 puts the caption `Name: ` at column 3 of
+ * row 6 and then paints `CNAME` at row 6, `ADDR001` at row 7 and `ADDR002` at row 8 -- all three at
+ * COLUMN 10, under the one caption, with the next caption `PH:` not appearing until row 9. The two
+ * address fields have no caption in the source because they are continuation lines of the field above
+ * them, so giving each its own entry was inventing a structure the mapset does not have.
  *
- * Assumptions: the two hidden names are composed from the mapset's own field data names, `ADDR001` and
- * `ADDR002`, expressed as the address line each one is -- so the name an assistive technology reads
- * corresponds to a field a maintainer can find in `COPAU00.bms`, and nothing is invented beyond the
- * ordinal the source itself numbers them by.
+ * ⚠️ Assumptions: the two hidden names remain, and they remain because the position that identified
+ * these lines in the source does not survive. Design gap G1 gives up the character grid, so "the line
+ * below the name" is not a property the delivered screen has at every width and was never a property an
+ * assistive technology could use at any width. Inside a captioned cell a hidden name is safe -- it
+ * names a value within a cell a visible caption already heads -- which is exactly what it was not when
+ * it stood as a bordered entry's whole label.
  *
- * Alternatives Considered: binding the `'Acct Status: '` entry to the five `accountStatus1` through
- * `accountStatus5` members instead of to `authStatus`. Rejected on width: `ACCSTAT` is declared
- * `LENGTH=1` at `COPAU00.bms` L114 to L117, and `CIPAUSMY.cpy` L22 declares
- * `PA-ACCOUNT-STATUS PIC X(02) OCCURS 5 TIMES` -- two characters per slot and five slots -- so binding
- * them there would widen a one-character field to ten. `PA-AUTH-STATUS PIC X(01)` at L21 is the only
- * member of the segment whose width the field can hold, so it is what the field carries.
- * Assumptions: the five slots are consequently rendered by NO field on this screen, and their absence
- * is a property of the mapset rather than an omission here -- it paints no two-character status
- * position. They remain five DISCRETE members of the contract, never an array: the arity of exactly
- * five is enforced by the target schema as five columns, so gathering them would admit a sixth and
- * invite a caller to iterate a length no declaration supports.
+ * Trade-offs: the panel's reading order becomes the mapset's LEFT column as a block -- name, address,
+ * address -- followed by the right-hand values, where it used to interleave them as the character grid
+ * does. That is accepted: an interleaved order is only meaningful beside the coordinates that produced
+ * it, and at one column per row the interleaving is what put a status code between two address lines.
+ * @param {PendingAuthSummary} summary - The account summary the listing returned.
+ * @param {CSSProperties} style - The panel's plain value style.
+ * @returns {ReactElement} The holder block, ready for `Descriptions`.
+ */
+function holderBlockCell(summary: PendingAuthSummary, style: CSSProperties): ReactElement {
+  return (
+    <Flex vertical>
+      <Typography.Text style={style}>{displayText(summary.customerName)}</Typography.Text>
+      <Typography.Text style={style}>
+        <Typography.Text style={VISUALLY_HIDDEN_STYLE}>
+          {AUTH_SUMMARY_HIDDEN_LABELS.addressLine1}
+        </Typography.Text>
+        {displayText(summary.addressLine1)}
+      </Typography.Text>
+      <Typography.Text style={style}>
+        <Typography.Text style={VISUALLY_HIDDEN_STYLE}>
+          {AUTH_SUMMARY_HIDDEN_LABELS.addressLine2}
+        </Typography.Text>
+        {displayText(summary.addressLine2)}
+      </Typography.Text>
+    </Flex>
+  );
+}
+
+/**
+ * Renders one status code with a name that reaches the accessibility tree and not the screen.
+ *
+ * Assumptions: the name is nested INSIDE the value's own element rather than placed beside it, so the
+ * pair is announced as one unit and a reader moving code by code is told which segment member each code
+ * came from. `VISUALLY_HIDDEN_STYLE` is the project's one mechanism for that, already used by the two
+ * address lines in the same panel.
+ * @param {string} name - The accessible name, from {@link AUTH_SUMMARY_HIDDEN_LABELS}.
+ * @param {string | null} code - The status code the segment carried, or `null` when it carried none.
+ * @param {CSSProperties} style - The panel's plain value style.
+ * @returns {ReactElement} The named code, ready to sit inside the status cell.
+ */
+function statusSlot(name: string, code: string | null, style: CSSProperties): ReactElement {
+  return (
+    <Typography.Text style={style}>
+      <Typography.Text style={VISUALLY_HIDDEN_STYLE}>{name}</Typography.Text>
+      {displayText(code)}
+    </Typography.Text>
+  );
+}
+
+/**
+ * Builds the status cell: the authorization-status flag and all five account-status slots.
+ *
+ * ⚠️ Purpose: six members the service returns used to reach no field at all. `PA-AUTH-STATUS` was
+ * rendered under the `Acct Status: ` caption as though it were the account status, and
+ * `PA-ACCOUNT-STATUS`, five slots wide, was rendered nowhere -- so a summary carrying five populated
+ * status codes displayed none of them and displayed a DIFFERENT member in the position an operator would
+ * read them from. Browser validation recorded exactly that: five slots returned and never shown, under a
+ * caption showing something else.
+ *
+ * ⚠️ Refactoring Rationale: the reasoning that produced the old arrangement argued from the 3270 field
+ * width -- `ACCSTAT` is `LENGTH=1` at `COPAU00.bms` L114 to L117, `PA-ACCOUNT-STATUS` is `PIC X(02)`
+ * five times at `CIPAUSMY.cpy` L22, so the five slots "would widen a one-character field to ten" -- and
+ * concluded that `PA-AUTH-STATUS PIC X(01)` at L21 was "the only member whose width the field can hold".
+ * Two facts retire that conclusion. `COPAUS0C.cbl` populates NEITHER member: a search of the whole
+ * program for `ACCSTAT` returns no hit, so the reference leaves the field blank and the old binding was
+ * itself an addition, not a transcription. And the width argument appeals to a character-cell budget that
+ * design gap **G1** has already surrendered -- this panel reflows to one column below the medium
+ * breakpoint, so no cell in it holds a fixed count of character positions at every width.
+ *
+ * ⚠️ Assumptions: the mapset's own caption is the ONLY text this cell puts on screen. Five discrete
+ * rows, each with its own visible caption, would have required inventing five captions -- `Acct Status
+ * 1:` through `Acct Status 5:` -- that no baseline source paints, which transformation rule T8
+ * forecloses. So the five slots are five discrete, individually named values inside the one cell the
+ * mapset labels, and their names are carried by {@link AUTH_SUMMARY_HIDDEN_LABELS}.
+ *
+ * Assumptions: the six values are written as six explicit siblings rather than mapped from a collection,
+ * for the reason the panel builder records -- the arity of exactly five is a property of the contract and
+ * of the target schema's five columns, and gathering them would invite a caller to iterate a length no
+ * declaration supports. Static siblings also need no React key, so nothing here fabricates an index.
+ *
+ * Alternatives Considered: giving `PA-AUTH-STATUS` a `Descriptions` entry of its own with a hidden
+ * label. Rejected because a bordered entry whose header cell is empty renders as a grey box with no text
+ * in it -- the defect browser validation reported against the two address lines -- so a hidden label is
+ * only safe where it names a value INSIDE a cell that a visible caption already heads.
+ * @param {PendingAuthSummary} summary - The account summary the listing returned.
+ * @param {CSSProperties} style - The panel's plain value style.
+ * @returns {ReactElement} The status cell, ready for `Descriptions`.
+ */
+function accountStatusCell(summary: PendingAuthSummary, style: CSSProperties): ReactElement {
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the five ACCOUNT-status slots come first and the authorization-status
+   *       flag last, where the flag used to lead. The caption is `Acct Status: `, so the member it names
+   *       is what an operator reads first; leading with `PA-AUTH-STATUS` reproduced the substitution this
+   *       cell was rebuilt to end -- the first value under the caption was still the one that does not
+   *       belong to it, and only the hidden names said otherwise. Ordering the slots first also puts
+   *       them in their own declared order, `PA-ACCOUNT-STATUS` OCCURS 1 through 5 at
+   *       `app/app-authorization-ims-db2-mq/cpy/CIPAUSMY.cpy` L22.
+   * WHY : Assumptions: the flag is KEPT rather than moved out or dropped. It is a member the service
+   *       returns, and a returned member reaching no field is the defect this cell exists to fix; it has
+   *       its own hidden name, so nothing about it reads as an account-status slot.
+   */
+  return (
+    <Flex gap="small" wrap>
+      {statusSlot(AUTH_SUMMARY_HIDDEN_LABELS.accountStatus1, summary.accountStatus1, style)}
+      {statusSlot(AUTH_SUMMARY_HIDDEN_LABELS.accountStatus2, summary.accountStatus2, style)}
+      {statusSlot(AUTH_SUMMARY_HIDDEN_LABELS.accountStatus3, summary.accountStatus3, style)}
+      {statusSlot(AUTH_SUMMARY_HIDDEN_LABELS.accountStatus4, summary.accountStatus4, style)}
+      {statusSlot(AUTH_SUMMARY_HIDDEN_LABELS.accountStatus5, summary.accountStatus5, style)}
+      {statusSlot(AUTH_SUMMARY_HIDDEN_LABELS.authStatus, summary.authStatus, style)}
+    </Flex>
+  );
+}
+
+/**
+ * Builds the twelve entries of the account summary panel, in the map's own reading order.
+ *
+ * Assumptions: twelve entries, one per CAPTION the mapset paints in rows 6 to 12, ordered as the map
+ * paints them -- name and customer identifier on row 6, account status on row 7, telephone and the two
+ * counts on row 9, the three limit-and-amount fields on row 11 and the three balance-and-amount fields
+ * on row 12. Reading order is preserved even though absolute position is not, which is the half of
+ * design gap **G1** that is kept.
+ *
+ * ⚠️ Refactoring Rationale: the panel carries twelve entries and not fourteen because the two address
+ * lines are no longer entries of their own -- they are rendered inside the name entry by
+ * {@link holderBlockCell}, which is where the mapset puts them. Two successive attempts got this wrong
+ * in two different ways and both are recorded, because the second looks like a fix. Giving them no label
+ * left two bordered cells with empty header cells, announced as values with no name. Giving them a
+ * hidden label kept the empty grey header cell on the glass, which is the defect browser validation then
+ * measured at all six widths, and left the address split by whatever reflowed between its halves. The
+ * entry count is a count of the mapset's captions, and `ADDR001` at L107 and `ADDR002` at L118 have no
+ * preceding `INITIAL=` field, so they were never entitled to entries.
+ *
+ * ⚠️ Refactoring Rationale: the `'Acct Status: '` entry is built by {@link accountStatusCell} and
+ * carries all six status members the segment declares, where it used to carry `authStatus` alone. The
+ * reasoning it replaces, and the two facts that retire that reasoning, are recorded on that function.
+ * Assumptions: the five `PA-ACCOUNT-STATUS` slots remain five DISCRETE members of the contract, never
+ * an array -- the arity of exactly five is enforced by the target schema as five columns, so gathering
+ * them would admit a sixth and invite a caller to iterate a length no declaration supports.
  * @param {PendingAuthSummary} summary - The account summary the listing returned.
  * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
  * @returns {AuthSummaryDescriptionItem[]} The panel entries, ready for `Descriptions`.
@@ -851,14 +1480,11 @@ export function buildAuthSummaryDescriptions(
   tokens: AntdCssVariables,
 ): AuthSummaryDescriptionItem[] {
   const value = valueCellStyle(tokens);
-  const widths = AUTH_SUMMARY_FIELD_WIDTHS;
   return [
     {
       key: 'customerName',
       label: AUTH_SUMMARY_LABELS.name,
-      children: (
-        <Typography.Text style={value}>{displayText(summary.customerName)}</Typography.Text>
-      ),
+      children: holderBlockCell(summary, value),
     },
     {
       key: 'customerId',
@@ -866,31 +1492,9 @@ export function buildAuthSummaryDescriptions(
       children: <Typography.Text style={value}>{summary.customerId}</Typography.Text>,
     },
     {
-      key: 'addressLine1',
-      label: (
-        <Typography.Text style={VISUALLY_HIDDEN_STYLE}>
-          {AUTH_SUMMARY_HIDDEN_LABELS.addressLine1}
-        </Typography.Text>
-      ),
-      children: (
-        <Typography.Text style={value}>{displayText(summary.addressLine1)}</Typography.Text>
-      ),
-    },
-    {
       key: 'accountStatus',
       label: AUTH_SUMMARY_LABELS.accountStatus,
-      children: <Typography.Text style={value}>{displayText(summary.authStatus)}</Typography.Text>,
-    },
-    {
-      key: 'addressLine2',
-      label: (
-        <Typography.Text style={VISUALLY_HIDDEN_STYLE}>
-          {AUTH_SUMMARY_HIDDEN_LABELS.addressLine2}
-        </Typography.Text>
-      ),
-      children: (
-        <Typography.Text style={value}>{displayText(summary.addressLine2)}</Typography.Text>
-      ),
+      children: accountStatusCell(summary, value),
     },
     {
       key: 'phoneNumber1',
@@ -913,59 +1517,56 @@ export function buildAuthSummaryDescriptions(
         <Typography.Text style={value}>{formatAuthCount(summary.declinedAuthCnt)}</Typography.Text>
       ),
     },
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the six monetary entries below gain a CELL style, and only they do.
+     *       Browser measurement found every amount in a rendered column sharing one leading edge and
+     *       splitting into two trailing edges 25.203125px apart, at 1280, 768 and 375 alike -- the value
+     *       cell aligns to `start`, so an `inline-block` amount sits flush left and its 12ch or 9ch box
+     *       width decides where its trailing edge falls. Anchoring the cell's content to its trailing
+     *       edge brings the decimal points of a column into line, which is the property the mapset
+     *       delivers by giving each of its money columns one constant length. The reasoning, the
+     *       measurement and the three rejected alternatives are recorded once at
+     *       `ui/src/layout/recordLayout.ts` rather than repeated per entry.
+     * WHY : ⚠️ Assumptions: it is applied per entry rather than as the panel's own `styles.content`,
+     *       because the panel also holds the holder block, the account-status list and the phone
+     *       number. Trailing-edge alignment is right for a column of figures and wrong for two lines of
+     *       a postal address, so a root-level style would fix six cells by disfiguring six others.
+     */
     {
       key: 'creditLimit',
       label: AUTH_SUMMARY_LABELS.creditLimit,
-      children: (
-        <Typography.Text style={moneyCellStyle(tokens, widths.moneyWide)}>
-          {summary.creditLimit}
-        </Typography.Text>
-      ),
+      children: moneyValue(summary.creditLimit, tokens, AUTH_SUMMARY_MONEY_PICTURE),
+      styles: { content: monetaryRecordCellStyle() },
     },
     {
       key: 'cashLimit',
       label: AUTH_SUMMARY_LABELS.cashLimit,
-      children: (
-        <Typography.Text style={moneyCellStyle(tokens, widths.moneyNarrow)}>
-          {summary.cashLimit}
-        </Typography.Text>
-      ),
+      children: moneyValue(summary.cashLimit, tokens, AUTH_SUMMARY_NARROW_MONEY_PICTURE),
+      styles: { content: monetaryRecordCellStyle() },
     },
     {
       key: 'approvedAuthAmt',
       label: AUTH_SUMMARY_LABELS.approvedAmount,
-      children: (
-        <Typography.Text style={moneyCellStyle(tokens, widths.moneyMedium)}>
-          {summary.approvedAuthAmt}
-        </Typography.Text>
-      ),
+      children: moneyValue(summary.approvedAuthAmt, tokens, AUTH_SUMMARY_NARROW_MONEY_PICTURE),
+      styles: { content: monetaryRecordCellStyle() },
     },
     {
       key: 'creditBalance',
       label: AUTH_SUMMARY_LABELS.creditBalance,
-      children: (
-        <Typography.Text style={moneyCellStyle(tokens, widths.moneyWide)}>
-          {summary.creditBalance}
-        </Typography.Text>
-      ),
+      children: moneyValue(summary.creditBalance, tokens, AUTH_SUMMARY_MONEY_PICTURE),
+      styles: { content: monetaryRecordCellStyle() },
     },
     {
       key: 'cashBalance',
       label: AUTH_SUMMARY_LABELS.cashBalance,
-      children: (
-        <Typography.Text style={moneyCellStyle(tokens, widths.moneyNarrow)}>
-          {summary.cashBalance}
-        </Typography.Text>
-      ),
+      children: moneyValue(summary.cashBalance, tokens, AUTH_SUMMARY_NARROW_MONEY_PICTURE),
+      styles: { content: monetaryRecordCellStyle() },
     },
     {
       key: 'declinedAuthAmt',
       label: AUTH_SUMMARY_LABELS.declinedAmount,
-      children: (
-        <Typography.Text style={moneyCellStyle(tokens, widths.moneyMedium)}>
-          {summary.declinedAuthAmt}
-        </Typography.Text>
-      ),
+      children: moneyValue(summary.declinedAuthAmt, tokens, AUTH_SUMMARY_NARROW_MONEY_PICTURE),
+      styles: { content: monetaryRecordCellStyle() },
     },
   ];
 }
@@ -1036,6 +1637,145 @@ export function formatAuthOrigTime(stored: string | null): string {
 }
 
 /**
+ * Pointer affordance for a selectable table row.
+ *
+ * Assumptions: `pointer` is a structural interaction keyword rather than a design value, so it resolves
+ * to no design token and needs none -- the same standing the `inline-block` and `ch` measures in this
+ * module already have. It is declared once here so every row takes the same one.
+ */
+const ROW_AFFORDANCE_STYLE: CSSProperties = { cursor: 'pointer' };
+
+/**
+ * Builds the pointer-target measure of one row's selection cell.
+ *
+ * ⚠️ Purpose: an accessibility audit measured the control this replaced at fourteen pixels square at
+ * every width and named it the smallest control in the application. That floor is preserved through the
+ * change of control: an antd `Input` takes the theme's own `controlHeight` vertically, which already
+ * clears the minimum, but its inline measure is whatever its container gives it -- and a one-character
+ * field in a three-character column would be narrower than the mark it replaced if nothing stated
+ * otherwise.
+ *
+ * ⚠️ Assumptions: the floor is AA's twenty-four and NOT the audit's forty-four.
+ * `CONTROL_SCALE_DECISION` in `ui/src/theme/tokens.ts` records that decision with both criteria
+ * attached -- twenty-four is 2.5.8 Target Size (Minimum) at AA, forty-four is 2.5.5 Target Size
+ * (Enhanced) at AAA, recorded as considered and declined -- so honouring forty-four here would reopen a
+ * settled decision from one screen and would make this control larger than every themed control beside
+ * it.
+ *
+ * ⚠️ Assumptions: the character term is {@link SELECTION_CELL_RESERVED_COLUMNS} and the padding term is
+ * the design system's own horizontal control padding, so the expression reserves what the control
+ * actually consumes rather than a figure chosen to look right. This is the composition
+ * `actionCellWidthStyle` in `ui/src/screens/userList/index.tsx` uses for the identical `SEL` cell -- one
+ * idiom for one control across two screens, and the measurement behind the caret column was taken on
+ * that screen's instance of it.
+ *
+ * ⚠️ Assumptions: the conformance floor is stated as an explicit alternative inside `max()` rather than
+ * left to fall out of the arithmetic. The two terms clear it at the pinned theme, but that is a property
+ * of a token value rather than of this expression, and a floor that holds only while a token keeps its
+ * value is not a floor. `max()` also degrades safely: the padding custom property is scoped to component
+ * class scopes rather than to the document root, so if it fails to resolve the `calc()` term is invalid
+ * at computed-value time and the AA figure remains operative -- the control can never return to a
+ * zero-width content box.
+ *
+ * ⚠️ Trade-offs: the reserved measure can exceed the content box its own column reserves. The selection
+ * column reserves three character columns because its heading `Sel` is three characters wide
+ * ({@link AUTH_SUMMARY_COLUMN_CHARACTERS}), and the table spends the global padding token on each cell,
+ * so the cell's content box is those three columns while this control asks for two columns plus its own
+ * control padding. The table already carries a horizontal scroll extent for its eight columns, so the
+ * excess is spent there rather than clipping anything -- and the alternative, widening the column to
+ * absorb the control's padding, would reserve a measure no field or heading in the contract declares.
+ *
+ * Assumptions: the conformance figure is a plain number rather than a token reference because it is a
+ * CONFORMANCE threshold and not a design value -- it comes from a success criterion, so a theme change
+ * must not move it. `TARGET_SIZE_AA_MINIMUM` is where it is declared, and this reads it.
+ * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
+ * @returns {CSSProperties} The measure to spread onto the cell's own control.
+ */
+function selectionCellStyle(tokens: AntdCssVariables): CSSProperties {
+  return {
+    minInlineSize: `max(${String(TARGET_SIZE_AA_MINIMUM)}px, calc(${String(
+      SELECTION_CELL_RESERVED_COLUMNS,
+    )}ch + 2 * ${String(tokens.controlPaddingHorizontal)}))`,
+  };
+}
+
+/**
+ * Declared character width of each of the eight table columns.
+ *
+ * ⚠️ Purpose: browser validation measured this table at maximum internal scroll and found the pinned
+ * leading block overlaying the column beside it with nothing reserved between them -- the `Date`
+ * heading rendered as the single letter `e` and an originating time of `09:16:44` rendered as `16:44`,
+ * which is the worst failure available in a table of authorization times because a clipped time still
+ * reads as a whole one. The finding's own suggested remedy was declared column widths, and these are
+ * they: with a width on every column the layout reserves each one instead of measuring it from
+ * whatever text happens to be present, so the scroll extent is the sum of the contract's own widths.
+ *
+ * ⚠️ Assumptions: each entry is the LARGER of the heading's declared length and the datum's, because
+ * a column has to hold both and the mapset does not always make them equal. `Sel` is three characters
+ * over a one-character selector, `Type ` is five over a four-character type, and `A/D` and `STS` are
+ * three each over single characters -- so sizing from the data alone would clip four of the eight
+ * headings, and sizing from the headings alone would under-reserve none but would still be a second
+ * rule to remember. Both figures are read from the two catalogs above rather than restated, so a
+ * heading or a width corrected against the mapset changes the column in the same edit.
+ */
+const AUTH_SUMMARY_COLUMN_CHARACTERS = {
+  /** `Sel` at three characters over `SEL0001`'s one. */
+  selection: Math.max(
+    AUTH_SUMMARY_COLUMN_HEADERS.selection.length,
+    AUTH_SUMMARY_FIELD_WIDTHS.selection,
+  ),
+  /** Heading and datum agree at sixteen. */
+  transactionId: Math.max(
+    AUTH_SUMMARY_COLUMN_HEADERS.transactionId.length,
+    AUTH_SUMMARY_FIELD_WIDTHS.rowTransactionId,
+  ),
+  /** Heading and datum agree at eight. */
+  date: Math.max(AUTH_SUMMARY_COLUMN_HEADERS.date.length, AUTH_SUMMARY_FIELD_WIDTHS.rowDate),
+  /** Heading and datum agree at eight. */
+  time: Math.max(AUTH_SUMMARY_COLUMN_HEADERS.time.length, AUTH_SUMMARY_FIELD_WIDTHS.rowTime),
+  /** `Type ` at five over a four-character type. */
+  type: Math.max(AUTH_SUMMARY_COLUMN_HEADERS.type.length, AUTH_SUMMARY_FIELD_WIDTHS.rowType),
+  /** `A/D` at three over a single character. */
+  approval: Math.max(
+    AUTH_SUMMARY_COLUMN_HEADERS.approval.length,
+    AUTH_SUMMARY_FIELD_WIDTHS.rowApproval,
+  ),
+  /** `STS` at three over a single character. */
+  status: Math.max(AUTH_SUMMARY_COLUMN_HEADERS.status.length, AUTH_SUMMARY_FIELD_WIDTHS.rowStatus),
+  /** Heading and the edit mask agree at twelve. */
+  amount: Math.max(AUTH_SUMMARY_COLUMN_HEADERS.amount.length, AUTH_SUMMARY_MONEY_PICTURE.width),
+} as const;
+
+/**
+ * Builds the CSS length that reserves one column's declared characters plus its cell padding.
+ *
+ * ⚠️ Assumptions: the padding term is `2 * padding` because that is what the design system's own table
+ * spends on a cell: antd 6 derives the table's `cellPaddingInline` from the global `padding` token, so
+ * naming the global token here reserves exactly what the component consumes without hardcoding a
+ * figure. Reserving the characters alone would leave every column short by its own padding and clip
+ * the very headings this exists to protect.
+ *
+ * Assumptions: the character term is in `ch`, which is a DATA contract rather than a design value --
+ * the same standing the amount cells and `MessageBand` give their own `ch` measures -- so it resolves
+ * to no design token and needs none.
+ * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
+ * @returns {(characters: number) => string} A function from declared characters to a CSS length.
+ */
+function columnWidth(tokens: AntdCssVariables): (characters: number) => string {
+  /**
+   * Turns one column's declared character width into the CSS length that column is given.
+   *
+   * Assumptions: a closure over the theme rather than a second parameter, so a column declaration at a
+   * call site names only what the MAPSET declares -- its width in characters -- and cannot pass the
+   * wrong theme by mistake. The padding term is the component's, read once above.
+   * @param {number} characters - The width the mapset declares for that column, in characters.
+   * @returns {string} The CSS length reserving those characters plus the cell padding antd spends.
+   */
+  return (characters: number): string =>
+    `calc(${String(characters)}ch + 2 * ${String(tokens.padding)})`;
+}
+
+/**
  * Builds the eight columns of the authorization table, in the order the mapset paints them.
  *
  * Assumptions: eight columns and one heading each, taken verbatim from row 14 of the mapset, ordered
@@ -1054,52 +1794,59 @@ export function formatAuthOrigTime(stored: string | null): string {
  * mapping assigns `fontFamilyCode` to "fixed-pitch money and identifier columns". A proportional font
  * would let digits of different widths break the column alignment the terminal had.
  *
- * ⚠️ Refactoring Rationale: the selection state and the selection handler are NO LONGER passed in, because
- * the five controls are now members of one `Radio.Group` mounted around the table and a group owns both.
- * Five independent radios, each holding its own `checked` and its own change handler, are five separate
- * one-of-one groups to an assistive technology: arrow keys do not move between them, the set is not
- * announced as a set, and nothing states that choosing one clears another. The source is unambiguous
- * that they ARE one set -- `PROCESS-ENTER-KEY` scans the five selectors in order and takes the first
- * carrying the selection character (`COPAUS0C.cbl` L296 to L330), which is single-select, first wins.
+ * ⚠️ Refactoring Rationale: the leading column's control is INJECTED rather than composed here, and the
+ * `Radio.Group` that used to own the selection is gone. The mapset settles which control belongs there:
+ * `SEL0001` through `SEL0005` are `ATTRB=(FSET,NORM,UNPROT) ... LENGTH=1` with `COLOR=GREEN` and
+ * `HILIGHT=UNDERLINE` (`COPAU00.bms` L277 to L282 and the four repeats), which is an unprotected
+ * one-character ENTRY field -- so the screen's own row-22 sentence, `Type 'S' to View Authorization
+ * details from the list`, is an instruction the control can now actually obey. A radio asked the
+ * operator to click while the sentence told them to type, and it additionally made the source's
+ * `'Invalid selection. Valid value is S'` arm (L327 to L330) unreachable, because a radio can only ever
+ * supply the accepted character.
  *
- * Assumptions: dropping the two parameters is what makes the change enforceable rather than merely
- * present. Had they stayed, a caller could still pass a handler and re-create the per-row binding beside
- * the group's, and the two would fight over the same click.
+ * Assumptions: the cell renderer is a PARAMETER because it needs the screen's own entry state, its
+ * change handler and its per-row control registry, none of which belong in a column builder. This is
+ * the shape `buildUserListColumns` in `ui/src/screens/userList/index.tsx` uses for the identical `SEL`
+ * cell, so a reader meets one idiom rather than two.
  * @param {AntdCssVariables} tokens - The theme's CSS-variable references.
+ * @param {(row: PendingAuthListItem) => ReactElement} renderSelectionCell - Renders one row's
+ *   one-character selection entry.
  * @returns {TableColumnsType<PendingAuthListItem>} The table columns, ready for `Table`.
  */
 export function buildPendingAuthColumns(
   tokens: AntdCssVariables,
+  renderSelectionCell: (row: PendingAuthListItem) => ReactElement,
 ): TableColumnsType<PendingAuthListItem> {
   const code: CSSProperties = {
     color: tokens[BMS_TEXT_COLOR_TOKENS.BLUE],
     fontFamily: tokens[TYPOGRAPHY_TOKENS.fixedPitchData],
   };
+  const width = columnWidth(tokens);
   return [
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.selection,
       key: 'selection',
       fixed: 'left',
+      width: width(AUTH_SUMMARY_COLUMN_CHARACTERS.selection),
       /**
-       * Renders one row's selection control.
+       * Renders one row's selection entry, through the renderer the screen supplied.
        *
-       * Assumptions: the control is bound to the row's own sealed selector, and the row is selectable
-       * at all only because it carries data. The source makes that structural: `INITIALIZE-AUTH-DATA`
-       * sets `DFHBMPRO` on all five selectors before a page is built (`COPAUS0C.cbl` L611 to L661) and
+       * Assumptions: a control is rendered per DELIVERED row, and the row is selectable at all only
+       * because it carries data. The source makes that structural: `INITIALIZE-AUTH-DATA` sets
+       * `DFHBMPRO` on all five selectors before a page is built (`COPAUS0C.cbl` L611 to L661) and
        * `POPULATE-AUTH-LIST` sets `DFHBMUNP` on a selector only as it fills that row (L554, L566, L578,
-       * L590, L602) -- so an empty row's selector is protected. Rendering a control per delivered row
-       * reproduces that without a guard, because a row that was not delivered has no control.
-       * @param {PendingAuthListItem} row - The authorization the control acts on.
-       * @returns {ReactElement} That row's selection control.
+       * L590, L602) -- so an empty row's selector is protected. Rendering per delivered row reproduces
+       * that without a guard, because a row that was not delivered has no control.
+       * @param {PendingAuthListItem} row - The authorization the cell acts on.
+       * @returns {ReactElement} That row's selection entry.
        */
-      render: (row: PendingAuthListItem): ReactElement => (
-        <Radio aria-label={selectionActionLabel(row.transactionId)} value={row.key} />
-      ),
+      render: (row: PendingAuthListItem): ReactElement => renderSelectionCell(row),
     },
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.transactionId,
       key: 'transactionId',
       fixed: 'left',
+      width: width(AUTH_SUMMARY_COLUMN_CHARACTERS.transactionId),
       /**
        * Renders the acquirer's transaction identifier.
        * @param {PendingAuthListItem} row - The authorization being listed.
@@ -1112,6 +1859,7 @@ export function buildPendingAuthColumns(
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.date,
       key: 'authOrigDate',
+      width: width(AUTH_SUMMARY_COLUMN_CHARACTERS.date),
       /**
        * Renders the originating date in the source screen's month-first form.
        * @param {PendingAuthListItem} row - The authorization being listed.
@@ -1124,6 +1872,7 @@ export function buildPendingAuthColumns(
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.time,
       key: 'authOrigTime',
+      width: width(AUTH_SUMMARY_COLUMN_CHARACTERS.time),
       /**
        * Renders the originating time in the source screen's colon-separated form.
        * @param {PendingAuthListItem} row - The authorization being listed.
@@ -1136,6 +1885,7 @@ export function buildPendingAuthColumns(
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.type,
       key: 'authType',
+      width: width(AUTH_SUMMARY_COLUMN_CHARACTERS.type),
       /**
        * Renders the authorization type code.
        * @param {PendingAuthListItem} row - The authorization being listed.
@@ -1148,6 +1898,7 @@ export function buildPendingAuthColumns(
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.approval,
       key: 'approvalStatus',
+      width: width(AUTH_SUMMARY_COLUMN_CHARACTERS.approval),
       /**
        * Renders the approved-or-declined character.
        *
@@ -1165,6 +1916,7 @@ export function buildPendingAuthColumns(
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.status,
       key: 'matchStatus',
+      width: width(AUTH_SUMMARY_COLUMN_CHARACTERS.status),
       /**
        * Renders the match status character.
        *
@@ -1186,16 +1938,14 @@ export function buildPendingAuthColumns(
     {
       title: AUTH_SUMMARY_COLUMN_HEADERS.amount,
       key: 'amount',
+      width: width(AUTH_SUMMARY_COLUMN_CHARACTERS.amount),
       /**
        * Renders the approved amount as exact decimal text.
        * @param {PendingAuthListItem} row - The authorization being listed.
        * @returns {ReactElement} The amount, right-aligned at the map's declared twelve characters.
        */
-      render: (row: PendingAuthListItem): ReactElement => (
-        <Typography.Text style={moneyCellStyle(tokens, AUTH_SUMMARY_FIELD_WIDTHS.rowAmount)}>
-          {row.amount}
-        </Typography.Text>
-      ),
+      render: (row: PendingAuthListItem): ReactElement =>
+        moneyValue(row.amount, tokens, AUTH_SUMMARY_MONEY_PICTURE),
     },
   ];
 }
@@ -1291,7 +2041,27 @@ export function AuthSummaryScreen(): ReactElement {
   const [accountIdEntry, setAccountIdEntry] = useState('');
   const [scopedAccountId, setScopedAccountId] = useState('');
   const [entryFault, setEntryFault] = useState<FieldValidationState | null>(null);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the selection is now the SET OF TYPED CELL ENTRIES, keyed by the
+   *       row's own sealed selector, where it used to be one chosen row key. The mapset settles the
+   *       shape: `SEL0001` through `SEL0005` are `ATTRB=(FSET,NORM,UNPROT) ... LENGTH=1` entry fields
+   *       (`COPAU00.bms` L277 to L282 and the four repeats), and the reference reads whatever character
+   *       each holds. A single chosen key cannot carry a character, so it could not reach the source's
+   *       own refusal arm at `COPAUS0C.cbl` L327 -- `'Invalid selection. Valid value is S'` -- and it
+   *       contradicted the row-22 sentence this screen paints, which tells the operator to TYPE.
+   * WHY : Assumptions: keyed by the sealed selector rather than by row index, because an index
+   *       re-associates every typed entry with a different authorization the moment a page turns.
+   * WHY : Assumptions: entries survive only until the next turn. Every arm that paints a page clears
+   *       them, which is `INITIALIZE-AUTH-DATA` moving `DFHBMPRO` into all five selectors before a page
+   *       is built (L611 to L661).
+   */
+  const [selectionEntries, setSelectionEntries] = useState<Readonly<Record<string, string>>>({});
+  /*
+   * WHY : Assumptions: each row's control node is registered so a click anywhere in the row can place
+   *       the CURSOR in that row's cell. A ref map rather than state, because focusing is an imperative
+   *       act on a node and re-rendering on registration would serve nothing.
+   */
+  const selectionCellRefs = useRef(new Map<string, HTMLInputElement>());
   const [summary, setSummary] = useState<PendingAuthSummary | null>(null);
   const [serviceMessage, setServiceMessage] = useState<string | null>(null);
   /*
@@ -1301,7 +2071,72 @@ export function AuthSummaryScreen(): ReactElement {
    *       its own number against itself and every one of them would look current.
    */
   const readGeneration = useRef(0);
+  /*
+   * WHY : ⚠️ Purpose: the account a search has been DISPATCHED for and not yet settled, or `null`. This
+   *       is what makes the resubmission guard and the busy affordance effective on the SAME TASK as the
+   *       press. `browse.isLoading` is state and becomes true one render later, so six presses inside a
+   *       single millisecond -- which browser validation measured, taking the request count from four to
+   *       seven -- every one of them read `isLoading` as false.
+   * WHY : Assumptions: it holds the ACCOUNT rather than a boolean, so the busy predicate can answer
+   *       "is a search for the identifier now in the field outstanding" and not merely "is something
+   *       outstanding". The difference is the correction path: an operator retyping a different account
+   *       while the first read runs must still be able to submit it, and a boolean would refuse them.
+   */
+  const searchDispatched = useRef<string | null>(null);
   const [notice, setNotice] = useState<ScreenNotice | null>(null);
+
+  useEffect(
+    /**
+     * Collects a fraud outcome the detail screen handed over, on mount and on every later retention.
+     *
+     * Assumptions: the effect runs ONCE -- its dependency list is empty -- because both mechanisms it
+     * installs are independent of this screen's own state: the opening collection reads a retention that
+     * already exists, and the subscription is what covers every later one. Re-running it on a state
+     * change would unsubscribe and resubscribe on every turn for no gain.
+     * @returns {() => void} The unsubscribe function React calls on unmount, so the registry holds no
+     *   listener belonging to an unmounted screen.
+     */
+    () => {
+      /**
+       * Paints a fraud outcome the detail screen had nobody left to report.
+       *
+       * Assumptions: the claim is COMPARED rather than collected unconditionally, because
+       * `subscribeToRetainedOutcomes` tells every listener about every retention -- a screen that collected
+       * whatever had just been retained would take another pair's hand-over and paint a sentence about a
+       * record it never showed.
+       *
+       * Assumptions: only `COMPLETED` is painted. The detail screen retains under that discriminator for
+       * both a committed write and a refused one, because it has already reduced its failures to sentences
+       * and records why at its own retention site; `FAILED` carries a raised error rather than a sentence,
+       * and reducing one here would be a second implementation of that screen's own failure wording.
+       * @param {string} claim - The claim just retained, or this screen's own on the opening check.
+       * @returns {void} Nothing; the sentence is placed in the message band as a side effect.
+       */
+      function collect(claim: string): void {
+        if (claim !== AUTH_FRAUD_TRANSITION_CLAIM) {
+          return;
+        }
+        const handed = claimRetainedOutcome<FraudTransitionHandover>(AUTH_FRAUD_TRANSITION_CLAIM);
+        if (handed === undefined || handed.settled !== 'COMPLETED') {
+          return;
+        }
+        setNotice({ message: handed.value.text, severity: handed.value.severity });
+      }
+
+      /*
+       * WHY : ⚠️ Assumptions: BOTH mechanisms are used, and neither alone is sufficient. Collecting once
+       *       on mount misses the ordinary case -- `ui/src/api/client.ts` records that the measured writes
+       *       landed 7 to 12 ms AFTER the navigation, so this screen is already mounted when the outcome
+       *       comes to exist and a mount-only check looks too early. Subscribing alone misses the opposite
+       *       case, a write that settled while the route was still changing, which is retained before any
+       *       listener of this screen exists. The pair covers both, and collection REMOVES the entry, so
+       *       the two cannot paint one outcome twice.
+       */
+      collect(AUTH_FRAUD_TRANSITION_CLAIM);
+      return subscribeToRetainedOutcomes(collect);
+    },
+    [],
+  );
 
   const readPage = useCallback(
     /**
@@ -1352,6 +2187,37 @@ export function AuthSummaryScreen(): ReactElement {
       if (readGeneration.current === generation) {
         setSummary(response.summary);
         setServiceMessage(response.screenMessage);
+        /*
+         * WHY : ⚠️ Purpose: the identifier the service scoped the read to is ADOPTED into the field it
+         *       was submitted from, and it used to reach no field at all -- `summary.accountId` was
+         *       returned on every listing and displayed nowhere, which browser validation recorded as
+         *       returned-and-never-rendered. This is the reference's own mechanism rather than an
+         *       addition: `ACCTIDO` and `ACCTIDI` are the SAME map field, and `COPAUS0C.cbl` L228 to
+         *       L232 moves `WS-ACCT-ID` back into `ACCTIDO` on the Enter arm before the map is sent, so
+         *       the terminal repaints the entry position with the identifier the turn actually ran
+         *       under. Echoing it here is what closes the gap between what an operator typed and what
+         *       the service resolved -- a leading-zero or padding difference is otherwise invisible.
+         * WHY : Assumptions: the updater form is used so the comparison sees the CURRENT entry text
+         *       rather than the text this closure captured. A read settles after an await, and the field
+         *       is editable throughout it.
+         * WHY : ⚠️ Trade-offs: the echo is REFUSED when the entry no longer equals the scope this read
+         *       ran under, which is the case where the operator has typed since submitting. The terminal
+         *       cannot reach that case -- CICS locks the keyboard for the turn -- so there is no
+         *       reference behaviour to transcribe, and overwriting an in-progress correction with a
+         *       resolved identifier from a read being abandoned would destroy typing that the guard in
+         *       `submitEntry` exists to let through.
+         */
+        setAccountIdEntry(
+          /**
+           * Adopts the identifier the read ran under, unless the operator has typed since submitting.
+           * @param {string} entered - The entry field's CURRENT text, which the updater form supplies
+           *   rather than the text this closure captured.
+           * @returns {string} The service's resolved identifier when the field still holds the scope
+           *   this read ran under, and the operator's own text when it does not.
+           */
+          (entered: string): string =>
+            entered === scopedAccountId ? response.summary.accountId : entered,
+        );
       }
       return response.page;
     },
@@ -1423,6 +2289,51 @@ export function AuthSummaryScreen(): ReactElement {
   }
 
   /**
+   * Records that the dispatched search has settled, whichever way it settled.
+   *
+   * Assumptions: cleared on BOTH outcomes, because the flag says a turn is outstanding and a failed
+   * turn is not outstanding. Clearing only on success would leave the Enter key reported busy -- and
+   * therefore silently declined by `usePfKeys` -- for the rest of the visit after one refused read,
+   * which is the hazard `PfKeyHandlerEntry.busy` records for a screen that forgets to clear it.
+   *
+   * Assumptions: it does not compare the account it was dispatched for. Two presses that collapsed
+   * share one settlement and both continuations run, so a comparison would have to decide which of two
+   * identical accounts cleared the flag; there is only ever one search outstanding under this ref,
+   * because the guard above declines a second one.
+   * @returns {void} Nothing; the outstanding-search flag is cleared as a side effect.
+   */
+  function concludeSearchTurn(): void {
+    searchDispatched.current = null;
+  }
+
+  /**
+   * Reports whether a search for the account NOW IN THE ENTRY FIELD is still outstanding.
+   *
+   * Purpose: this is what the Enter key's busy affordance and its silent decline are driven from. A
+   * measured double-submit on this screen produced one identical request per press with the pressed
+   * control left indistinguishable from idle -- the only busy affordance in the frame was the table's
+   * own spinner, which is nowhere near the entry field or the key legend.
+   *
+   * ⚠️ Assumptions: the test is scoped to the entered account and is NOT a bare "is a read running".
+   * `usePfKeys` declines a busy key outright, so an unscoped flag would refuse the correction path this
+   * screen deliberately keeps open: `src/screens/screenSelectionCarriers.test.tsx` types a DIFFERENT
+   * account and presses Enter while the first read is still unsettled, and requires that second read to
+   * be issued. Scoping by the field's current contents lets the correction through and declines only
+   * the identical resubmission.
+   *
+   * Assumptions: the ref is consulted BESIDE the browse's own flag rather than instead of it. The ref
+   * covers the same task as the press, which state cannot; the browse's flag covers the read the
+   * scope-change path starts, which this screen does not dispatch and so never records in the ref.
+   * @returns {boolean} `true` while this screen is waiting for the entered account's search.
+   */
+  function searchIsOutstanding(): boolean {
+    if (accountIdEntry !== scopedAccountId) {
+      return false;
+    }
+    return browse.isLoading || searchDispatched.current !== null;
+  }
+
+  /**
    * Runs the source program's Enter arm.
    *
    * Assumptions: the four steps run in the source's order and short-circuit exactly where it does,
@@ -1449,29 +2360,32 @@ export function AuthSummaryScreen(): ReactElement {
     setEntryFault(null);
 
     /*
-     * WHY : Alternatives Considered: the selection column is a `Radio`, and the two rejected options
-     *       are a `Checkbox` and a one-character `Input`. A `Checkbox` is rejected because it admits
-     *       a state the source cannot express: `PROCESS-ENTER-KEY` evaluates the five selectors with
-     *       an ordered `EVALUATE TRUE` at L285 to L309 whose first non-blank arm wins and whose
-     *       remaining arms are then unreachable, so exactly one selection is actionable per turn --
-     *       single select, first wins. A `Radio` encodes that in the control itself, whereas a
-     *       `Checkbox` would let an operator tick three rows and see one acted on. A one-character
-     *       `Input` reproducing `SEL0001` literally -- `LENGTH=1`, `ATTRB=(FSET,NORM,UNPROT)`,
-     *       `COLOR=GREEN`, `HILIGHT=UNDERLINE` at L277 to L282 -- is the closer transcription and is
-     *       rejected for the same reason plus one more: the design-system mapping assigns this role
-     *       to a radio or a checkbox, and a free-text column would admit two simultaneously non-blank
-     *       selectors, which is the state the ordered evaluation exists to resolve.
-     * WHY : Trade-offs: the consequence of that choice is that the control can only ever supply the
-     *       accepted character, so the refusal arm below is the transcribed complement of the
-     *       accepted one rather than a path an operator can reach through this control. It is kept,
-     *       and `resolveSelectionAction` is exported, because the accepted domain is the baseline's
-     *       and not the control's: the function decides the whole of it -- including the lowercase
-     *       arm the source adds at L315 -- and is verifiable on its own terms.
+     * WHY : ⚠️ Refactoring Rationale: the selection column is a one-character `Input` per row, and the
+     *       note that stood here choosing a `Radio` over exactly that is withdrawn. Its decisive claim
+     *       was that "the design-system mapping assigns this role to a radio or a checkbox", which
+     *       misreads the mapping it cites: AAP section 0.3.2 gives a radio or checkbox to a "selection
+     *       marker column", and it gives an `Input` with `maxLength` from the copybook width to an
+     *       "editable field (`ATTRB=(FSET,NORM,UNPROT)`)". `SEL0001` is the second of those --
+     *       `ATTRB=(FSET,NORM,UNPROT)`, `LENGTH=1`, `COLOR=GREEN`, `HILIGHT=UNDERLINE` at
+     *       `COPAU00.bms` L277 to L282 -- so the mapping was pointing the other way all along.
+     * WHY : ⚠️ Refactoring Rationale: its second claim, that a free-text column "would admit two
+     *       simultaneously non-blank selectors, which is the state the ordered evaluation exists to
+     *       resolve", is answered rather than denied: two non-blank selectors is a state the TERMINAL
+     *       admits, and the ordered evaluation is the source's resolution of it, transcribed at
+     *       {@link reduceAuthRowSelection}. Making the control unable to reach that state does not
+     *       reproduce the resolution -- it deletes the case, and with it the reachability of the
+     *       refusal at L327.
+     * WHY : Assumptions: a `Checkbox` remains rejected, and for the reason the old note gave: it
+     *       expresses only that a row is chosen, so it can no more carry the typed character than a
+     *       radio can.
+     * WHY : Assumptions: `resolveSelectionAction` stays the domain authority -- including the lowercase
+     *       arm the source adds at L316 -- and is now reachable in both directions, because the control
+     *       can supply a character it refuses.
      */
-    const selectionFlag = selectedKey === null ? '' : AUTH_SUMMARY_SELECTION_CODE;
-    const action = resolveSelectionAction(selectionFlag, selectedKey);
-    if (action === 'open' && selectedKey !== null) {
-      navigateSafely(navigate, authorizationDetailPath(selectedKey));
+    const selection = reduceAuthRowSelection(browse.items, selectionEntries);
+    const action = resolveSelectionAction(selection.flag, selection.key);
+    if (action === 'open' && selection.key !== null) {
+      navigateSafely(navigate, authorizationDetailPath(selection.key));
       return;
     }
     if (action === 'invalid') {
@@ -1501,9 +2415,95 @@ export function AuthSummaryScreen(): ReactElement {
      *       Calling `reset` on the unchanged path and letting the key change carry the other is the
      *       narrower fix: each path performs exactly one read, and neither double-fetches.
      */
-    setSelectedKey(null);
+    setSelectionEntries(NO_SELECTION_ENTRIES);
     if (accountIdEntry === scopedAccountId) {
-      browse.reset();
+      /*
+       * WHY : ⚠️ Refactoring Rationale: an identical resubmission is COLLAPSED while a read for the
+       *       same account is still outstanding, and it was not. Browser validation counted three
+       *       activations of the Enter control producing three identical `POST /authorizations/search`
+       *       requests, because `browse.isLoading` reached only the table's own spinner and nothing on
+       *       the path that issues the read -- so an operator with no visible acknowledgement pressed
+       *       again, and each press called `reset` unconditionally. The terminal cannot reach this
+       *       state at all: CICS locks the keyboard for the duration of a task, so a second Enter
+       *       during a turn is not delivered. Collapsing the duplicate is the closest the browser gets
+       *       to that lock without taking a control away.
+       * WHY : ⚠️ Assumptions: the guard is scoped to the UNCHANGED account and deliberately does not
+       *       gate the whole arm. A second submission naming a DIFFERENT account must still be issued
+       *       while the first is in flight, because that is how an operator corrects a mistyped
+       *       identifier without waiting, and the superseded response is already discarded by the
+       *       generation guard in `readPage`. Gating the arm as a whole would break that correction
+       *       path -- `src/screens/screenSelectionCarriers.test.tsx` measures exactly it, issuing the
+       *       second read while the first is unsettled and asserting the first cannot repaint.
+       * WHY : ⚠️ Refactoring Rationale: the dispatch IS now wrapped in `withoutConcurrentDuplicate`, and
+       *       the note that stood here rejecting it is withdrawn as having answered a different
+       *       question. It read: "that helper resolves `Promise<void>`, and `usePagedQuery`'s
+       *       `fetchPage` must resolve the page envelope, so a joining caller would hand the hook
+       *       nothing where a page belongs". That is true of wrapping `fetchPage`, which is not what is
+       *       wrapped: `browse.reset` is `() => Promise<void>` since the hook began returning its turns
+       *       (`usePagedQuery.ts` L1400 to L1420), which is EXACTLY the `attempt` signature the helper
+       *       declares. Nothing is handed to the hook at all -- the page still arrives through
+       *       `fetchPage` untouched, and what collapses is this screen's DISPATCH of the turn. The
+       *       second half of the old note, that the helper is "declared for DESTRUCTIVE requests", is
+       *       also withdrawn: its own documentation states the key is a method and target and the guard
+       *       is applied per operation, and a duplicate read is not made safe by being a read -- the
+       *       measured count was seven requests for one operator intention.
+       * WHY : Assumptions: this is not the only guard on the turn and does not need to be. The hook
+       *       collapses identical turns internally under `BROWSE {identity}.{epoch} {direction}
+       *       {cursor}`, so a duplicate would already be joined one level down. What the screen-level
+       *       key adds is a collapse expressed in terms this screen can state and test -- the ACCOUNT
+       *       being searched -- and, through {@link searchDispatched}, a synchronous in-flight fact the
+       *       hook's private map cannot supply and the busy affordance needs.
+       * WHY : Alternatives Considered: disabling the Enter binding while the read runs. Rejected for
+       *       the reason recorded at this screen's `usePfKeys` call -- `usePfKeys` answers a disabled
+       *       handler with `CCDA-MSG-INVALID-KEY`, so an operator pressing Enter during a read would be
+       *       told the key is invalid, which is both wrong and a verbatim string used to mean something
+       *       else. Reporting the key BUSY is the available alternative and is what this screen now
+       *       does: `usePfKeys` declines a busy key silently, which is the terminal's input-inhibit
+       *       behaviour rather than a message.
+       */
+      if (browse.isLoading) {
+        return;
+      }
+
+      /*
+       * WHY : ⚠️ Purpose: an identical resubmission of an account ALREADY ANSWERED issues no read at
+       *       all, and this is the half the in-flight guard above cannot reach. Browser validation
+       *       measured three presses on an unchanged account taking the request count from one to four
+       *       -- each press arrived after the previous read had settled, so `isLoading` was false for
+       *       every one of them and each called `reset` again.
+       * WHY : ⚠️ Assumptions: three conditions together, and every one of them is load-bearing.
+       *       `summary !== null` is this screen's ANSWERED fact: `readPage` sets it only from a
+       *       current-generation settlement and `withdrawScopedReads` clears it on both the refusal and
+       *       the scope-change paths, so it can never describe an account other than the one on
+       *       display. The browse's own ordinal cannot stand in for it -- the hook initialises
+       *       `pageNumber` to one BEFORE any read (`usePagedQuery.ts` L922), so the ordinal alone reads
+       *       "page one" on a screen that has never read anything, and the opening turn would be
+       *       declined.
+       * WHY : ⚠️ Assumptions: `pageNumber === AUTH_SUMMARY_FIRST_PAGE` is what preserves the REWIND.
+       *       Enter on page three of the same account must still return page one, because
+       *       `GATHER-DETAILS` opens with `MOVE 0 TO CDEMO-CPVS-PAGE-NUM` at `COPAUS0C.cbl` L347 before
+       *       it re-reads -- so the guard declines only the turn that would redisplay what is already
+       *       displayed.
+       * WHY : Assumptions: `!browse.isFailed` is what preserves the RETRY. A read that failed leaves a
+       *       previously arrived summary standing, so without this test the operator's next Enter would
+       *       be declined and the failure would be unrecoverable without leaving the screen.
+       * WHY : ⚠️ Trade-offs: the divergence this creates is stated rather than left to be discovered.
+       *       The terminal's Enter always re-read, so an authorization inserted by another operator
+       *       appeared on the next Enter; here, an Enter on page one of an answered account paints the
+       *       screen again without asking the service, so that insert is not picked up by THAT key. It
+       *       is picked up by either paging key, both of which issue real reads, and by re-scoping the
+       *       account. The exchange is deliberate: a refresh an operator did not ask for is worth less
+       *       than not sending six requests for one intention, and the measured defect was the second.
+       */
+      if (summary !== null && !browse.isFailed && browse.pageNumber === AUTH_SUMMARY_FIRST_PAGE) {
+        return;
+      }
+
+      searchDispatched.current = accountIdEntry;
+      withoutConcurrentDuplicate(authSummarySearchKey(accountIdEntry), browse.reset).then(
+        concludeSearchTurn,
+        concludeSearchTurn,
+      );
       return;
     }
 
@@ -1529,42 +2529,46 @@ export function AuthSummaryScreen(): ReactElement {
    * selectors and all five row-families whenever it builds a page -- `INITIALIZE-AUTH-DATA` at
    * `COPAUS0C.cbl` L608 to L662, performed from the PF7 arm at L377. Leaving a selection standing would
    * let an Enter turn on the new page open a record the operator can no longer see.
+   *
+   * Assumptions: the guard branches on the browse's published position, {@link BACKWARD_EXHAUSTED},
+   * rather than on a backward-availability flag, so the dead-end case is named rather than inferred.
    * @returns {void} Nothing; either a page arrives or the boundary sentence is shown.
    */
   function pageBackward(): void {
     setNotice(null);
-    setSelectedKey(null);
-    if (!browse.hasPrev) {
+    setSelectionEntries(NO_SELECTION_ENTRIES);
+    if (BACKWARD_EXHAUSTED.includes(browse.boundary)) {
       setNotice({
         message: SHARED_MESSAGES.YOU_ARE_ALREADY_AT_THE_TOP_OF_THE_PAGE,
         severity: AUTH_SUMMARY_MESSAGE_SEVERITY,
       });
       return;
     }
-    browse.prevPage();
+    browse.prevPage().then(ignoreSettledBrowseTurn, ignoreSettledBrowseTurn);
   }
 
   /**
    * Runs the source program's forward paging arm.
    *
-   * Assumptions: availability is read from the envelope's own forward indicator rather than counted
-   * from the rows on screen, which is how the source settles it too -- `PROCESS-PAGE-FORWARD` issues
-   * one extra read beyond the five it displays and sets `NEXT-PAGE-YES` from whether that read found a
+   * Assumptions: availability is read from the browse's own published POSITION rather than counted from
+   * the rows on screen, which is how the source settles it too -- `PROCESS-PAGE-FORWARD` issues one
+   * extra read beyond the five it displays and sets `NEXT-PAGE-YES` from whether that read found a
    * record, at `COPAUS0C.cbl` L445 to L452, and the PF8 arm branches on that indicator at L404. A full
-   * page of five is therefore not evidence that a sixth record exists.
+   * page of five is therefore not evidence that a sixth record exists. {@link FORWARD_EXHAUSTED} names
+   * the three positions from which the sentence is the answer.
    * @returns {void} Nothing; either a page arrives or the boundary sentence is shown.
    */
   function pageForward(): void {
     setNotice(null);
-    setSelectedKey(null);
-    if (!browse.hasNext) {
+    setSelectionEntries(NO_SELECTION_ENTRIES);
+    if (FORWARD_EXHAUSTED.includes(browse.boundary)) {
       setNotice({
         message: SHARED_MESSAGES.YOU_ARE_ALREADY_AT_THE_BOTTOM_OF_THE_PAGE,
         severity: AUTH_SUMMARY_MESSAGE_SEVERITY,
       });
       return;
     }
-    browse.nextPage();
+    browse.nextPage().then(ignoreSettledBrowseTurn, ignoreSettledBrowseTurn);
   }
 
   /**
@@ -1596,10 +2600,10 @@ export function AuthSummaryScreen(): ReactElement {
    *       page..." -- replacing a correct sentence with a wrong one, and losing a verbatim string
    *       Transformation Rule T8 requires. The source refuses neither key: both arms re-send the
    *       screen with a message (L380 to L384 and L408 to L411). The availability tests still bind to
-   *       the keyset envelope rather than to a page number -- `pageBackward` and `pageForward` read
-   *       `hasPrev` and `hasNext` -- so the decision is made from the cursor state exactly as
-   *       required; it just decides which of two outcomes happens rather than whether the key
-   *       responds at all.
+   *       the keyset envelope rather than to a page number -- `pageBackward` and `pageForward` branch
+   *       on the published position, {@link BACKWARD_EXHAUSTED} and {@link FORWARD_EXHAUSTED} -- so
+   *       the decision is made from the cursor state exactly as required; it just decides which of two
+   *       outcomes happens rather than whether the key responds at all.
    * WHY : Assumptions: the unmapped-key message is NOT re-emitted here. `usePfKeys` owns
    *       `CCDA-MSG-INVALID-KEY` and hands it back on the rejection, so this screen shows what the
    *       hook decided rather than a second copy of the same constant. That matters on this screen
@@ -1607,12 +2611,54 @@ export function AuthSummaryScreen(): ReactElement {
    *       Enter arm -- `COPAUS0C.cbl` L245 to L249 does move that message into the message field, so
    *       the rejection must be surfaced and not swallowed.
    */
+  /*
+   * WHY : ⚠️ Assumptions: the three keys that leave or step are stated `risk: 'read-only'`, and ENTER
+   *       deliberately states NO risk. The classification follows what each key's LABEL says it does
+   *       rather than which attention identifier carries it, and nothing on this screen writes at all:
+   *       `COPAUS0C` issues no `EXEC DLI ISRT`, `REPL` or `DLET` and no `EXEC SQL`, so there is no
+   *       mutating or destructive key here.
+   * WHY : ⚠️ Trade-offs: leaving ENTER unclassified is the one place where saying nothing is the
+   *       accurate statement, and it was arrived at by measurement. Declaring it read-only compiles and
+   *       is true of what the key does, and it changes the paint: `pfKeyEmphasisFor` resolves a stated
+   *       read-only key to `type="default"`, so the screen's submit control lost its primary emphasis
+   *       and `src/test/authSummary.test.tsx` failed with "expected 'ant-btn-default' to contain
+   *       'ant-btn-primary'". That emphasis is not this screen's to withdraw -- the migration plan's
+   *       design-system section maps the action keys with `type="primary"` for ENTER and PF5 and
+   *       `type="default"` for PF3, PF4 and PF12, which `PRIMARY_ACTION_AIDS` transcribes -- and the
+   *       fallback for an unstated risk is exactly the mechanism that preserves it. So the risk channel
+   *       is used where it adds a fact and left alone where it would overrule the plan.
+   * WHY : ⚠️ Assumptions: the busy channel is opened on Enter, F7 and F8 -- the three keys that own a
+   *       read -- and deliberately NOT on F3. A screen must stay escapable while a read is outstanding,
+   *       which is the property `PfKeyHandlerEntry.busy` itself records, and F3 mutates nothing and
+   *       waits for nothing.
+   * WHY : ⚠️ Trade-offs: a busy key is declined SILENTLY by `usePfKeys`, so this is the one place where
+   *       the scoping of {@link searchIsOutstanding} matters to a reader. Reporting Enter busy on a bare
+   *       `browse.isLoading` would refuse the correction an operator makes by retyping a different
+   *       account while the first read is outstanding -- the path `readPage`'s generation guard exists
+   *       to make safe, and the path `src/screens/screenSelectionCarriers.test.tsx` measures. Enter is
+   *       therefore busy only for a search of the identifier now in the field. The paging keys need no
+   *       such scoping: a step is only ever taken from the page on display.
+   */
   const { bindings, invoke } = usePfKeys(
     {
-      ENTER: { onInvoke: submitEntry, label: AUTH_SUMMARY_KEY_LABELS.ENTER },
-      PFK03: { onInvoke: returnToMenu, label: AUTH_SUMMARY_KEY_LABELS.PFK03 },
-      PFK07: { onInvoke: pageBackward, label: AUTH_SUMMARY_KEY_LABELS.PFK07 },
-      PFK08: { onInvoke: pageForward, label: AUTH_SUMMARY_KEY_LABELS.PFK08 },
+      ENTER: {
+        onInvoke: submitEntry,
+        label: AUTH_SUMMARY_KEY_LABELS.ENTER,
+        busy: searchIsOutstanding,
+      },
+      PFK03: { onInvoke: returnToMenu, label: AUTH_SUMMARY_KEY_LABELS.PFK03, risk: 'read-only' },
+      PFK07: {
+        onInvoke: pageBackward,
+        label: AUTH_SUMMARY_KEY_LABELS.PFK07,
+        risk: 'read-only',
+        busy: browse.isLoading,
+      },
+      PFK08: {
+        onInvoke: pageForward,
+        label: AUTH_SUMMARY_KEY_LABELS.PFK08,
+        risk: 'read-only',
+        busy: browse.isLoading,
+      },
     },
     {
       onInvalidKey:
@@ -1639,7 +2685,46 @@ export function AuthSummaryScreen(): ReactElement {
    *       two cannot contradict each other: the local one appears when no read is issued, the service
    *       one when a page arrives carrying it.
    */
-  const listingFailure = describeListingFailure(browse.error);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the sentence is composed from `browse.failure` and no longer from
+   *       `browse.error`. The hook publishes both -- the problem document for a screen that marks
+   *       fields from it, and the classified failure beside it -- and only the second carries the
+   *       transport judgement `describeListingFailure` now reads, so a document alone could not
+   *       distinguish a momentary outage from a permanent fault. `browse.error` is still read, once,
+   *       and only for what it alone carries: the `fieldErrors` array that marks the account entry.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: a failed browse whose failure carries no classification now
+   *       falls back to the unexpected-condition sentence, where it previously produced NO sentence
+   *       at all. `describeListingFailure` reads `browse.failure`, and the hook populates that member
+   *       only for a rejection the transport module classified; a rejection that arrives as a bare
+   *       problem document populates `browse.error` and leaves `failure` null, so the describer
+   *       returned null, the two later alternatives were also null on a failed read, and the band
+   *       stayed empty. Measured: a listing rejected with a problem document rendered no element with
+   *       role `alert` anywhere on the screen -- the operator pressed Enter, the rows did not arrive,
+   *       and the screen said nothing about why.
+   *
+   *       Assumptions: `isFailed` is the flag that means the read did not deliver, and it is true for
+   *       every rejection whatever its shape, which is why the invariant is anchored on it rather than
+   *       on either payload. The invariant this states is the one the reference keeps without trying:
+   *       `COPAUS0C.cbl` L692 moves a sentence into `ERRMSGO` on every path that fails to show rows,
+   *       so there is no arm of that program in which the browse fails silently.
+   *
+   *       Alternatives Considered: widening the describer to accept the problem document as well was
+   *       rejected because its whole purpose is to read the transport judgement, and a document alone
+   *       cannot distinguish a momentary outage from a permanent fault -- it would have to answer with
+   *       the same unclassified sentence this fallback supplies, one call deeper and less visibly.
+   *       Trade-offs: the fallback is the abend sentence rather than an authored one, which says less
+   *       than a classified failure would; that is honest, because in this arm nothing classified it.
+   */
+  const listingFailure =
+    describeListingFailure(browse.failure) ??
+    (browse.isFailed
+      ? {
+          message: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
+          severity: AUTH_SUMMARY_MESSAGE_SEVERITY,
+        }
+      : null);
   const serviceNotice: ScreenNotice | null =
     serviceMessage === null || serviceMessage.trim() === ''
       ? null
@@ -1669,10 +2754,40 @@ export function AuthSummaryScreen(): ReactElement {
   useShellSlot({
     screen: { transactionId: AUTH_SUMMARY_TRANSACTION_ID, programName: AUTH_SUMMARY_PROGRAM_NAME },
     now: paintedAt,
+    /*
+     * WHY : ⚠️ Purpose: the mapset's row-22 field is now DELEGATED, and it previously reached no visible
+     *       surface at all. `COPAU00.bms` L497 to L502 declares a `LENGTH=52` `COLOR=NEUTRAL` field at
+     *       POS=(22,12) carrying `Type 'S' to View Authorization details from the list`, and this screen
+     *       carried that string only as the selection group's `aria-label` -- so a sighted operator was
+     *       never told how to open a row, on a screen whose one purpose is opening a row. The string
+     *       itself was already verbatim; what was missing was a channel to put it on.
+     * WHY : ⚠️ Assumptions: it goes on the `information` channel and not in `message.text`, because
+     *       `MESSAGE_BAND_CHANNELS` in `ui/src/layout/MessageBand.tsx` decides that by TENSE and this
+     *       sentence is standing guidance -- it is as true before the turn as after it, so it is row
+     *       22's `INFOMSG` and never row 23's `ERRMSG`. Putting it in `message.text` would also make it
+     *       compete with the turn's outcome for a field that holds one sentence at a time, and the
+     *       outcome would overwrite the guidance on every refusal.
+     * WHY : Assumptions: no severity is named, so the slot's own default applies -- `neutral`, which
+     *       `defaultMessageBandSeverity` reads from the channel's recorded `COLOR=NEUTRAL`. That is
+     *       exactly this field's declared operand, so restating it here would add a second authority
+     *       for one measured value.
+     * WHY : Alternatives Considered: publishing it only while rows are on display. Rejected because the
+     *       reference paints it unconditionally -- the field carries an `INITIAL=` literal and is never
+     *       written by `COPAUS0C`, so it is on the glass from the first send, including the opening turn
+     *       with no account scoped. Making it conditional would withhold the instruction precisely when
+     *       an operator most needs it.
+     * WHY : ⚠️ Assumptions: the member is nested INSIDE `message` and not beside it, because that is
+     *       where `ShellSlot` declares it -- `ShellInformationSlot` deliberately carries no `mapset` of
+     *       its own, since the display width is a property of the mapset a screen stands in for and one
+     *       screen must not be able to claim two widths. Publishing it as a sibling of `message` was the
+     *       first attempt and rendered nothing at all: the shell paints the row-22 zone only from
+     *       `message.information`, so an excess property beside `message` was silently ignored.
+     */
     message: {
       text: bandNotice?.message ?? null,
       severity: bandNotice?.severity ?? AUTH_SUMMARY_MESSAGE_SEVERITY,
       mapset: AUTH_SUMMARY_MAPSET,
+      information: { text: AUTH_SUMMARY_SELECTION_PROMPT },
     },
     pfKeys: { keys: bindings, onInvoke: invoke },
   });
@@ -1701,6 +2816,120 @@ export function AuthSummaryScreen(): ReactElement {
    */
   const serviceFieldError = accountIdFieldError(browse.error);
   const fieldState: FieldValidationState | null = entryFault ?? serviceFieldError?.state ?? null;
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the refused appearance is ADOPTED from `fieldRefusalRendering` and
+   *       is no longer composed here. What stood in its place was a lone `suffix` carrying
+   *       `FIELD_ERROR_TOKENS.blankMarker` as a bare string, which was two defects at once. It gave the
+   *       marker no `BLANK_FIELD_MARKER_TEST_ID`, so the one glyph a reader cannot otherwise
+   *       distinguish from the design system's always-on required asterisk was unidentifiable in the
+   *       DOM -- the same glyph standing for "this field must be filled" and for "this field was left
+   *       blank on the turn just taken". And it applied no colour at all, so the `NOT_OK` state -- a
+   *       non-numeric entry -- was left with antd's border alone where `app/cpy/CSSETATY.cpy` L18 to
+   *       L26 moves `DFHRED` into the field's colour attribute for BOTH refused states and the
+   *       asterisk for the blank one only. The helper carries that asymmetry.
+   * WHY : Assumptions: `?? undefined` converts this screen's `null` for "no refusal" into the absence
+   *       the helper's signature declares; `exactOptionalPropertyTypes` makes the two different states
+   *       and the helper reads an absent argument as "no refusal to render".
+   */
+  const entryRefusal = fieldRefusalRendering(fieldState ?? undefined, cssVar);
+
+  const selectionCellMeasure = selectionCellStyle(cssVar);
+
+  /**
+   * Renders one row's selection cell: the one-character entry the reference's `SEL` field accepts.
+   *
+   * ⚠️ Assumptions: the cell is LABELLED for assistive technology because the terminal identified it by
+   * POSITION, and position is exactly what design gap G1 gives up. The visible heading is three
+   * characters, so the accessible name pairs it with the row's own transaction identifier -- which is
+   * the value the mapset paints unedited beside it (`TRNID01I PIC X(16)`), so a reader hearing the name
+   * and a reader seeing the row are told the same thing.
+   *
+   * ⚠️ Assumptions: `maxLength` is the mapset's declared width and not a chosen limit. `SEL0001` is
+   * `LENGTH=1`, and the terminal could hold exactly one character there -- so a two-character entry is
+   * a state the reference cannot reach, and admitting one here would let an operator type something the
+   * source's `EVALUATE` could never receive.
+   *
+   * Assumptions: the value is read from the entry map with an empty-string fallback rather than left
+   * uncontrolled, so a page turn that clears the map visibly empties every cell. An uncontrolled input
+   * would keep whatever was typed into it across the turn the reference clears.
+   * @param {PendingAuthListItem} row - The authorization the cell acts on.
+   * @returns {ReactElement} That row's one-character selection entry.
+   */
+  function renderSelectionCell(row: PendingAuthListItem): ReactElement {
+    return (
+      <Input
+        aria-label={selectionCellLabel(row.transactionId)}
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the cell gains an identifier because the browser found it had
+         *       none. DevTools raised "A form field element should have an id or name attribute" against
+         *       five nodes, which is one per row of this page, and these cells were the only controls in
+         *       the application carrying neither an `id` nor a `name`. Both sibling browse screens
+         *       already publish one per row and neither is reported, so this was the outlier.
+         * WHY : Assumptions: the accessible NAME was never the missing piece and is unchanged. A name is
+         *       what an assistive technology announces; an identifier is what makes the platform treat
+         *       the control as a real field for autofill and for a `label` association. The cell had the
+         *       first and lacked the second, so only the second is added.
+         */
+        id={selectionCellId(row.transactionId)}
+        maxLength={AUTH_SUMMARY_FIELD_WIDTHS.selection}
+        onChange={
+          /**
+           * Records the character typed beside this row, leaving every other row's entry alone.
+           * @param {object} event - The change event antd forwards.
+           * @param {object} event.target - The control the event came from.
+           * @param {string} event.target.value - The entry as it now stands.
+           * @returns {void} Nothing; the entry is recorded as a side effect.
+           */
+          (event: { target: { value: string } }): void => {
+            const { value } = event.target;
+            setSelectionEntries(
+              /**
+               * Replaces this row's entry, keyed by its sealed selector.
+               * @param {Readonly<Record<string, string>>} current - Entries so far.
+               * @returns {Readonly<Record<string, string>>} Entries with this row's replaced.
+               */
+              (current: Readonly<Record<string, string>>): Readonly<Record<string, string>> => ({
+                ...current,
+                [row.key]: value,
+              }),
+            );
+          }
+        }
+        ref={
+          /**
+           * Records this row's control so a row click can place the cursor in it.
+           * @param {InputRef | null} instance - The control instance, or `null` on unmount.
+           * @returns {void} Nothing; the node is registered, or its entry removed on unmount.
+           */
+          (instance: InputRef | null): void => {
+            const node = instance?.input ?? null;
+
+            /*
+             * WHY : Assumptions: the entry is DELETED on unmount rather than left holding `null`,
+             *       because the map outlives a page: the five rows of the page just left would
+             *       otherwise stay in it forever, and a click on a row whose sealed selector happened
+             *       to repeat would resolve to a detached node.
+             */
+            if (node === null) {
+              selectionCellRefs.current.delete(row.key);
+              return;
+            }
+
+            selectionCellRefs.current.set(row.key, node);
+          }
+        }
+        /*
+         * WHY : ⚠️ Assumptions: the measure is spread onto the DESIGN-SYSTEM CONTROL and not onto a
+         *       wrapper, because the padding custom property the expression reads resolves on
+         *       `.ant-input` and returns the empty string on an arbitrary element -- the same measured
+         *       constraint `ui/src/layout/recordLayout.ts` records for the declared-width ceiling.
+         */
+        style={selectionCellMeasure}
+        value={selectionEntries[row.key] ?? ''}
+      />
+    );
+  }
 
   return (
     <Flex vertical gap="large">
@@ -1784,12 +3013,56 @@ export function AuthSummaryScreen(): ReactElement {
            *       registered design gap **G4** -- so inventing an underline style would draw the
            *       affordance twice.
            */}
+          {/*
+           * WHY : ⚠️ Refactoring Rationale: the control now STATES that a search is outstanding, and
+           *       nothing on this path did. `browse.isLoading` reached the table's spinner alone, so
+           *       the field an operator had just submitted from carried no indication at all -- which
+           *       is what produced the three identical searches measured in a browser. `busyProps`
+           *       emits `aria-busy` only while a read is running and the empty object otherwise, which
+           *       is why it is spread unconditionally.
+           * WHY : Alternatives Considered: `disabled` on this control while the read runs, which would
+           *       be the stronger signal. Rejected because it would forbid the correction the guard in
+           *       `submitEntry` deliberately allows -- retyping a different account identifier while
+           *       the first read is still outstanding -- and an operator who mistyped would have to
+           *       wait for a read they no longer want.
+           * WHY : ⚠️ Refactoring Rationale: this control is now PAIRED with `busyAnnouncement`, and the
+           *       note that stood here rejecting the pairing is withdrawn. It was accurate when written
+           *       -- "that helper requires a sentence and the baseline has none to carry" -- and it is
+           *       no longer true of the codebase: `ui/src/messages/messages.ts` now declares
+           *       `REQUEST_IN_PROGRESS` as an AUTHORED operator sentence, registered and width-checked
+           *       beside the transcribed catalog rather than mixed into it. `aria-busy` states the fact
+           *       to a control an operator has already found; the announcement states it to one who is
+           *       waiting and is looking nowhere in particular, which is the case the measured
+           *       double-submit was in. Rule T8 is not breached because the sentence makes no claim to
+           *       be the reference's: the terminal inhibited the keyboard and said nothing, so there is
+           *       no mainframe string to be faithful to and the authored one is declared as authored.
+           */}
+          {/*
+           * WHY : ⚠️ Refactoring Rationale: the control is sized from the width its own PICTURE clause
+           *       declares, where it used to take the form's full measure. The consequence was not
+           *       cosmetic: the blank-field marker this control raises is an antd `suffix`, so it
+           *       renders at the control's RIGHT edge -- at a wide viewport that put the asterisk
+           *       reporting an empty field the better part of the viewport away from the empty field,
+           *       where an operator reading the entry position never looks. Sizing the control to its
+           *       eleven characters brings the marker back beside the value it describes, which is
+           *       where `app/cpy/CSSETATY.cpy` L24 puts it -- the copybook moves the asterisk INTO the
+           *       field, so adjacency is part of the mechanism rather than a preference.
+           * WHY : Assumptions: the width style is spread FIRST and the refusal style second, so a
+           *       refusal's colour can never be overwritten by sizing. The two carry disjoint
+           *       properties today -- measure against colour -- and the ordering keeps that
+           *       independence if either helper gains a property later.
+           * WHY : Assumptions: it is spread onto the `Input` itself rather than onto a wrapper, because
+           *       the measure is expressed in the design system's own horizontal padding token and
+           *       that custom property resolves on `.ant-input`; on a plain wrapper it resolves to
+           *       nothing and the whole `calc` is discarded.
+           */}
           <Input
             {...fieldAriaProps(ACCOUNT_ID_INPUT_ID, {
               invalid: fieldState !== null,
               hasError: serviceFieldError !== null,
               hasHint: false,
             })}
+            {...busyProps(browse.isLoading)}
             aria-labelledby={ACCOUNT_ID_LABEL_ID}
             id={ACCOUNT_ID_INPUT_ID}
             inputMode="numeric"
@@ -1806,17 +3079,52 @@ export function AuthSummaryScreen(): ReactElement {
                 setAccountIdEntry(event.target.value);
               }
             }
-            suffix={fieldState === 'BLANK' ? FIELD_ERROR_TOKENS.blankMarker : undefined}
+            {...(entryRefusal.suffix === undefined ? {} : { suffix: entryRefusal.suffix })}
+            /*
+             * WHY : ⚠️ Refactoring Rationale: the marker slot is declared to the measure, and only on the
+             *       turn the marker is rendered. With a suffix present the design system sizes the affix
+             *       WRAPPER, whose space the value and the slot then share, so a maximum computed for the
+             *       value alone leaves the value short by whatever the slot takes -- measured on a sibling
+             *       screen's two-character field as a record key that rendered as one glyph and a sliver.
+             *       Assumptions: the allowance is CONDITIONAL on the very test that spreads the suffix
+             *       above, so an accepted entry keeps exactly the eleven-column ceiling it has always had.
+             */
+            style={{
+              ...copybookFieldWidthStyle(
+                AUTH_SUMMARY_FIELD_WIDTHS.accountId,
+                cssVar,
+                entryRefusal.suffix === undefined ? 0 : BLANK_FIELD_MARKER_CHARACTERS,
+              ),
+              ...entryRefusal.style,
+            }}
             value={accountIdEntry}
           />
         </Form.Item>
       </Form>
       {/*
+       * WHY : ⚠️ Purpose: the outstanding read is ANNOUNCED, and nothing announced it. The measured
+       *       defect is not that the screen was slow -- it is that an operator with no acknowledgement
+       *       pressed Enter again, and again, and the request count went from one to seven. The guard in
+       *       `submitEntry` now collapses those presses, and this is the other half of the same fix: a
+       *       statement that the turn was received, so there is nothing to press again for.
+       * WHY : ⚠️ Assumptions: it is mounted UNCONDITIONALLY and carries the empty string while idle,
+       *       which is load-bearing rather than tidy. A live region has to exist before its contents
+       *       change for a screen reader to announce the change; mounting the element together with the
+       *       sentence would insert both at once and the announcement would be missed on exactly the
+       *       occasion it is for.
+       * WHY : Assumptions: it is driven by `browse.isLoading` and not by {@link searchIsOutstanding},
+       *       so a paging step announces itself too -- both keys own a read, and an operator waiting on
+       *       F8 is in the same position as one waiting on Enter. The ref that scopes the key's own
+       *       decline is deliberately not read here: a ref changing schedules no render, so a paint
+       *       driven from it would announce whatever the previous render happened to see.
+       */}
+      {busyAnnouncement(browse.isLoading ? REQUEST_IN_PROGRESS : undefined)}
+      {/*
        * WHY : Assumptions: the panel is rendered only once a summary has arrived, because the source
        *       has nothing to paint before then either -- `GATHER-DETAILS` reads the account, customer
        *       and summary segment only when an account identifier is present (L349 to L357), and the
        *       map's own initial state is `LOW-VALUES` moved over the whole output area at L195. An
-       *       empty bordered panel of fourteen blank cells would claim the account had been read and
+       *       empty bordered panel of twelve blank cells would claim the account had been read and
        *       had no values, which is a different statement from not having been read.
        * WHY : Assumptions: `colon={false}` for the same reason as the entry label -- all twelve
        *       labelled entries take their colon from the mapset's own `INITIAL=` literal, including
@@ -1841,38 +3149,33 @@ export function AuthSummaryScreen(): ReactElement {
        *       total-page count the envelope cannot supply.
        */}
       {/*
-       * WHY : ⚠️ Refactoring Rationale: the table is wrapped in ONE `Radio.Group` that owns the selection
-       *       value and the change handler, where each row used to hold an independent `Radio` with its
-       *       own `checked` and handler. antd's group publishes itself through context, so the controls
-       *       stay exactly where the mapset paints them -- one per row in the leading column -- while
-       *       becoming a single set: one tab stop, arrow keys moving between rows, and the set announced
-       *       as a group named by the source's own row-22 prompt. That prompt is the natural name because
-       *       it is the sentence the terminal paints to say what selecting a row does.
-       * WHY : Alternatives Considered: `Table`'s built-in `rowSelection` with `type: 'radio'`, which
-       *       provides the same semantics for free. Rejected because it renders its own leading selection
-       *       column with its own heading, and the mapset declares that column and its `'Sel'` heading
-       *       itself at `COPAU00.bms` L197 to L201 -- adopting antd's would either duplicate the column
-       *       or discard the declared heading, and its control is not addressable by the row's sealed
-       *       selector without re-deriving the key.
-       * WHY : Assumptions: the group's `value` is `null` when nothing is chosen and antd accepts that as
-       *       "no member checked", which is the state a freshly painted page is in -- `INITIALIZE-AUTH-DATA`
-       *       protects all five selectors before a page is built.
+       * WHY : ⚠️ Refactoring Rationale: the `Radio.Group` that used to wrap this table is GONE, and its
+       *       reasoning is answered rather than dropped. It argued that the five selectors are one set
+       *       and that a group gives them one tab stop with arrow traversal, which is true of a radio
+       *       group and was a genuine improvement over five independent radios. What it could not do is
+       *       obey the screen's own instruction: `COPAU00.bms` L497 paints `Type 'S' to View
+       *       Authorization details from the list` and L277 to L282 declares each selector
+       *       `ATTRB=(FSET,NORM,UNPROT) ... LENGTH=1` -- an unprotected one-character entry field. A
+       *       radio asked the operator to click while the sentence told them to type, and it made the
+       *       source's own `'Invalid selection. Valid value is S'` arm unreachable because a radio can
+       *       only ever supply the accepted character. Single-select-first-wins is preserved where the
+       *       source puts it, in {@link reduceAuthRowSelection}, rather than in the control.
+       * WHY : ⚠️ Trade-offs: the keyboard traversal changes from one tab stop with arrow keys to five tab
+       *       stops, one per row, and that is the more faithful of the two rather than a cost. A 3270
+       *       moves the cursor between UNPROTECTED FIELDS on the tab key, and these five are unprotected
+       *       fields -- so five stops is what the terminal had. Each stop is named `Sel <transaction
+       *       id>`, so what it announces identifies the row, and `ui/src/screens/userList/index.tsx`
+       *       reaches its own ten `SEL` cells exactly this way.
+       * WHY : Alternatives Considered: keeping the radios and rewriting the row-22 sentence to say
+       *       "choose a row". Rejected outright: that sentence is a mapset `INITIAL=` literal and Rule
+       *       T8 carries user-visible strings with a mainframe source VERBATIM, so making the control
+       *       agree with the sentence was the only direction available.
+       * WHY : Alternatives Considered: `Table`'s built-in `rowSelection`. Rejected for the reason it was
+       *       rejected before -- it renders its own leading column with its own heading, and the mapset
+       *       declares that column and its `'Sel'` heading itself at L197 to L201 -- and now for a
+       *       second: it carries no character, so it cannot express what a `LENGTH=1` field holds.
        */}
-      <Radio.Group
-        aria-label={AUTH_SUMMARY_SELECTION_PROMPT}
-        onChange={
-          /**
-           * Records the row whose control the operator chose.
-           * @param {RadioChangeEvent} event - The change event antd forwards; its value is the row's
-           *   sealed selector, because that is what each member control carries.
-           * @returns {void} Nothing; the selection is recorded as a side effect.
-           */
-          (event: RadioChangeEvent) => {
-            setSelectedKey(String(event.target.value));
-          }
-        }
-        value={selectedKey}
-      >
+      <>
         {/*
          * WHY : ⚠️ Refactoring Rationale: the table scrolls horizontally and its two identifying columns
          *       are pinned, where it had no narrow-screen policy at all. Eight columns whose contents are
@@ -1894,10 +3197,49 @@ export function AuthSummaryScreen(): ReactElement {
          *       reading order the mapset paints and that design gap G1 commits to preserving, and because
          *       it would mean two renderings of one table to keep in step.
          */}
+        {/*
+         * WHY : ⚠️ Purpose: `onRow` gives each row the affordance it did not have. Browser validation
+         *       measured `cursor: auto` on these rows both at rest and hovered, on a table whose whole
+         *       purpose is choosing a row -- so nothing about a row said it could be acted on, and a
+         *       reviewer's only clue was the small control in its leading column.
+         * WHY : ⚠️ Assumptions: a row click places the CURSOR in that row's selection cell and types
+         *       nothing into it. The reference separates choosing a row from acting on it and the
+         *       separation is load-bearing: `PROCESS-ENTER-KEY` reads the selection characters and only
+         *       then transfers control (`COPAUS0C.cbl` L288 to L330), so a mis-aimed click costs a
+         *       cursor move and never a navigation. Writing `'S'` into the cell on a click would put the
+         *       operator one Enter away from opening a record they did not choose.
+         * WHY : ⚠️ Refactoring Rationale: this used to SELECT the clicked row, which was available while
+         *       the control was a radio and is not now -- a one-character field holds a character, and
+         *       the only character a click could supply is the one that opens the record. Moving the
+         *       cursor is what the pointer can honestly do for a typed field, and it is what
+         *       `ui/src/screens/userList/index.tsx` does for the identical cell.
+         * WHY : ⚠️ Assumptions: no `tabIndex` is put on the row, and its absence is deliberate rather
+         *       than an omission. Each row now carries a focusable, named control in its leading column,
+         *       so the keyboard route through the rows exists -- five tab stops, each announcing `Sel`
+         *       with the row's own transaction identifier -- and a focusable row would double every one
+         *       of those stops with an element that has no accessible name.
+         */}
         <Table<PendingAuthListItem>
-          columns={buildPendingAuthColumns(cssVar)}
+          columns={buildPendingAuthColumns(cssVar, renderSelectionCell)}
           dataSource={browse.items}
           loading={browse.isLoading}
+          onRow={
+            /**
+             * Makes a row's whole area reach that row's selection cell, and say so under the pointer.
+             * @param {PendingAuthListItem} row - The authorization the row lists.
+             * @returns {{ onClick: () => void; style: CSSProperties }} The row's handler and style.
+             */
+            (row: PendingAuthListItem): { onClick: () => void; style: CSSProperties } => ({
+              /**
+               * Places the cursor in the clicked row's selection cell, changing no value.
+               * @returns {void} Nothing; focus moves as a side effect.
+               */
+              onClick: (): void => {
+                selectionCellRefs.current.get(row.key)?.focus();
+              },
+              style: ROW_AFFORDANCE_STYLE,
+            })
+          }
           pagination={false}
           scroll={AUTH_SUMMARY_TABLE_SCROLL}
           rowKey={
@@ -1914,23 +3256,25 @@ export function AuthSummaryScreen(): ReactElement {
             (row: PendingAuthListItem): string => row.key
           }
         />
-      </Radio.Group>
+      </>
       {/*
-       * Assumptions: the prompt is painted `ATTRB=(ASKIP,BRT)` at L497, and brightness is carried as
-       * WEIGHT rather than as a brighter colour -- the measured resolution for all 37 bright fields in
-       * the base mapset population -- so `strong` supplies `fontWeightStrong` while `COLOR=NEUTRAL`
-       * keeps its own `colorTextSecondary`. Substituting a colour would overwrite the one the field
-       * declares.
-       */}
-      <Typography.Text strong style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] }}>
-        {AUTH_SUMMARY_SELECTION_PROMPT}
-      </Typography.Text>
-      {/*
-       * Refactoring Rationale: the row-23 message line and the row-24 legend that used to close this
-       * body are now delegated to the shell in the `useShellSlot` call above, so the last thing the
-       * body renders is the mapset's row-22 selection prompt. The rendered order is unchanged - the
-       * shell paints both lines immediately below the body region - and what is removed is the
-       * duplication that mounting the shell would otherwise have produced.
+       * WHY : ⚠️ Refactoring Rationale: the mapset's row-22 prompt is no longer COMPOSED here. It used
+       *       to close the body as a `Typography.Text strong`, and the consequence is the one a
+       *       cross-screen review measured on a sibling: a message line composed inside `<main>` renders
+       *       below the fold at every width, some 200 pixels away from the shell's own reserved band,
+       *       so the terminal's two adjacent rows became two zones at opposite ends of a scroll. The
+       *       string is now delegated on `message.information` in the `useShellSlot` call above, which
+       *       puts it in the row-22 band beside the row-23 one exactly as the mapset paints them.
+       * WHY : Assumptions: nothing about its appearance is lost by delegating. The field is painted
+       *       `ATTRB=(ASKIP,BRT) COLOR=NEUTRAL` at `COPAU00.bms` L497 to L502, and the band's own
+       *       `information` channel resolves to `colorTextSecondary` with strong weight -- brightness
+       *       carried as WEIGHT, the measured resolution for all 37 bright fields in the base mapset
+       *       population -- so the delegated rendering reproduces both operands without this screen
+       *       naming either.
+       * WHY : Assumptions: the string is still this screen's `aria-label` on the selection group, and
+       *       that is not a duplicate of the band. One names a control for assistive technology, the
+       *       other is a painted field; `src/screens/authSummary/authSummary.test.tsx` L572 finds the
+       *       group by that name, and removing it would break a contract another suite holds.
        */}
       {/*
        * Assumptions: no `legendColor` is passed, because this mapset paints its row-24 legend

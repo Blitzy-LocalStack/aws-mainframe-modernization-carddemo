@@ -231,11 +231,19 @@ async function reportsAFilteredMissAsAnInputError(): Promise<void> {
   await applyTypeFilter(operator, '99');
 
   /*
-   * Assumptions: the sentence is expected TWICE -- once in the message band and once beneath the filter
-   * control it marks -- because L1251-L1265 both raises the sentence and marks the supplied filter. A
-   * single-element query would fail on the duplicate rather than on the behaviour.
+   * Assumptions: the sentence is expected THREE times -- in the message band, beneath the filter control
+   * it marks, and in the empty grid's own placeholder -- because L1251-L1265 both raises the sentence and
+   * marks the supplied filter, and the grid it leaves empty now names the reason rather than showing the
+   * design system's `No data`. A single-element query would fail on the duplicates rather than on the
+   * behaviour.
+   *
+   * ⚠️ Refactoring Rationale: the expected count was TWO and the third occurrence is the empty-state
+   * correction, not a leak. Measured on a refused visit: row 23 carried the reason and the grid body
+   * underneath it read `No data`, so the screen said "this filter matched nothing" and "this list is
+   * empty" at once. Counting rather than asserting presence is what makes the third occurrence a
+   * deliberate change here instead of an unnoticed one.
    */
-  expect(await screen.findAllByText(FILTER_REFUSAL)).toHaveLength(2);
+  expect(await screen.findAllByText(FILTER_REFUSAL)).toHaveLength(3);
   expect(screen.queryByText(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED)).not.toBeInTheDocument();
 }
 
@@ -271,7 +279,7 @@ async function marksBothSuppliedFilters(): Promise<void> {
   );
   await applyTypeFilter(operator, '99');
 
-  expect(await screen.findAllByText(FILTER_REFUSAL)).toHaveLength(3);
+  expect(await screen.findAllByText(FILTER_REFUSAL)).toHaveLength(4);
   expect(screen.queryByText(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED)).not.toBeInTheDocument();
 }
 
@@ -302,7 +310,13 @@ async function stillReportsAGenuineFailureAsAnAbend(): Promise<void> {
 
   await applyTypeFilter(operator, '99');
 
-  expect(await screen.findByText(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED)).toBeInTheDocument();
+  /*
+   * ⚠️ Assumptions: the abend sentence is expected TWICE -- on the outcome line and in the empty grid's
+   * placeholder -- and the count is asserted rather than mere presence so the empty state cannot revert
+   * to claiming emptiness about a read that failed. The refusal sentence is still asserted absent, which
+   * is what this control case exists for.
+   */
+  expect(await screen.findAllByText(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED)).toHaveLength(2);
   expect(screen.queryByText(FILTER_REFUSAL)).not.toBeInTheDocument();
 }
 
@@ -319,7 +333,12 @@ async function anUnfilteredEmptyReadKeepsItsOwnSentence(): Promise<void> {
   vi.mocked(listTransactionTypes).mockResolvedValue(EMPTY_PAGE);
   render(renderScreen());
 
-  expect(await screen.findByText(LIST_STATUS.WS_MESG_NO_RECORDS_FOUND.text)).toBeInTheDocument();
+  /*
+   * ⚠️ Assumptions: two occurrences again -- the outcome line and the grid placeholder -- and the
+   * distinctness this case is named for is carried by the two `queryByText` assertions below, neither of
+   * which may match anywhere on the glass.
+   */
+  expect(await screen.findAllByText(LIST_STATUS.WS_MESG_NO_RECORDS_FOUND.text)).toHaveLength(2);
   expect(screen.queryByText(FILTER_REFUSAL)).not.toBeInTheDocument();
   expect(screen.queryByText(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED)).not.toBeInTheDocument();
 }

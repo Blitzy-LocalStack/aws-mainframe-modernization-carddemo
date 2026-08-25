@@ -74,11 +74,15 @@ import { getAdminCardDetail, getCard, lookupCard } from '../api/cards';
 import type { CardDetail } from '../api/types';
 import { MASKED_CARD_NUMBER } from '../api/masking';
 import { CARDDEMO_ADMIN_GROUP, CARDDEMO_USER_GROUP } from '../hooks/useAuth';
+import { APP_SHELL_TEST_ID, SHELL_PINNED_ZONE_TEST_ID } from '../layout/AppShell';
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, PRIMARY_ACTION_AIDS } from '../layout/PfKeyBar';
 import {
   ACCESS_DENIED_NOT_AUTHORIZED,
+  CARD_DETAIL_INVALID_LINK_GUIDANCE,
   INVALID_KEY_PRESSED,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   SHARED_MESSAGE_SOURCES,
   STATUS_MESSAGES,
@@ -90,7 +94,7 @@ import {
   isCardNumber,
   isCardSelector,
 } from '../routes/cards';
-import { FIELD_ERROR_TOKENS } from '../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS } from '../theme/tokens';
 import {
   apiError,
   expectMaxLength,
@@ -101,7 +105,8 @@ import {
   seedSession,
 } from './setup';
 import type { HarnessRenderResult } from './setup';
-import { CardDetailScreen } from '../screens/cardDetail/index';
+import { KEYLESS_ENTRY_ROUTES } from '../router';
+import { CARD_DETAIL_TITLE, CardDetailScreen } from '../screens/cardDetail/index';
 
 /*
  * WHY : Assumptions: the runner APIs above are IMPORTED by name even though
@@ -265,8 +270,24 @@ const A_STORED_EXPIRY = '2029-01-31';
 /** The month and year the two declared expiry parts render, `MM/YYYY`, with the stored day dropped. */
 const THE_RENDERED_EXPIRY = '01/2029';
 
-/** The five value labels the mapset paints down its body, in the order it paints them. */
-const RECORD_LABEL_COUNT = 5;
+/**
+ * How many value labels the mapset paints in its RECORD zone.
+ *
+ * ⚠️ Refactoring Rationale: three, and it was five. The two it lost are the account number and the card
+ * number, which the record view rendered a second time beside the criteria controls that already hold
+ * them -- a browser measured each identifier twice on one screen and in two different typefaces. The
+ * mapset declares one field per identifier and both are criteria fields: `ACCTSID` at `POS=(7,45)`
+ * (`app/bms/COCRDSL.bms` L84-L88) and `CARDSID` at `POS=(8,45)` (L96-L100). Its record zone declares
+ * `CRDNAME` at `POS=(11,25)` (L107-L109), `CRDSTCD` at `POS=(13,25)` (L116-L119) and the
+ * `EXPMON`/`EXPYEAR` pair at `POS=(15,25)` and `POS=(15,30)` (L126-L136), rendered as one expiry value
+ * -- three, and no more. The program agrees: `1200-SETUP-SCREEN-VARS` moves the retrieved keys into the
+ * two criteria fields at `app/cbl/COCRDSLC.cbl` L463 and L471 and only the other four values into the
+ * record fields at L475-L484.
+ *
+ * Assumptions: the count is kept as a named constant rather than inlined, because two cases assert it
+ * and a fourth cell appearing in either is the same regression.
+ */
+const RECORD_LABEL_COUNT = 3;
 
 /** How many controls the mapset leaves unprotected: `ACCTSID` at L84 and `CARDSID` at L96 and no others. */
 const UNPROTECTED_FIELD_COUNT = 2;
@@ -370,10 +391,18 @@ async function renderTheRecordUnframed(record: CardDetail = aCard()): Promise<Ha
 /**
  * Mounts the search arrival WITHOUT the application frame around it.
  *
- * Assumptions: the unframed arrangement is used for the same reason it is above, and the information
- * line remains observable because the SCREEN paints that band itself -- `INFOMSG` at `POS=(20,25)` sits
- * inside the screen's own field area (`app/bms/COCRDSL.bms` L139-L143), unlike the row-23 error line it
- * delegates.
+ * Assumptions: the unframed arrangement is used for the same reason it is above -- these cases assert
+ * on the screen's own controls and never on a delegated zone, so mounting the frame would double the
+ * tree for nothing.
+ *
+ * ⚠️ Refactoring Rationale: what this helper AWAITS is the screen's own controls, where it used to await
+ * the row-20 information band. That band is no longer this screen's to paint: it is published through
+ * the frame's row-22 channel, because a band composed inside the scrolling body is painted underneath
+ * the frame's sticky pinned zone and can be occluded outright -- the measurement is recorded at the
+ * publication in `ui/src/screens/cardDetail/index.tsx`. An unframed arrangement therefore has no
+ * renderer for it, and waiting on it here would hang every case that takes this arrangement. The
+ * controls are the right thing to wait for regardless: they are what these cases go on to assert
+ * against, so the wait now settles exactly what the case needs.
  * @returns {Promise<HarnessRenderResult>} The rendered tree and the operator that drives it.
  */
 async function renderTheSearchArrivalUnframed(): Promise<HarnessRenderResult> {
@@ -384,7 +413,7 @@ async function renderTheSearchArrivalUnframed(): Promise<HarnessRenderResult> {
      */
     async (): Promise<HarnessRenderResult> => await renderWithProviders(<CardDetailScreen />),
   );
-  await screen.findByTestId(INFORMATION_BAND_TEST_ID);
+  await screen.findAllByRole('textbox');
   return rendered;
 }
 
@@ -412,6 +441,27 @@ async function renderTheSearchArrival(): Promise<HarnessRenderResult> {
   );
   await screen.findByTestId(INFORMATION_BAND_TEST_ID);
   return rendered;
+}
+
+/**
+ * Waits until the retrieved record is on the glass.
+ *
+ * ⚠️ Refactoring Rationale: the anchor is the EMBOSSED NAME, and every caller of this helper used to
+ * wait on the masked card rendering instead. That rendering is no longer text the record view paints:
+ * the record's two identity rows are deleted, because the mapset declares one field per identifier and
+ * both are the criteria controls (`app/bms/COCRDSL.bms` L84-L88 and L96-L100), so the masked value now
+ * lives ONLY in a control's `value` -- which `getByText` cannot see, since an input's value is not part
+ * of its text content. The embossed name is the natural replacement: `CRDNAME` at `POS=(11,25)`
+ * (L107-L109) is the first field of the record zone and is rendered as text, so its presence means the
+ * read resolved and the record view mounted.
+ *
+ * Assumptions: this is a wait and not an assertion, so it is expressed through `findByText` rather than
+ * a `waitFor` wrapping an expectation -- the query throws with the document attached when the record
+ * never arrives, which is the diagnostic a caller wants.
+ * @returns {Promise<void>} Resolves once the record view has painted.
+ */
+async function waitForTheRecordView(): Promise<void> {
+  await screen.findByText(A_NAME_AT_THE_DECLARED_WIDTH);
 }
 
 /**
@@ -473,6 +523,27 @@ function legendControlNames(): readonly string[] {
  */
 function nameOfControl(control: HTMLElement): string {
   return (control.textContent ?? '').trim();
+}
+
+/**
+ * Reads one input control's value as the string it is.
+ *
+ * ⚠️ Assumptions: the value is read WITHOUT trimming, unlike {@link nameOfControl}, because the two
+ * identifiers this is used on are held at fixed declared widths -- `ACCTSIDI PIC X(11)` and `CARDSIDI
+ * PIC X(16)` (`app/cpy-bms/COCRDSL.CPY` L60 and L66) -- and a width assertion over a trimmed value
+ * could not tell a short value from a padded one.
+ *
+ * Assumptions: the element is narrowed rather than cast, so a query that returned something other than
+ * an input fails here with a named reason instead of silently reading `undefined`.
+ * @param {HTMLElement} control - One rendered input control.
+ * @returns {string} Its value, exactly as the control holds it.
+ * @throws {Error} If the element is not an input.
+ */
+function valueOfControl(control: HTMLElement): string {
+  if (!(control instanceof HTMLInputElement)) {
+    throw new Error('the element queried is not an input, so it carries no value');
+  }
+  return control.value;
 }
 
 /**
@@ -689,7 +760,14 @@ async function putsTheCursorOnTheOneFieldTheMapsetMarks(): Promise<void> {
 async function paintsTheRecordThroughTheDesignSystemsDescriptionList(): Promise<void> {
   await renderTheRecordUnframed();
 
-  const record = await screen.findByText(A_MASKED_RENDERING);
+  /*
+   * WHY : Refactoring Rationale: the list is reached through the EMBOSSED NAME, where it was reached
+   *       through the masked card rendering. The record's two identity rows are deleted -- the mapset
+   *       declares one field per identifier and both are the criteria controls -- so the masked value is
+   *       no longer inside the description list to climb from. The name is, and it is the first field of
+   *       the record zone (`CRDNAME` at `app/bms/COCRDSL.bms` L107-L109).
+   */
+  const record = await screen.findByText(A_NAME_AT_THE_DECLARED_WIDTH);
   const list = record.closest('.ant-descriptions');
   expect(list).not.toBeNull();
   // WHY : Assumptions: the bordered variant is asserted through the class the design system emits for
@@ -697,10 +775,11 @@ async function paintsTheRecordThroughTheDesignSystemsDescriptionList(): Promise<
   //       part of the target composition for a record view, and the border is what carries the cell
   //       separation the terminal got from the grid itself.
   expect(list?.classList.contains('ant-descriptions-bordered')).toBe(true);
-  // WHY : Assumptions: five label cells, because the mapset paints five value fields down its body --
-  //       `ACCTSID` (L84), `CARDSID` (L96), `CRDNAME` (L107), `CRDSTCD` (L116) and the `EXPMON`/
-  //       `EXPYEAR` pair (L126 and L133) rendered as one expiry value. A sixth would be a field the
-  //       terminal did not paint.
+  // WHY : ⚠️ Assumptions: three label cells, because the mapset's RECORD zone paints three value fields
+  //       -- `CRDNAME` (L107), `CRDSTCD` (L116) and the `EXPMON`/`EXPYEAR` pair (L126 and L133)
+  //       rendered as one expiry value. The two identifiers are painted by the criteria controls above
+  //       the record zone, `ACCTSID` (L84) and `CARDSID` (L96), and a fourth cell here would be either
+  //       a field the terminal did not paint or a second rendering of one it did.
   expect(recordLabelCells()).toHaveLength(RECORD_LABEL_COUNT);
 }
 
@@ -783,16 +862,28 @@ async function paintsTheNameOnCardAtItsDeclaredWidth(): Promise<void> {
  */
 async function keepsEveryIdentifierAsTextRatherThanANumber(): Promise<void> {
   await renderTheRecordUnframed();
+  await waitForTheRecordView();
 
-  const account = await screen.findByText(AN_ACCOUNT_NUMBER);
-  // WHY : Assumptions: the rendered text is byte-identical to the stored value, leading zeros
+  /*
+   * WHY : ⚠️ Refactoring Rationale: both identifiers are read from the CRITERIA CONTROLS' values, where
+   *       they were read as rendered text out of the record view. The record's two identity rows are
+   *       deleted, because the mapset declares one field per identifier and both are these controls --
+   *       `ACCTSID` at `app/bms/COCRDSL.bms` L84-L88 and `CARDSID` at L96-L100 -- and the program moves
+   *       the retrieved keys INTO them (`app/cbl/COCRDSLC.cbl` L463 and L471). So the value is now in a
+   *       control's `value` rather than in a node's text, and this case follows it there. What it
+   *       asserts is unchanged, and the property it guards is if anything better exposed: a control's
+   *       value is a string or it is nothing, so a numeric coercion upstream shows up here as a lost
+   *       leading zero exactly as it did before.
+   */
+  const { account, card } = searchFields();
+  // WHY : Assumptions: the rendered value is byte-identical to the stored one, leading zeros
   //       included, because `app/cpy/CVCRD01Y.cpy` declares the identifier as `PIC X(11)` at L34 and
   //       redefines it numerically at L36 -- characters on the wire, a number only inside arithmetic.
-  expect(nameOfControl(account)).toBe(AN_ACCOUNT_NUMBER);
-  expect(nameOfControl(account)).toHaveLength(DECLARED_WIDTHS.accountSearch);
+  expect(account).toHaveValue(AN_ACCOUNT_NUMBER);
+  expect(valueOfControl(account)).toHaveLength(DECLARED_WIDTHS.accountSearch);
 
-  const rendering = await screen.findByText(A_MASKED_RENDERING);
-  expect(nameOfControl(rendering)).toHaveLength(DECLARED_WIDTHS.cardSearch);
+  expect(card).toHaveValue(A_MASKED_RENDERING);
+  expect(valueOfControl(card)).toHaveLength(DECLARED_WIDTHS.cardSearch);
 }
 
 /**
@@ -818,6 +909,172 @@ async function publishesItsOwnTransactionAndProgramIdentity(): Promise<void> {
   //       systems can still name the screen they are on.
   const program = await screen.findByText('COCRDSLC');
   expect(nameOfControl(program)).toHaveLength(DECLARED_WIDTHS.programName);
+}
+
+/**
+ * The row-20 information line is painted ONCE, in the frame's pinned zone and never in the body.
+ *
+ * ⚠️ Purpose: hold the PLACEMENT of that line, not merely its text. The frame pins the zone carrying
+ * rows 22, 23 and 24 with `position: sticky` and `inset-block-end: 0` (`ui/src/layout/AppShell.tsx`
+ * L1324-L1332), so a band this screen composed inside its own scrolling body would be painted
+ * UNDERNEATH that zone: on the sibling card-update screen a browser measured exactly that -- the band
+ * at rect 775.67-815.67 inside `main` against a pinned zone spanning 764-860, with
+ * `document.elementFromPoint(459, 796)` returning an element the band did not contain -- so the
+ * sentence was unreadable until the operator scrolled. The reference cannot express that state at all:
+ * `INFOMSG` is at `POS=(20,25)` and `ERRMSG` at `POS=(23,1)` on a 24-row display that does not scroll
+ * (`app/bms/COCRDSL.bms` L139-L148).
+ *
+ * ⚠️ Assumptions: three things are asserted together and each one fails a different regression. Exactly
+ * ONE band, because the mapset declares one such field and a screen that kept composing its own
+ * alongside the published one would paint two. Containment by the pinned zone, because that is what
+ * puts the line above the fold. And `closest('main')` being null, because that is what proves the
+ * screen is not painting a second copy inside the scrolling region -- containment alone would still
+ * pass if a duplicate existed elsewhere, and the count alone would still pass if the single band were
+ * the one in the body.
+ *
+ * Assumptions: geometry is NOT asserted, because jsdom computes no layout and answers every rectangle
+ * as zero. What is asserted is the structure that makes the frame's own pinning reach this line.
+ * @returns {Promise<void>} Resolves once the band's placement has been established.
+ */
+async function paintsTheInformationLineInTheFramesPinnedZone(): Promise<void> {
+  await renderAtACardAddress();
+
+  const bands = screen.getAllByTestId(INFORMATION_BAND_TEST_ID);
+  expect(bands, 'row 20 is one field, so one band may paint it').toHaveLength(1);
+  const [band] = bands;
+  const zone = screen.getByTestId(SHELL_PINNED_ZONE_TEST_ID);
+  expect(zone).toContainElement(band ?? null);
+  expect(
+    band?.closest('main'),
+    'a row-22 band inside the scrolling body is occluded by the pinned zone above it',
+  ).toBeNull();
+}
+
+/**
+ * The shade a control's value must NOT be painted in when the value is a real record field.
+ *
+ * ⚠️ Assumptions: this token name is written here rather than imported, because
+ * `ui/src/theme/tokens.ts` publishes no constant for it -- and that absence is the point. Nothing in
+ * this application paints anything in the disabled text shade DELIBERATELY; it is the design system's
+ * own default for a control that refuses input, and it arrived on these two fields as a side effect of
+ * marking them protected. A name is not a design value, so writing it costs the file no literal, and
+ * naming it is what lets a case assert the shade is gone rather than merely that some other shade is
+ * present.
+ */
+const DISABLED_TEXT_TOKEN = 'colorTextDisabled';
+
+/**
+ * Converts a design-system token name to the hyphenated fragment its custom property carries.
+ *
+ * ⚠️ Assumptions: a DIGIT run is separated from the letters before it as well as each word boundary,
+ * because the design system hyphenates both -- a palette token named `red7` reaches the DOM as
+ * `--ant-red-7`. No token this file names carries a digit today, and the boundary is kept anyway so a
+ * later caller cannot get a false negative from the omission.
+ *
+ * Alternatives Considered: importing this from the sibling suite that already derives it,
+ * `ui/src/test/accountView.test.tsx`. Rejected because importing a module that registers cases would
+ * run that suite inside this file's worker, so the two-line derivation is repeated instead.
+ * @param {string} tokenName - The token name as `ui/src/theme/tokens.ts` publishes it.
+ * @returns {string} The kebab-cased fragment the custom property carries.
+ */
+function customPropertyFragmentFor(tokenName: string): string {
+  return tokenName
+    .replace(/([a-z0-9])([A-Z])/gu, '$1-$2')
+    .replace(/([a-zA-Z])([0-9])/gu, '$1-$2')
+    .toLowerCase();
+}
+
+/**
+ * Converts a design-system token name to the whole custom-property reference it resolves to.
+ *
+ * Assumptions: the COMPLETE reference is built, parenthesis included, because one token name is a
+ * prefix of another -- `colorText` against `colorTextDisabled` and `colorTextSecondary` -- so a
+ * containment check on the shorter fragment would pass against an element painted in a longer one.
+ * That is exactly the pair this file has to tell apart.
+ * @param {string} tokenName - The token name as `ui/src/theme/tokens.ts` publishes it.
+ * @returns {string} The `var(...)` reference the design system emits for that token.
+ */
+function customPropertyReferenceFor(tokenName: string): string {
+  return `var(--ant-${customPropertyFragmentFor(tokenName)})`;
+}
+
+/**
+ * A protected search field paints its value at the same intensity the editable arrival does.
+ *
+ * Purpose
+ * -------
+ * The regression guard for a measured defect: on the addressed arrival both search fields render
+ * their value in the design system's DISABLED text shade, which a browser measured at
+ * `rgba(0,0,0,0.25)` over the `rgba(0,0,0,0.04)` disabled surface -- so the account number and the
+ * masked card rendering, which are real record values, read exactly like placeholder text.
+ *
+ * ⚠️ Assumptions: the expected colour is the reference's OWN and is asserted on both arrivals, which
+ * is what makes this case about fidelity rather than about legibility. `1300-SETUP-SCREEN-ATTRS`
+ * protects the two fields when the caller was the browse -- `MOVE DFHBMPRF TO ACCTSIDA / CARDSIDA` at
+ * `app/cbl/COCRDSLC.cbl` L507-L508 -- and its "SETUP COLOR" block moves `DFHDFCOL`, the default
+ * colour, into those same two fields under the identical condition at L526-L531, on a map that
+ * already declares them `COLOR=DEFAULT` (`app/bms/COCRDSL.bms` L84-L88 and L96-L100). The program is
+ * therefore asserting full intensity for the protected case specifically: one colour, two attribute
+ * bytes. Asserting the two arrivals AGREE is the form that claim takes here.
+ *
+ * ⚠️ Assumptions: the disabled shade is asserted ABSENT by name as well, because the two tokens both
+ * resolve to a neutral and an equality assertion alone would not say which one was expected -- and
+ * the whole defect was that the wrong one of the pair was in effect.
+ *
+ * Assumptions: the computed value is read rather than the inline attribute, so the assertion covers
+ * the cascade rather than one authoring mechanism: jsdom resolves these rules, and the disabled rule
+ * the design system emits is `.ant-input-outlined.ant-input-disabled{color:var(--ant-color-text-disabled)}`.
+ * A future fix that reached the same outcome through the theme instead would still pass.
+ *
+ * Assumptions: the fields are asserted still to REFUSE input on the addressed arrival, so this case
+ * cannot be satisfied by making them editable. That protection is the other half of L507-L508 and is
+ * what stops the record view offering a second way to change the record it displays.
+ * @returns {Promise<void>} Resolves once both arrivals have been measured.
+ */
+async function paintsAProtectedFieldAtTheIntensityTheReferenceGivesIt(): Promise<void> {
+  const authoritative = customPropertyReferenceFor(BMS_TEXT_COLOR_TOKENS.DEFAULT);
+  const placeholderShade = customPropertyReferenceFor(DISABLED_TEXT_TOKEN);
+  expect(authoritative).not.toBe(placeholderShade);
+
+  const addressed = await renderTheRecordUnframed();
+  const protectedFields = searchFields();
+  for (const field of [protectedFields.account, protectedFields.card]) {
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the refusal is asserted as READ-ONLY AND ENABLED, where it was
+     *       asserted as disabled. `DFHBMPRF` is PROTECT with the modified-data tag set, not `DFHBMASK`
+     *       -- a protected 3270 field is readable and cursor-addressable and refuses only typing, and
+     *       the program positions the cursor into one of these two fields on this arrival (the
+     *       `WHEN OTHER` arm at `app/cbl/COCRDSLC.cbl` L520-L523). `disabled` took the control out of
+     *       the focus order and out of the accessibility tree, which is also what attracted the
+     *       placeholder shade this case exists to keep away: the design system emits
+     *       `.ant-input-outlined.ant-input-disabled{color:var(--ant-color-text-disabled)}`, so the
+     *       mapping change removes the defect's mechanism rather than painting over it.
+     */
+    expect(field).toHaveAttribute('readonly');
+    expect(field).toBeEnabled();
+    expect(globalThis.getComputedStyle(field).color).toBe(authoritative);
+    expect(globalThis.getComputedStyle(field).color).not.toBe(placeholderShade);
+  }
+  // WHY : Assumptions: the values are asserted present, because a field painted at full intensity
+  //       while holding nothing would satisfy a colour assertion and still show the operator no
+  //       record. `1200-SETUP-SCREEN-VARS` moves the two search keys into these fields' output
+  //       subfields at `app/cbl/COCRDSLC.cbl` L457-L472, so both carry a value on this arrival.
+  expect(protectedFields.account).toHaveValue(AN_ACCOUNT_NUMBER);
+  expect(protectedFields.card).toHaveValue(A_MASKED_RENDERING);
+
+  addressed.unmount();
+  await renderTheSearchArrivalUnframed();
+  const editableFields = searchFields();
+  for (const field of [editableFields.account, editableFields.card]) {
+    expect(field).toBeEnabled();
+    // WHY : Assumptions: the editable arrival is asserted NOT read-only, which is the other half of the
+    //       attribute-byte claim -- `1300-SETUP-SCREEN-ATTRS` moves `DFHBMFSE` into both fields when
+    //       the caller was not the browse program (`app/cbl/COCRDSLC.cbl` L510-L511), and `DFHBMFSE`
+    //       is UNPROTECT. Without this the read-only assertion above would pass against a screen that
+    //       protected the fields on every arrival.
+    expect(field).not.toHaveAttribute('readonly');
+    expect(globalThis.getComputedStyle(field).color).toBe(authoritative);
+  }
 }
 
 /**
@@ -847,6 +1104,14 @@ function fieldConstraintCases(): void {
   it(
     'publishes its own transaction and program identity',
     publishesItsOwnTransactionAndProgramIdentity,
+  );
+  it(
+    "paints the information line in the frame's pinned zone",
+    paintsTheInformationLineInTheFramesPinnedZone,
+  );
+  it(
+    'paints a protected field at the intensity the reference gives it',
+    paintsAProtectedFieldAtTheIntensityTheReferenceGivesIt,
   );
 }
 
@@ -1031,7 +1296,15 @@ function isThisProgramsCitation(citation: { readonly file: string }): boolean {
  * @returns {Promise<void>} Resolves once the sentence has been found.
  */
 async function paintsThePromptForInputOnTheSearchArrival(): Promise<void> {
-  await renderTheSearchArrivalUnframed();
+  /*
+   * WHY : ⚠️ Assumptions: this case takes the FRAMED arrangement, and it did not have to before. The
+   *       row-20 line is now published through the frame's row-22 channel rather than composed in this
+   *       screen's body -- a band inside the scrolling region is painted underneath the frame's sticky
+   *       pinned zone, which was measured occluding the sibling save screen's acknowledgement outright
+   *       -- so the frame is the only thing that renders it and an unframed tree has nothing to assert
+   *       against. The sentence, its field and its provenance are unchanged.
+   */
+  await renderTheSearchArrival();
 
   // WHY : Assumptions: this sentence rather than a blank line, because the program applies it as a
   //       FALLBACK whenever its information field would otherwise be empty -- `IF WS-NO-INFO-MESSAGE
@@ -1047,7 +1320,11 @@ async function paintsThePromptForInputOnTheSearchArrival(): Promise<void> {
  * @returns {Promise<void>} Resolves once the confirmation has been found.
  */
 async function confirmsARetrievedRecordOnTheInformationLine(): Promise<void> {
-  await renderTheRecordUnframed();
+  /*
+   * WHY : Assumptions: framed, for the reason recorded on the prompt case above -- the row-20 line is
+   *       delegated to the frame's row-22 channel, so only a framed tree paints it.
+   */
+  await renderAtACardAddress();
 
   // WHY : Assumptions: the confirmation belongs to the row-20 `INFOMSG` field and not to the row-23
   //       error line, because the program drives the two from two different fields -- `WS-INFO-MSG`
@@ -1216,6 +1493,48 @@ async function withholdsTheComposedFileDiagnostic(): Promise<void> {
 }
 
 /**
+ * The information line takes the appearance its own BMS field declares, not the turquoise role.
+ *
+ * Purpose
+ * -------
+ * The regression guard for a token-bridge substitution. `INFOMSG` is declared
+ * `ATTRB=(PROT) COLOR=NEUTRAL` at `app/bms/COCRDSL.bms` L139-L143, and the screen passed
+ * `severity="info"` for it -- which `ui/src/layout/MessageBand.tsx` L374-L375 resolves to
+ * `BMS_TEXT_COLOR_TOKENS.TURQUOISE` rather than to `BMS_TEXT_COLOR_TOKENS.NEUTRAL`. Two distinct
+ * source colour roles were therefore rendered as one, which is the substitution the bridge's own G3
+ * note exists to prevent.
+ *
+ * ⚠️ Assumptions: both tokens are named and the wrong one is asserted ABSENT, because the two are
+ * neutrals a rendered-colour equality assertion alone would not distinguish by intent -- and the
+ * defect was that the wrong member of the pair was in effect. The names come from the bridge itself
+ * rather than being written here, so this case cannot disagree with the map the band reads.
+ *
+ * Assumptions: the polite live-region role is asserted alongside the colour, because this line is
+ * standing guidance rather than an outcome -- `1400-SEND-SCREEN` moves a value into it on every sent
+ * map (`app/cbl/COCRDSLC.cbl` L496) -- so a screen reader must not be interrupted by it on every
+ * turn. The design system publishes no neutral alert variant, so the informational CHROME is expected
+ * to be unchanged and only the text token moves; asserting the role as well is what keeps this case
+ * from passing on a band that had been promoted to the assertive row-23 treatment.
+ * @returns {Promise<void>} Resolves once the band's colour role and politeness have been asserted.
+ */
+async function paintsTheInformationLineInTheNeutralRole(): Promise<void> {
+  /*
+   * WHY : Assumptions: framed, for the reason recorded on the prompt case above -- the row-20 line is
+   *       delegated to the frame's row-22 channel, so only a framed tree paints it.
+   */
+  await renderAtACardAddress();
+
+  const band = await screen.findByTestId(INFORMATION_BAND_TEST_ID);
+  const sentence = within(band).getByText(MESSAGES.FOUND_CARDS_FOR_ACCOUNT.text.trim());
+  expect(sentence.style.color).toBe(customPropertyReferenceFor(BMS_TEXT_COLOR_TOKENS.NEUTRAL));
+  expect(sentence.style.color).not.toBe(
+    customPropertyReferenceFor(BMS_TEXT_COLOR_TOKENS.TURQUOISE),
+  );
+  expect(within(band).getByRole('status')).toBeInTheDocument();
+  expect(within(band).queryByRole('alert')).toBeNull();
+}
+
+/**
  * Registers the message-fidelity cases.
  * @returns {void} Nothing; registration is the effect.
  */
@@ -1252,6 +1571,7 @@ function messageFidelityCases(): void {
     reportsTheCatalogueSentenceEachStatusSelects,
   );
   it('withholds the composed file diagnostic', withholdsTheComposedFileDiagnostic);
+  it('paints the information line in the neutral role', paintsTheInformationLineInTheNeutralRole);
 }
 
 describe('card detail message fidelity', messageFidelityCases);
@@ -1297,16 +1617,29 @@ async function keepsTheLegendWithinItsDeclaredWidth(): Promise<void> {
 }
 
 /**
- * Enter is the primary action and the exit key is an ordinary one.
+ * Neither key on this record-view screen carries the acting emphasis.
+ *
+ * ⚠️ Refactoring Rationale: Enter is expected ORDINARY, and it was expected primary. The emphasis used
+ * to be derived from the attention identifier, through `PRIMARY_ACTION_AIDS`, and that table cannot be
+ * right across this application: the same identifier carries a browse on one mapset and a save or a
+ * delete on another, so one AID-keyed answer paints them identically. `ui/src/layout/PfKeyBar.tsx` now
+ * resolves emphasis from what a key's LABEL says its action does, and this screen declares both of its
+ * keys `read-only` -- which is what its labels say. This is the record-VIEW program: `ENTER=Search
+ * Cards` reads (`app/cbl/COCRDSLC.cbl` L336-L345 and L357-L371) and `F3=Exit` transfers control back
+ * (L305-L333), and no arm anywhere in the program performs a `WRITE`, a `REWRITE` or a `DELETE`. So the
+ * acting emphasis belongs on neither key, and its previous appearance on Enter was the AID table
+ * asserting an action this screen does not have.
+ *
+ * ⚠️ Assumptions: the AID table is asserted to still CONTAIN `ENTER` while this screen's Enter renders
+ * ordinary, and that disagreement is the point. The table remains the fallback for the screens that have
+ * yet to declare their risks, so a case that merely asserted the ordinary variant would pass equally
+ * against a screen whose declaration had been dropped and whose fallback happened to agree. Asserting
+ * the two disagree proves the declaration is the operative input.
  * @returns {Promise<void>} Resolves once both variants have been asserted.
  */
 async function marksEnterPrimaryAndTheExitKeyOrdinary(): Promise<void> {
   await renderAtACardAddress();
 
-  // WHY : Assumptions: the membership test comes from `PRIMARY_ACTION_AIDS` in
-  //       `ui/src/layout/PfKeyBar.tsx` rather than from a literal, so this case asserts the bar applied
-  //       its own published rule to this screen's bindings instead of restating the rule. Enter is a
-  //       primary action and PF3 is not, which is the emphasis split the target design specifies.
   expect(PRIMARY_ACTION_AIDS).toContain('ENTER');
   expect(PRIMARY_ACTION_AIDS).not.toContain('PFK03');
   // WHY : Assumptions: the variant is read off the class the design system emits for its primary
@@ -1314,8 +1647,14 @@ async function marksEnterPrimaryAndTheExitKeyOrdinary(): Promise<void> {
   //       spacing value is asserted anywhere here -- those resolve through the theme in
   //       `ui/src/theme/tokens.ts`, and a literal would be exactly the hardcoded design value the
   //       token bridge exists to prevent.
-  expect(legendControlFor('Enter').classList.contains('ant-btn-primary')).toBe(true);
+  expect(legendControlFor('Enter').classList.contains('ant-btn-primary')).toBe(false);
   expect(legendControlFor('F3').classList.contains('ant-btn-primary')).toBe(false);
+  // WHY : Assumptions: both are asserted to carry the DEFAULT treatment and not merely to lack the
+  //       primary one. The design system emits one class per resolved button type, so a control that
+  //       had lost its type altogether would satisfy a bare negative while rendering as neither of the
+  //       two treatments the target design assigns.
+  expect(legendControlFor('Enter').classList.contains('ant-btn-default')).toBe(true);
+  expect(legendControlFor('F3').classList.contains('ant-btn-default')).toBe(true);
 }
 
 /**
@@ -1379,14 +1718,14 @@ async function takesTheSameSearchTurnFromTheLegendControl(): Promise<void> {
  */
 async function leavesTheScreenOnTheExitKeyFromEitherDriver(): Promise<void> {
   const first = await renderAtACardAddress();
-  await screen.findByText(A_MASKED_RENDERING);
+  await waitForTheRecordView();
 
   await takeTheTurn(first, 'PFK03');
   await waitForTheRecordToLeave();
   first.unmount();
 
   const second = await renderAtACardAddress();
-  await screen.findByText(A_MASKED_RENDERING);
+  await waitForTheRecordView();
 
   await takeTheTurnFromTheLegend(second, 'F3');
   await waitForTheRecordToLeave();
@@ -1394,7 +1733,11 @@ async function leavesTheScreenOnTheExitKeyFromEitherDriver(): Promise<void> {
 
 /**
  * Waits until the record view is no longer mounted.
- * @returns {Promise<void>} Resolves once the masked rendering has gone from the document.
+ *
+ * Refactoring Rationale: the departure is observed through the EMBOSSED NAME for the same reason the
+ * arrival is -- the masked card rendering is no longer text the record view paints, so its absence would
+ * be satisfied by a screen that never rendered a record at all. See {@link waitForTheRecordView}.
+ * @returns {Promise<void>} Resolves once the record view has gone from the document.
  */
 async function waitForTheRecordToLeave(): Promise<void> {
   await waitFor(
@@ -1403,7 +1746,7 @@ async function waitForTheRecordToLeave(): Promise<void> {
      * @returns {void} Nothing; the assertion carries the outcome.
      */
     (): void => {
-      expect(screen.queryByText(A_MASKED_RENDERING)).toBeNull();
+      expect(screen.queryByText(A_NAME_AT_THE_DECLARED_WIDTH)).toBeNull();
     },
   );
 }
@@ -1414,7 +1757,7 @@ async function waitForTheRecordToLeave(): Promise<void> {
  */
 async function coercesAnUnboundKeyIntoTheEnterArmSilently(): Promise<void> {
   const rendered = await renderAtACardAddress();
-  await screen.findByText(A_MASKED_RENDERING);
+  await waitForTheRecordView();
   vi.mocked(getCard).mockClear();
 
   await takeTheTurn(rendered, 'PFK05');
@@ -1446,6 +1789,164 @@ async function coercesAnUnboundKeyIntoTheEnterArmSilently(): Promise<void> {
 }
 
 /**
+ * Builds a read whose settlement this case controls.
+ *
+ * Assumptions: a hand-rolled deferred rather than a timer, because the property under test is the state
+ * of the screen WHILE a read is outstanding, and a timer would make the window a duration to race
+ * against instead of a state to observe.
+ * @returns {{ promise: Promise<CardDetail>; settle: (card: CardDetail) => void }} The promise to hand
+ *   the mocked client, and the function that settles it.
+ */
+function deferredRead(): { promise: Promise<CardDetail>; settle: (card: CardDetail) => void } {
+  /*
+   * WHY : Assumptions: the captured resolver is held as possibly-undefined rather than seeded with a
+   *       throwing placeholder, because a placeholder is itself a function and every function in this
+   *       file carries a doc comment -- so seeding it would document a branch the executor below makes
+   *       unreachable. The guard in the returned settler states the same condition once.
+   */
+  let resolveRead: ((card: CardDetail) => void) | undefined;
+  const promise = new Promise<CardDetail>(
+    /**
+     * Captures the resolver so the case can settle the read when it chooses.
+     * @param {(card: CardDetail) => void} resolve - The promise's own resolver.
+     * @returns {void} Nothing; the resolver is captured as a side effect.
+     */
+    (resolve: (card: CardDetail) => void): void => {
+      resolveRead = resolve;
+    },
+  );
+  return {
+    promise,
+    /**
+     * Settles the held read with one record.
+     * @param {CardDetail} card - The record the read answers with.
+     * @returns {void} Nothing; the settlement is the effect.
+     * @throws {Error} If called before the promise executor has run, which cannot happen for a native
+     *   promise but is stated rather than assumed.
+     */
+    settle: (card: CardDetail): void => {
+      if (resolveRead === undefined) {
+        throw new Error('the deferred read was settled before it was armed');
+      }
+      resolveRead(card);
+    },
+  };
+}
+
+/**
+ * The outstanding read is announced through a live region that is mounted and empty when idle.
+ *
+ * ⚠️ Assumptions: the region's presence and EMPTINESS are asserted BEFORE the read is started, and that
+ * ordering is the point. `ui/src/layout/fieldHelp.tsx` records that a live region has to be in the
+ * accessibility tree before its content changes for the change to be announced, so a region that mounts
+ * with its sentence already in place is frequently treated as initial content and read by nothing --
+ * which loses the transition that matters. A case that only looked for the sentence would pass against
+ * exactly that arrangement.
+ *
+ * ⚠️ Assumptions: the SAME DOM node is asserted across all three states, by identity. The screen replaces
+ * its whole body with a spinner while a read is outstanding, so the only thing keeping this region alive
+ * across that swap is that both arms return the same root element type with the region as child 0 -- and
+ * a node identity comparison is what proves React updated it rather than remounting it. A remounted
+ * region carries the sentence as initial content and announces nothing, which is indistinguishable from
+ * the fix by text alone.
+ *
+ * Assumptions: the sentence is the catalogue's authored `REQUEST_IN_PROGRESS` compared by identity, not
+ * a literal, so a reword in the catalogue moves this case with it rather than breaking it.
+ * @returns {Promise<void>} Resolves once all three states have been observed.
+ */
+async function announcesTheOutstandingRead(): Promise<void> {
+  const rendered = await renderTheSearchArrival();
+  const idle = screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+  expect(idle).toHaveTextContent('');
+
+  const held = deferredRead();
+  vi.mocked(lookupCard).mockReturnValue(held.promise);
+  await fillTheSearchFields(rendered, AN_ACCOUNT_NUMBER, A_CARD_NUMBER, 'account');
+  await takeTheTurn(rendered, 'ENTER');
+
+  const busy = screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+  expect(busy).toBe(idle);
+  expect(busy).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  await act(
+    /**
+     * Lets the held read settle inside the scope, so the screen's own update is flushed.
+     * @returns {Promise<void>} Resolves once the read has settled.
+     */
+    async (): Promise<void> => {
+      held.settle(aCard());
+      await held.promise;
+    },
+  );
+
+  await waitFor(
+    /**
+     * Waits until the announcement has been withdrawn.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      const settled = screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+      expect(settled).toBe(idle);
+      expect(settled).toHaveTextContent('');
+    },
+  );
+}
+
+/**
+ * The search key is declined while its own read is outstanding, and the exit key stays live.
+ *
+ * ⚠️ Assumptions: the decline is asserted PER KEY -- the search key stops starting reads while the exit
+ * key keeps its binding, its enabled state and its accessible name. Withdrawing every key would strand
+ * an operator on a read that never answers, and the reference never withdraws a key at all: a 3270
+ * terminal inhibits input for the duration of a turn and releases it when the screen answers.
+ *
+ * ⚠️ Assumptions: the declined key's own control is asserted to stay PRESENT, ENABLED and NAMED, not to
+ * disappear or to go disabled. A disabled control leaves the accessibility tree's focus order, so an
+ * operator tabbing through the legend would find the set of controls changing under them mid-turn; the
+ * contract is that a busy key is a valid key pressed early, so it stays exactly where it was.
+ *
+ * ⚠️ Assumptions: no invalid-key sentence appears, and that absence is asserted rather than assumed. The
+ * decline is SILENT: an exhaustive search of `app/cbl/COCRDSLC.cbl` finds no `CCDA-MSG-INVALID-KEY` move
+ * anywhere in the program, so a message here would be a fabrication -- and a busy key is not an invalid
+ * one in any case.
+ * @returns {Promise<void>} Resolves once the decline and the surviving key have been observed.
+ */
+async function declinesTheSearchKeyWhileItsOwnReadIsOutstanding(): Promise<void> {
+  const held = deferredRead();
+  vi.mocked(lookupCard).mockReturnValue(held.promise);
+  const rendered = await renderTheSearchArrival();
+
+  await fillTheSearchFields(rendered, AN_ACCOUNT_NUMBER, A_CARD_NUMBER, 'account');
+  await takeTheTurn(rendered, 'ENTER');
+  expect(vi.mocked(lookupCard)).toHaveBeenCalledTimes(1);
+
+  await takeTheTurn(rendered, 'ENTER');
+  await takeTheTurnFromTheLegend(rendered, 'Enter');
+  // WHY : ⚠️ Assumptions: BOTH drivers are exercised against the outstanding read, because the legend
+  //       control and the key press reach the same binding and a decline that held for only one of
+  //       them would leave the other able to start a second read from a screen showing a spinner.
+  expect(vi.mocked(lookupCard)).toHaveBeenCalledTimes(1);
+
+  const declined = legendControlFor('Enter');
+  expect(declined).toBeEnabled();
+  expect(declined).toHaveAccessibleName();
+  expect(legendControlFor('F3')).toBeEnabled();
+  expect(legendControlFor('F3')).toHaveAccessibleName();
+  expect(document.body.textContent).not.toContain(INVALID_KEY_PRESSED.trim());
+
+  await act(
+    /**
+     * Settles the held read so the screen leaves its outstanding state inside an act scope.
+     * @returns {Promise<void>} Resolves once the read has settled.
+     */
+    async (): Promise<void> => {
+      held.settle(aCard());
+      await held.promise;
+    },
+  );
+}
+
+/**
  * Registers the key-contract cases.
  * @returns {void} Nothing; registration is the effect.
  */
@@ -1465,6 +1966,11 @@ function keyContractCases(): void {
   it(
     'coerces an unbound key into the enter arm silently',
     coercesAnUnboundKeyIntoTheEnterArmSilently,
+  );
+  it('announces the outstanding read through a live region', announcesTheOutstandingRead);
+  it(
+    'declines the search key while its own read is outstanding',
+    declinesTheSearchKeyWhileItsOwnReadIsOutstanding,
   );
 }
 
@@ -1487,12 +1993,19 @@ async function masksTheAccountNumberForAnOrdinaryOperator(): Promise<void> {
   await seedSession({ groups: [CARDDEMO_USER_GROUP] });
 
   await renderTheRecordUnframed();
+  await waitForTheRecordView();
 
-  const rendering = await screen.findByText(A_MASKED_RENDERING);
+  /*
+   * WHY : Refactoring Rationale: the rendering is read from the CARD CONTROL's value, where it was read
+   *       as text out of the record view. The record's card-number row is deleted -- the mapset declares
+   *       one field for that identifier and it is this control, `CARDSID` at `app/bms/COCRDSL.bms`
+   *       L96-L100, which the program moves the retrieved key into at `app/cbl/COCRDSLC.cbl` L471 -- so
+   *       the masked value now lives in the control. The posture being asserted is unchanged.
+   */
   // WHY : Assumptions: the pattern is imported from `ui/src/api/masking.ts` rather than written here,
   //       so this asserts the form the contract itself requires -- twelve mask characters then the last
   //       four digits of a `PIC X(16)` number (`app/cpy/CVACT02Y.cpy` L5).
-  expect(MASKED_CARD_NUMBER.test(nameOfControl(rendering))).toBe(true);
+  expect(MASKED_CARD_NUMBER.test(valueOfControl(searchFields().card))).toBe(true);
   expectNoWholeCardNumberAnywhere();
 }
 
@@ -1522,9 +2035,12 @@ async function masksTheAccountNumberForAnAdministratorToo(): Promise<void> {
   await seedSession({ groups: [CARDDEMO_ADMIN_GROUP] });
 
   await renderTheRecordUnframed();
+  await waitForTheRecordView();
 
-  const rendering = await screen.findByText(A_MASKED_RENDERING);
-  expect(MASKED_CARD_NUMBER.test(nameOfControl(rendering))).toBe(true);
+  // WHY : Refactoring Rationale: read from the card control's value, for the reason recorded on the
+  //       ordinary-operator case above -- the record's card-number row is deleted as a duplicate of
+  //       this control.
+  expect(MASKED_CARD_NUMBER.test(valueOfControl(searchFields().card))).toBe(true);
   // WHY : Assumptions: the administrative read is asserted NOT to have been called, which is the
   //       observable form of "this screen does not reach the exception". Asserting only the rendered
   //       value would pass equally if the screen had fetched a whole number and then masked it itself
@@ -1535,19 +2051,31 @@ async function masksTheAccountNumberForAnAdministratorToo(): Promise<void> {
 }
 
 /**
- * Asserts that no rendered text carries a whole sixteen-digit card number.
+ * Asserts that nothing rendered carries a whole sixteen-digit card number.
  *
- * Assumptions: the check is a run of sixteen digits anywhere in the document text rather than one
- * fixture value, so it catches an unmasked number the screen composed as well as one it was handed.
+ * Assumptions: the check is a run of sixteen digits rather than one fixture value, so it catches an
+ * unmasked number the screen composed as well as one it was handed.
+ *
+ * ⚠️ Refactoring Rationale: every INPUT VALUE is searched as well as the document text, and only the
+ * text was searched before. The two identity values moved out of the record view and into the criteria
+ * controls -- the mapset declares one field per identifier and both are those controls -- and an input's
+ * value is not part of any node's `textContent`, so a text-only scan would now pass over the very
+ * element that holds the card number. Following the value is what keeps this guard as strong as it was;
+ * leaving it would have silently retired the strongest assertion in this file.
  * @returns {void} Nothing; the assertion carries the outcome.
  */
 function expectNoWholeCardNumberAnywhere(): void {
-  const rendered = document.body.textContent ?? '';
-  expect(/[0-9]{16}/u.test(rendered)).toBe(false);
+  const wholeNumber = /[0-9]{16}/u;
+  expect(wholeNumber.test(document.body.textContent ?? '')).toBe(false);
+  for (const control of Array.from(document.querySelectorAll('input'))) {
+    expect(wholeNumber.test(control.value), 'an input value carries a whole card number').toBe(
+      false,
+    );
+  }
 }
 
 /**
- * The record view exposes exactly the five fields the mapset paints, and nothing further.
+ * The screen exposes exactly the five fields the mapset paints, and nothing further.
  *
  * ⚠️ Assumptions: the three-digit verification value the card record declares at
  * `app/cpy/CVACT02Y.cpy` L7 -- between the account identifier and the embossed name -- is returned by
@@ -1555,42 +2083,74 @@ function expectNoWholeCardNumberAnywhere(): void {
  * this file can carry one and no rendering can disclose one. The prohibition is absolute and has no
  * administrative exception anywhere in the application, which is what distinguishes it from the masking
  * rule above: masking has one permitted exception, this has none. The assertion is therefore the
- * completeness of the record view -- five value cells, being the five fields the mapset paints -- so a
- * sixth field appearing here fails this case whatever it holds.
- * @returns {Promise<void>} Resolves once the record view's completeness has been asserted.
+ * completeness of the screen -- five values in total, being the five the mapset paints -- so a sixth
+ * field appearing anywhere fails this case whatever it holds.
+ *
+ * ⚠️ Refactoring Rationale: the five are counted across TWO surfaces now, and they were counted as five
+ * cells of one description list. The mapset itself puts them on two: `ACCTSID` at `POS=(7,45)`
+ * (`app/bms/COCRDSL.bms` L84-L88) and `CARDSID` at `POS=(8,45)` (L96-L100) are criteria fields the
+ * program moves the retrieved keys into (`app/cbl/COCRDSLC.cbl` L463 and L471), and only `CRDNAME`
+ * (L107-L109), `CRDSTCD` (L116-L119) and the `EXPMON`/`EXPYEAR` pair (L126-L136) sit in the record zone.
+ * The screen used to render the two identifiers in BOTH places -- a browser measured each one twice, in
+ * two typefaces -- so counting five cells in the record view was counting the duplication. Counting the
+ * two surfaces separately is what makes a return of that duplication fail here.
+ * @returns {Promise<void>} Resolves once the screen's completeness has been asserted.
  */
 async function exposesOnlyTheFiveFieldsTheMapsetPaints(): Promise<void> {
   await seedSession({ groups: [CARDDEMO_ADMIN_GROUP] });
 
   await renderTheRecordUnframed();
-  await screen.findByText(A_MASKED_RENDERING);
+  await waitForTheRecordView();
 
   expect(recordLabelCells()).toHaveLength(RECORD_LABEL_COUNT);
-  // WHY : Assumptions: the label of every cell is one of the five the mapset paints, read from
-  //       `app/bms/COCRDSL.bms` L83, L95, L106, L115 and L125. Counting alone would pass if a cell had
-  //       been swapped for a field the terminal never showed, so the identities are checked too.
+  // WHY : Assumptions: the label of every cell is one of the three the mapset paints in its record
+  //       zone, read from `app/bms/COCRDSL.bms` L106, L115 and L125. Counting alone would pass if a
+  //       cell had been swapped for a field the terminal never showed, so the identities are checked
+  //       too -- and the two identifier labels are asserted ABSENT from this surface, which is what
+  //       fails if either row returns.
   const labels = recordLabelCells().map(textOfElement);
   for (const label of labels) {
-    expect(THE_FIVE_PAINTED_LABELS.some(matchesCollapsed(label))).toBe(true);
+    expect(THE_THREE_PAINTED_RECORD_LABELS.some(matchesCollapsed(label))).toBe(true);
   }
+  for (const identifierLabel of THE_TWO_PAINTED_CRITERIA_LABELS) {
+    expect(labels.some(matchesCollapsed(identifierLabel))).toBe(false);
+  }
+  // WHY : Assumptions: the two identifiers are asserted present as CONTROLS, so this case cannot be
+  //       satisfied by a screen that dropped them rather than by one that paints each of the five
+  //       exactly once. `searchFields` asserts the count of two on the way through.
+  const { account, card } = searchFields();
+  expect(account).toHaveValue(AN_ACCOUNT_NUMBER);
+  expect(card).toHaveValue(A_MASKED_RENDERING);
 }
 
 /**
- * The five value labels the mapset paints, in the order it paints them.
+ * The three value labels the mapset paints in its RECORD zone, in the order it paints them.
  *
  * Assumptions: these are `INITIAL=` literals of the mapset itself, so they live beside the screen that
  * paints them rather than in the message catalog -- the catalog's own boundary excludes a field label,
  * which is positional and meaningless apart from the control beside it. They are compared with interior
  * whitespace collapsed, because the mapset pads each one to a fixed cell width so its colons line up
  * down the column and a browser collapses that padding when it renders.
+ *
+ * ⚠️ Refactoring Rationale: the two identifier labels are in {@link THE_TWO_PAINTED_CRITERIA_LABELS}
+ * instead, because the mapset paints them over the CRITERIA fields at rows 7 and 8 and not over the
+ * record zone at rows 11 to 15. Holding all five in one list is what let the record view carry a second
+ * rendering of each identifier without any case objecting.
  */
-const THE_FIVE_PAINTED_LABELS = [
-  'Account Number    :',
-  'Card Number       :',
+const THE_THREE_PAINTED_RECORD_LABELS = [
   'Name on card      :',
   'Card Active Y/N   : ',
   'Expiry Date       : ',
 ] as const;
+
+/**
+ * The two value labels the mapset paints over its CRITERIA fields, in the order it paints them.
+ *
+ * Assumptions: `INITIAL=` literals again, at `POS=(7,23)` (`app/bms/COCRDSL.bms` L79-L83) and
+ * `POS=(8,23)` (L91-L95). They name the two controls the mapset declares `UNPROT`, which are the one
+ * place each identifier is painted.
+ */
+const THE_TWO_PAINTED_CRITERIA_LABELS = ['Account Number    :', 'Card Number       :'] as const;
 
 /**
  * Reads one element's text.
@@ -1659,7 +2219,7 @@ describe('card detail account number posture', accountNumberPostureCases);
  */
 async function readsTheSelectionFromTheRouteParameter(): Promise<void> {
   await renderTheRecordUnframed();
-  await screen.findByText(A_MASKED_RENDERING);
+  await waitForTheRecordView();
 
   // WHY : Assumptions: called exactly once and with the address's own parameter, so the value the
   //       client received is traceable to the route rather than to any state the screen held. The
@@ -1684,7 +2244,7 @@ async function readsTheSelectionFromTheRouteParameter(): Promise<void> {
  */
 async function carriesASealedSelectorInTheAddressAndNotTheNumber(): Promise<void> {
   await renderTheRecordUnframed();
-  await screen.findByText(A_MASKED_RENDERING);
+  await waitForTheRecordView();
 
   // WHY : Assumptions: both directions are asserted from the route contract's own guards. A run of
   //       digits is itself valid URL-safe base64, so "is a selector" alone would not exclude a card
@@ -1734,10 +2294,100 @@ async function resolvesATypedNumberThroughTheLookupCall(): Promise<void> {
 }
 
 /**
+ * Returns the static alias the router publishes for one reference program.
+ *
+ * Assumptions: the address is READ from the router's own alias table rather than written as a literal,
+ * so this file tracks the address the application publishes instead of a copy of it. A withdrawn alias
+ * then fails here, with a sentence naming the program, rather than in a route that silently cannot
+ * match.
+ * @param {string} program - Name of the reference program, as the alias table records it.
+ * @returns {string} That program's parameter-free address.
+ * @throws {RangeError} If the alias table holds no entry for the program.
+ */
+function keylessEntryAddressFor(program: string): string {
+  for (const entry of KEYLESS_ENTRY_ROUTES) {
+    if (entry.program === program) {
+      return entry.path;
+    }
+  }
+  throw new RangeError(`no keyless entry route is published for ${program}`);
+}
+
+/** The static address this screen is also reachable at, which declares NO route parameter. */
+const KEYLESS_ENTRY_ADDRESS = keylessEntryAddressFor('COCRDSLC');
+
+/**
+ * An arrival on the STATIC alias keeps the whole frame, reads nothing, and prompts for the keys.
+ *
+ * ⚠️ Purpose: hold the arrival the router's alias table creates, which no other case here reaches. The
+ * other selector-free cases mount this screen with no route pattern at all, so the parameter is absent
+ * because nothing declared it; this case mounts it at the address the application actually publishes
+ * (`ui/src/router.tsx` {@link KEYLESS_ENTRY_ROUTES}), where the pattern is STATIC and therefore supplies
+ * `undefined` for `cardKey` on a route that matched. The distinction is the one that matters: a screen
+ * that treated an undefined parameter as a broken link would answer a working menu option with a refusal.
+ *
+ * ⚠️ Assumptions: the alias is asserted to carry no pattern segment, because a sentinel-bearing alias --
+ * `/cards/-/view`, say -- would satisfy every other assertion here while handing the screen a parameter
+ * it must then decide is not a selector. `ui/src/router.tsx` records why the alias is static instead:
+ * the eleven main-menu options at `app/cpy/COMEN02Y.cpy` name programs and carry no record, so this
+ * program's own first turn needs an address of its own, and the reference paints exactly this map when
+ * its selection carrier arrives blank (`app/cbl/COCRDSLC.cbl` L350-L356, both fields unprotected at
+ * L510-L511).
+ *
+ * ⚠️ Assumptions: NO read of any kind is issued, asserted across all three of this screen's client
+ * calls rather than inferred from the absence of a record on the glass. There is no key to read by, so
+ * a request here would be one built from `undefined` -- which reaches a service as a literal
+ * `/cards/undefined` and is answered with a status the operator can do nothing about.
+ *
+ * Assumptions: the whole frame is counted, not merely the absence of an error page. A regression of this
+ * class replaces the frame with a centred result, so asserting only that the prompt appears would pass
+ * against a frame that had lost its header, its legend or its pinned zone.
+ * @returns {Promise<void>} Resolves once the selector-free arrival has been observed.
+ */
+async function keepsTheFrameOnTheKeylessEntryRoute(): Promise<void> {
+  await act(
+    /**
+     * Mounts the screen at its static alias, where the route declares no parameter at all.
+     * @returns {Promise<void>} Resolves once the arrival has settled.
+     */
+    async (): Promise<void> => {
+      await renderInAppShell(<CardDetailScreen />, {
+        initialEntries: [KEYLESS_ENTRY_ADDRESS],
+        routePath: KEYLESS_ENTRY_ADDRESS,
+      });
+    },
+  );
+
+  expect(KEYLESS_ENTRY_ADDRESS).not.toContain(':');
+  expect(document.querySelector('.ant-result')).toBeNull();
+  expect(screen.getAllByTestId(APP_SHELL_TEST_ID)).toHaveLength(1);
+  expect(document.querySelectorAll('main')).toHaveLength(1);
+  expect(screen.getAllByTestId(SHELL_PINNED_ZONE_TEST_ID)).toHaveLength(1);
+  expect(screen.getByRole('heading', { name: CARD_DETAIL_TITLE })).toBeInTheDocument();
+  expectVerbatimMessage('CCDL');
+  expectVerbatimMessage('COCRDSLC');
+  /*
+   * WHY : Assumptions: the row-20 line carries the program's OWN prompt and not the invalid-link
+   *       guidance, which is the assertion that separates this arrival from an unaddressable one. The
+   *       screen selects the guidance only when a parameter WAS supplied and could not be opened, so
+   *       seeing it here would mean the undefined parameter had been read as a bad one.
+   */
+  const information = await screen.findByTestId(INFORMATION_BAND_TEST_ID);
+  expect(information.textContent ?? '').toContain(MESSAGES.WS_PROMPT_FOR_INPUT.text);
+  expect(information.textContent ?? '').not.toContain(CARD_DETAIL_INVALID_LINK_GUIDANCE);
+  expect(screen.getByTestId(MESSAGE_BAND_TEST_ID)).toBeInTheDocument();
+  expect(screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL })).toBeInTheDocument();
+  expect(vi.mocked(getCard)).not.toHaveBeenCalled();
+  expect(vi.mocked(getAdminCardDetail)).not.toHaveBeenCalled();
+  expect(vi.mocked(lookupCard)).not.toHaveBeenCalled();
+}
+
+/**
  * Registers the selection-context cases.
  * @returns {void} Nothing; registration is the effect.
  */
 function selectionContextCases(): void {
+  it('keeps the frame on the keyless entry route', keepsTheFrameOnTheKeylessEntryRoute);
   it('reads the selection from the route parameter', readsTheSelectionFromTheRouteParameter);
   it(
     'carries a sealed selector in the address and not the number',

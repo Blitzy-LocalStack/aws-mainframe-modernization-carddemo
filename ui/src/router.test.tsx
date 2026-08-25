@@ -445,15 +445,24 @@ async function carriesTheTypeCodeToReferenceMaintenance(): Promise<void> {
 }
 
 /**
- * An address the table does not match renders the bounded not-found result, outside the frame.
+ * An address the table does not match renders the not-found surface INSIDE the frame.
  *
  * Assumptions: the catch-all is worth a gate rather than a note, because it is the ONE surface an
  * unauthenticated caller reaches without passing either guard -- so what it renders is a security
  * property as much as a navigation one.
  *
- * Assumptions: the result is asserted OUTSIDE the shell. `*` sits beside the frame deliberately -- there
- * is no screen to frame, so painting a header band, a message line and a legend around a not-found
- * result would offer an operator a turn that leads nowhere.
+ * ⚠️ Refactoring Rationale: the frame is required PRESENT, where this case required it absent on the
+ * ground that "there is no screen to frame, so painting a header band, a message line and a legend
+ * around a not-found result would offer an operator a turn that leads nowhere". Measured, the turn led
+ * nowhere for the opposite reason: with the surface mounted beside both frame mounts, the header, the
+ * footer, the row-23 message line, the row-24 legend and the skip link were all absent, so an operator
+ * who mistyped an address lost the whole chrome and had only the browser's back control. The frame
+ * paints identity only when a screen DELEGATES it and the not-found surface delegates none, so framing
+ * it costs no false transaction identifier -- and it gains the message channel, a real legend and a
+ * primary control.
+ *
+ * Assumptions: sign-on must still be absent, which is what distinguishes "the catch-all rendered" from
+ * "the catch-all was guarded and bounced an anonymous caller to sign-on".
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function anUnknownAddressRendersTheBoundedNotFoundResult(): Promise<void> {
@@ -465,7 +474,7 @@ async function anUnknownAddressRendersTheBoundedNotFoundResult(): Promise<void> 
   await renderRouterAt('/no/such/screen');
 
   expect(await screen.findByText(NOT_FOUND_TITLE)).toBeInTheDocument();
-  expect(screen.queryByTestId(APP_SHELL_TEST_ID)).not.toBeInTheDocument();
+  expect(screen.queryByTestId(APP_SHELL_TEST_ID)).toBeInTheDocument();
   expect(screen.queryByText('SIGN ON')).not.toBeInTheDocument();
 }
 

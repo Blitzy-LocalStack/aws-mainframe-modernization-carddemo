@@ -84,6 +84,7 @@
  * client-settable source.
  */
 
+import { theme } from 'antd';
 import { getDefaultNormalizer, renderHook, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactElement } from 'react';
@@ -733,6 +734,118 @@ async function framesTheScreenInDesignSystemComponents(): Promise<void> {
   expect(submit).toHaveAttribute('type', 'button');
 }
 
+/** Class the design system puts on a button's icon slot, whichever glyph occupies it. */
+const BUTTON_ICON_SLOT_CLASS = 'ant-btn-icon';
+
+/** Class the design system adds to that slot when the glyph in it is the loading indicator. */
+const BUTTON_LOADING_ICON_CLASS = 'ant-btn-loading-icon';
+
+/**
+ * Stands in for a resolver until the promise that owns one has been constructed.
+ *
+ * Assumptions: it is inert and is never the resolver a case invokes — the assignment inside the
+ * promise's own executor replaces it synchronously. It exists so the variable needs no nullable type,
+ * because a nullable resolver would need a guard at the call site that could only ever be dead code.
+ * @returns {void} Nothing; nothing is retained.
+ */
+function unusedResolver(): void {}
+
+/**
+ * Asserts the submit control's icon slot is occupied in BOTH states, so its measure cannot change.
+ *
+ * Purpose: the regression guard for the one genuine layout jump measured in this application — the
+ * sign-on control growing from 78.5 to about 99 pixels, roughly 26 per cent, at the instant the operator
+ * pressed it.
+ *
+ * ⚠️ Assumptions: the assertion is on the SLOT and not on a pixel width, because jsdom computes no
+ * layout, and the slot is the mechanism rather than a proxy for it. With no `icon` the design system
+ * renders its loading glyph through a motion that animates the slot from zero width —
+ * `node_modules/antd/es/button/DefaultLoadingIcon.js` returns `{ width: 0 }` from `onAppearStart` and
+ * the glyph's own `scrollWidth` from `onAppearActive` — and the idle button has no slot at all, because
+ * that motion carries `removeOnLeave`. With an `icon` present, `Button.js` L262 passes
+ * `existIcon: true` and L273-L278 swaps the glyph inside the existing slot with no motion. So "a slot
+ * exists in both states" is exactly "the width does not change", and it is the only form of it a
+ * layout-free renderer can observe.
+ *
+ * ⚠️ Assumptions: the busy state is reached by HOLDING the exchange rather than by asserting on a
+ * transient frame, and the control's own `aria-busy` is asserted in the same held state. A review found
+ * `aria-busy` on no button anywhere, so the control an operator had just activated was the one element
+ * that never said it was working; the two belong in one case because they are one press.
+ * @returns {Promise<void>} Resolves once both states have been asserted.
+ */
+async function keepsTheSubmitControlsIconSlotFilledInBothStates(): Promise<void> {
+  type HeldOutcome = Awaited<ReturnType<typeof signOn>>;
+  let releaseSignOn: (value: HeldOutcome) => void = unusedResolver;
+  signOnStub.mockReturnValueOnce(
+    new Promise<HeldOutcome>(
+      /**
+       * Retains the resolver so the case controls when the exchange settles.
+       * @param {(value: HeldOutcome) => void} resolve - The promise's own resolver.
+       * @returns {void} Nothing; the resolver is retained.
+       */
+      (resolve: (value: HeldOutcome) => void): void => {
+        releaseSignOn = resolve;
+      },
+    ),
+  );
+  const user = await mountSignOn();
+
+  const idle = submitControl();
+  expect(
+    idle.querySelectorAll(`.${BUTTON_ICON_SLOT_CLASS}`),
+    'the idle control must already carry the slot the loading glyph will occupy',
+  ).toHaveLength(1);
+  expect(idle).not.toHaveAttribute('aria-busy');
+  /*
+   * WHY : ⚠️ Assumptions: the glyph must contribute NOTHING to what the control is called, and this is
+   *       asserted by an exact name rather than by the substring check the design-system case above
+   *       makes. Every `@ant-design/icons` export renders `role="img"` with `aria-label` set to the
+   *       icon's own name -- `node_modules/@ant-design/icons/es/components/AntdIcon.js` L48-L50 -- so an
+   *       unhidden glyph makes this control announce "login Sign on" and read twice. A
+   *       `toHaveTextContent` assertion matches a SUBSTRING and passes against exactly that defect,
+   *       which is why the name is compared for equality and additionally recomputed through the query
+   *       library's own accessible-name path. The same omission was measured failing eighteen cases
+   *       across the sibling menu suites in one run.
+   */
+  expect(idle.textContent, 'the glyph must not join the label the control announces').toBe(
+    SIGN_ON_SUBMIT_LABEL,
+  );
+  expect(
+    within(cardFrame()).getByRole('button', { name: SIGN_ON_SUBMIT_LABEL }),
+    'the control must still resolve by its catalogued name alone',
+  ).toBe(idle);
+
+  await enterCredentials(user);
+  await user.click(submitControl());
+
+  /*
+   * WHY : Alternatives Considered: polling an expectation inside `waitFor`. Rejected for the reason
+   *       recorded on {@link waitForVerbatimMessage} -- this file's lint configuration selects an arrow
+   *       function in every position for `jsdoc/require-jsdoc`, and Prettier then relocates the block
+   *       comment the callback owes away from the callback. A `findByRole` carrying the ARIA state
+   *       waits by itself, and `busy` is a first-class role option in the query library.
+   */
+  const busy = await within(cardFrame()).findByRole('button', { busy: true });
+  const slots = busy.querySelectorAll(`.${BUTTON_ICON_SLOT_CLASS}`);
+  expect(slots, 'the busy control must carry exactly the same one slot').toHaveLength(1);
+  expect(
+    slots[0]?.className,
+    'the loading glyph must occupy the icon slot rather than a slot of its own',
+  ).toContain(BUTTON_LOADING_ICON_CLASS);
+  // WHY : ⚠️ Assumptions: the absence of a motion wrapper is asserted, because that wrapper IS the
+  //       defect -- it is the element whose width the design system animates from zero. Its class is
+  //       derived from the slot's own name plus the library's motion suffix, so it is composed here
+  //       rather than retyped, and a rename of the slot cannot leave this assertion silently vacuous.
+  expect(
+    busy.querySelector(`[class*="${BUTTON_LOADING_ICON_CLASS}-motion"]`),
+    'no zero-width motion may wrap the loading glyph',
+  ).toBeNull();
+
+  // WHY : Assumptions: the held exchange is RELEASED rather than left outstanding, so the screen
+  //       settles inside the case rather than updating after the harness has torn the tree down.
+  releaseSignOn(tokensForGroups([CARDDEMO_USER_GROUP]));
+}
+
 /*
  * WHY : Alternatives Considered: every sentence below is asserted through the imported catalog in
  *       `ui/src/messages/messages.ts`, and retyping the words into this file was rejected on a
@@ -1302,10 +1415,17 @@ async function resolvesTheRefusalColourThroughTheTokenBridge(): Promise<void> {
   await user.click(submitControl());
   const refusal = await waitForVerbatimMessage(SIGN_ON_MESSAGES.PLEASE_ENTER_USER_ID);
 
-  // WHY : Assumptions: the bridge entry is a design-system token name, so it begins with the token
-  //       family's own prefix and can never be a colour literal. `ui/src/theme/tokens.ts` records
-  //       which shade of the error ramp it points at and the contrast measurement that chose it.
-  expect(FIELD_ERROR_TOKENS.errorColor).toMatch(/^color/u);
+  // WHY : Refactoring Rationale: this used to assert the token name matched /^color/, using the alias
+  //       family's prefix as a proxy for "this is a design-system token and not a colour literal".
+  //       That proxy was too narrow. No `colorError*` alias in antd 6.5.2 is dark enough for this
+  //       role -- the darkest, `colorErrorTextActive` at #d9363e, measures 4.224:1 against the error
+  //       band's own `colorErrorBg` tint of #fff2f0, below the 4.5:1 bar -- so the bridge entry in
+  //       `ui/src/theme/tokens.ts` points at the ramp member `red7`, which measures 5.097:1 there.
+  //       AAP section 0.3.3 lists the full colour ramp in the map layer of the available token
+  //       surface, so a ramp member IS a design-system token. Asserting MEMBERSHIP in antd's resolved
+  //       token set states the intended property directly instead of matching a naming convention: a
+  //       colour literal fails it, and so does a token name that antd does not publish.
+  expect(Object.keys(theme.getDesignToken({}))).toContain(FIELD_ERROR_TOKENS.errorColor);
   expect(refusal.style.color).toBe('');
   expect(userIdControl().style.color).toBe('');
 }
@@ -1337,6 +1457,10 @@ function signOnContractCases(): void {
     opensWithTheCursorInTheIdentifier,
   );
   it('masks the credential and offers no way to reveal it', masksTheCredentialWithNoWayToRevealIt);
+  it(
+    "keeps the submit control's icon slot filled in both states",
+    keepsTheSubmitControlsIconSlotFilledInBothStates,
+  );
   it(
     'frames the screen in design-system components rather than raw markup',
     framesTheScreenInDesignSystemComponents,

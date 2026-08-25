@@ -62,21 +62,27 @@
 
 import {
   Button,
+  ConfigProvider,
   Descriptions,
   Flex,
   Form,
   Input,
-  Popconfirm,
+  Modal,
   Result,
   Typography,
   theme,
 } from 'antd';
-import type { InputRef } from 'antd';
+import type { DescriptionsProps, InputRef } from 'antd';
 import { useCallback, useEffect, useReducer, useRef } from 'react';
-import type { CSSProperties, ChangeEvent, ReactElement } from 'react';
+import type { CSSProperties, ChangeEvent, ReactElement, ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
 
-import { isApiRequestError, isConflictFailure } from '../../api/client';
+import {
+  isApiRequestError,
+  isConflictFailure,
+  isRepeatableFailure,
+  isTransientFailure,
+} from '../../api/client';
 import {
   createTransactionType,
   deleteTransactionType,
@@ -87,8 +93,15 @@ import type { TransactionType } from '../../api/reference';
 import type { AbendDetail, FieldError, FieldValidationState } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { MessageBand } from '../../layout/MessageBand';
+import {
+  BLANK_FIELD_MARKER_CHARACTERS,
+  busyAnnouncement,
+  busyProps,
+  fieldAriaProps,
+  fieldRefusalRendering,
+} from '../../layout/fieldHelp';
 import type { MessageBandChannel } from '../../layout/MessageBand';
+import { copybookFieldWidthStyle } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type {
@@ -96,20 +109,30 @@ import type {
   PfKeyHandlerEntry,
   PfKeyHandlerMap,
   PfKeyRejection,
+  PfKeyRisk,
 } from '../../layout/usePfKeys';
 import {
   ABEND_DATA_FIELDS,
+  ACCESS_DENIED_NOT_AUTHORIZED,
   FIELD_VALIDATION_SUFFIXES,
+  PERSISTENT_FAILURE_REPORT_IT,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
+  fitsDeclaredWidth,
+  normaliseForWire,
 } from '../../messages/messages';
 import {
   ADMIN_MENU_ROUTE,
   inApplicationRoute,
+  isReferenceTypeCode,
   navigateSafely,
+  referenceTypeEditRoute,
   screenTransitionState,
 } from '../../routes/navigation';
+import { destructiveFocusTheme } from '../../theme/antdTheme';
 import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 
 /*
@@ -186,6 +209,45 @@ export const REF_TYPE_EDIT_SUBTITLE = 'Maintain Transaction Type';
  * because Transformation Rule T8 carries a user-visible string character for character, and because
  * trimming it here would make this module a second spelling of the mapset's own literal.
  */
+/**
+ * Column count for the record the destructive confirmation names.
+ *
+ * WHY : ⚠️ Refactoring Rationale: this replaces the element identifier both confirmation controls used to
+ *       take their accessible description from, and the replacement is a consequence of the primitive
+ *       rather than a reduction. That identifier existed because the previous overlay carried NO ARIA
+ *       role, so focus moving to the safe choice announced `Cancel, button` and nothing else and the
+ *       record had to be attached to each control by hand. A `Modal` is announced by name and its
+ *       contents are read on open, so the same fact reaches the same operator through the surface's own
+ *       semantics; keeping both would state one thing twice, and the hand-maintained identifier is the
+ *       half that can rot.
+ *
+ *       Assumptions: ONE column, because the two rows are a key and a fifty-character description and a
+ *       side-by-side pair would put the description in half the dialogue's width. The sibling list
+ *       dialogue names its row the same way for the same reason.
+ */
+const DELETE_CONFIRMATION_RECORD_COLUMNS = 1;
+
+/**
+ * Identifier of the element naming the record inside the delete confirmation.
+ *
+ * ⚠️ Purpose: both of the confirmation's actions point at this element with `aria-describedby`, so the
+ * record being destroyed is announced with whichever action the operator lands on, rather than only if
+ * they happen to read the surface as a whole. That distinction is not theoretical here: browser
+ * measurement found focus placed on the DECLINING control the moment this dialogue opens, so the record
+ * naming has to travel with the control or it is never heard.
+ *
+ * ⚠️ Assumptions: the identifier is put on the record block rather than on the dialogue, and the
+ * dialogue keeps `aria-labelledby` pointing at its own question. A description and a label are different
+ * things -- the label says what is being asked and the description says which record it is being asked
+ * about -- so collapsing them onto one element would lose one of the two.
+ *
+ * ⚠️ Refactoring Rationale: this screen was the outlier rather than the pattern.
+ * `ui/src/screens/cardUpdate/index.tsx` and `ui/src/screens/authDetail/index.tsx` already wire their own
+ * confirmations exactly this way, and cardUpdate's own note claimed this file did too -- a claim that was
+ * false when written and is made true here rather than deleted.
+ */
+const DELETE_CONFIRMATION_RECORD_ID = 'ref-type-edit-delete-confirmation-record';
+
 export const REF_TYPE_EDIT_FIELD_LABELS = {
   /** `COTRTUP.bms` L79-L83. */
   typeCode: 'Transaction Type  :',
@@ -223,6 +285,52 @@ export const TYPE_CODE_CONTROL_ID = 'ref-type-edit-type-code';
 
 /** Identifier joining the description label to its control. */
 export const DESCRIPTION_CONTROL_ID = 'ref-type-edit-description';
+
+/**
+ * Occupies a control's suffix slot on every turn the blank marker is not due.
+ *
+ * Purpose: keep the two entry controls' DOM SHAPE constant, so the input element is never unmounted
+ * and remounted while the operator is typing into it.
+ *
+ * ⚠ WHY : Refactoring Rationale: adopting the shared blank marker as the control's `suffix` introduced
+ *       a defect that adopting it as a sibling element did not, and this constant is the remedy antd
+ *       itself prescribes. `antd/lib/input/Input.js` L116 warns in development that "dynamic add or
+ *       remove prefix / suffix will make it lose focus caused by dom structure change", and the cause
+ *       is structural rather than incidental: `@rc-component/input/lib/BaseInput.js` returns the bare
+ *       `<input>` when no affix is present and wraps it in a `<span>` when one is, so the element at
+ *       that position changes type and React unmounts the input.
+ *
+ *       Measured, before this constant existed: the blank-description refusal was raised, the operator
+ *       typed a ten-character replacement, and the control held ONE character -- the first keystroke
+ *       cleared the refusal, the marker went, the input was replaced, and `isConnected` on the element
+ *       that had focus was false. Every keystroke after the first reached a detached node. In a browser
+ *       that is an operator correcting a refused field and watching nine of ten characters vanish.
+ *
+ *       Assumptions: the placeholder is a {@link Typography.Text} and not a bare element, so both
+ *       states of the slot render the SAME component and React updates attributes rather than replacing
+ *       anything -- `blankFieldMarker` in `ui/src/layout/fieldHelp.tsx` builds the marker from that
+ *       component too.
+ *
+ *       Assumptions: it carries `aria-hidden` and no text, so an empty slot announces nothing. It is
+ *       not the marker's absence made visible; it is the marker's absence made STRUCTURALLY equal to
+ *       its presence.
+ *
+ *       Alternatives Considered: (1) rendering the marker beside the control instead of inside it,
+ *       which is where this screen had it and which has no shape change at all. Rejected on fidelity:
+ *       `app/cpy/CSSETATY.cpy` L24 MOVEs the asterisk into the screen FIELD, so it occupied the field's
+ *       own columns, which a suffix inside the control's box corresponds to and an element after the
+ *       box does not. (2) Leaving the marker mounted always and hiding it, which reserves the same
+ *       space and additionally leaves a character in the DOM that is not true of the turn. (3) Keying
+ *       the control so React reuses it -- a key does not help, because the element TYPE at that
+ *       position is what changes.
+ *
+ *       Trade-offs: `.ant-input-suffix` is now present on both controls on every turn, so its inline
+ *       margin is reserved whether or not a marker occupies it. Accepted: the alternative is an input
+ *       that discards typing, and the controls are already sized as a CEILING by
+ *       `copybookFieldWidthStyle` rather than to an exact column count, so a constant few pixels inside
+ *       that ceiling changes nothing an operator can act on.
+ */
+const MARKER_SLOT_UNOCCUPIED: ReactElement = <Typography.Text aria-hidden="true" />;
 
 /**
  * The mode this screen is in, transcribed one-to-one from the reference's `TTUP-*` condition names.
@@ -382,6 +490,48 @@ export const REF_TYPE_EDIT_KEY_LABELS: Readonly<Record<RefTypeEditKeyAid, string
   PFK06: 'F6=Add',
   /** `FKEY12`, `COTRTUP.bms` L131-L135. */
   PFK12: 'F12=Cancel',
+};
+
+/**
+ * The risk each of this mapset's six legends carries, read from what its LABEL says the key does.
+ *
+ * ⚠ Purpose: `ui/src/layout/PfKeyBar.tsx` paints a control's emphasis from this declaration, and the
+ * declaration exists because the alternative -- emphasis chosen from the attention IDENTIFIER -- cannot be
+ * right on this screen and the sibling list screen at once. `PFK04` deletes a stored row here and clears a
+ * form on the screens whose mapsets paint `'F4=Clear'`; `PFK10` saves on the list screen and pages
+ * elsewhere. One table keyed on the identifier must therefore be wrong for one of them, so the risk is
+ * declared per screen, from the label the mapset paints.
+ *
+ * ⚠ Assumptions: `PFK04` is the only DESTRUCTIVE entry, and it is destructive in every mode -- the label
+ * is verbatim `'F4=Delete'` in both the arming and the confirming mode, because `COTRTUP.bms` L116-L120
+ * paints one literal and rule T8 carries it character for character, so the control cannot say which
+ * press this is. The dialogue the confirming mode raises is what says so instead, and the emphasis is what
+ * says the key destroys something in both.
+ *
+ * Assumptions: `PFK05` is MUTATING because its label promises a write and it performs two of them --
+ * `2000-DECIDE-ACTION` at `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` replaces a stored row from
+ * `changesOkNotConfirmed` and inserts a new one from the not-found stage, which is the real add path.
+ *
+ * Assumptions: `PFK06` is declared MUTATING from its label even though `0001-CHECK-PFKEYS` carries no
+ * `CCARD-AID-PFK06` term and the key is refused in every mode. The declaration states what the legend
+ * PROMISES, which is what an operator reads; that the promise is never honoured is carried by the
+ * control's disabled state, and the design system's disabled styling is what an operator sees.
+ * Alternatives Considered: omitting the entry so the key falls back to the bar's identifier-driven
+ * default. Rejected because an absent entry reads as "nobody decided", where this one records that the
+ * label was read and what it says.
+ *
+ * Assumptions: the three remaining entries are READ-ONLY, and none of them writes. `'ENTER=Process'`
+ * validates what was typed and fetches the row -- the reference requires PF5 for the save, so processing
+ * is not a write here; `'F3=Exit'` transfers; and `'F12=Cancel'` backs out local edits or withdraws a
+ * pending delete, which is the reference's L1000-L1002 arm and touches no stored row.
+ */
+export const REF_TYPE_EDIT_KEY_RISKS: Readonly<Record<RefTypeEditKeyAid, PfKeyRisk>> = {
+  ENTER: 'read-only',
+  PFK03: 'read-only',
+  PFK04: 'destructive',
+  PFK05: 'mutating',
+  PFK06: 'mutating',
+  PFK12: 'read-only',
 };
 
 /**
@@ -913,6 +1063,172 @@ export function messageChannel(field: string): MessageBandChannel {
  */
 
 /**
+ * HTTP status the transport answers a bearer-carrying request whose session is no longer valid.
+ *
+ * Assumptions: the shared client ends the session on this status, so the route guard replaces this
+ * screen with the sign-on screen within the same paint. Nothing is painted on row 23 for it.
+ */
+const SESSION_REFUSED_STATUS = 401;
+
+/**
+ * HTTP status the transport answers a request whose token carries neither CardDemo group.
+ *
+ * Assumptions: `services/reference-service/src/main/resources/openapi/reference-api.yaml` declares
+ * `x-required-authority: carddemo-admin` on this screen's writes and `carddemo-user` on its read, so a
+ * refusal is an ordinary authority outcome and never a system fault.
+ */
+const AUTHORITY_REFUSED_STATUS = 403;
+
+/**
+ * Reports whether a failure is a REFUSAL the operator can act on rather than a fault.
+ *
+ * WHY : ⚠️ Purpose: this is the distinction the abend surface turns on. `app/cpy/CSMSG02Y.cpy` L21-L29
+ *       declares the `ABEND-DATA` fields that surface paints, and the reference reaches it only from an
+ *       abend routine -- a condition the program cannot continue from. An authority refusal is not
+ *       that: the program never ran, the data is intact, and the operator has an action available. So a
+ *       refusal is reported on row 23 and never escalated to the surface reserved for a fault.
+ * @param {unknown} failure - Whatever a call rejected with.
+ * @returns {boolean} Whether the failure is a session or authority refusal.
+ */
+function isRefusal(failure: unknown): boolean {
+  return (
+    isApiRequestError(failure) &&
+    (failure.status === SESSION_REFUSED_STATUS || failure.status === AUTHORITY_REFUSED_STATUS)
+  );
+}
+
+/**
+ * Reports the structured abend a failure should surface, or `null` when it must not surface one.
+ *
+ * WHY : ⚠️ Refactoring Rationale: the abend surface used to be painted for ANY read failure that
+ *       carried abend data, and the reducer took that data straight off the problem document. Two
+ *       conditions reached it that are not abends. An authority refusal is one -- see {@link isRefusal}
+ *       -- and a transient failure is the other: a timeout or a gateway that gave up is a condition
+ *       that may clear on its own, which is the opposite of the state that surface exists to report.
+ *       The reference has no analogue of either, because a CICS task refused by RACF never entered the
+ *       program and a task talking to Db2 does not time out and continue.
+ *
+ *       Assumptions: BOTH published predicates are consulted rather than only the first, because they
+ *       differ on exactly the case that matters -- `ui/src/api/client.ts` records that a gateway
+ *       failure on a write is transient but NOT repeatable. Withholding the fault surface for anything
+ *       either predicate admits keeps the surface for the condition it names, and a failure that is
+ *       transient but unrepeatable is still not a fault.
+ * @param {unknown} failure - Whatever a call rejected with.
+ * @returns {AbendDetail | null} The abend to surface, or `null` to leave the screen intact.
+ */
+function abendToSurface(failure: unknown): AbendDetail | null {
+  if (!isApiRequestError(failure) || isRefusal(failure)) {
+    return null;
+  }
+
+  /*
+   * WHY : Assumptions: the narrowed failure is bound to a second name BEFORE the two predicates are
+   *       consulted, and that is a type-system necessity rather than a preference. Both predicates are
+   *       TYPE PREDICATES narrowing to the failure class, so testing them in a returning condition --
+   *       whether inline or through an aliased boolean, which TypeScript also narrows -- leaves the
+   *       parameter as `never` on the path that continues, and the document could not then be read.
+   *       Binding first keeps the published classification in the condition where it reads correctly.
+   */
+  const raised = failure;
+
+  if (isTransientFailure(failure) || isRepeatableFailure(failure)) {
+    return null;
+  }
+  return raised.problem.abend;
+}
+
+/**
+ * Transport status the shared client raises when no response arrived at all.
+ *
+ * Assumptions: `ui/src/api/client.ts` declares its own `NO_HTTP_STATUS = 0` and does not export it, so the
+ * value is restated here rather than reached for. It is part of the PUBLISHED shape of `ApiRequestError` --
+ * its `status` member documents `0` when nothing answered -- so restating it copies a documented contract
+ * and not an implementation detail. The sibling list screen restates the same constant for the same reason.
+ */
+const NO_TRANSPORT_STATUS = 0;
+
+/**
+ * Chooses the authored sentence a failure with no baseline analogue is reported with.
+ *
+ * WHY : ⚠️ Purpose: three of this screen's failure paths ended in a sentence transcribed from a Db2
+ *       arm -- the cursor's abend replacement, `'Update of record failed'`, `'Changes unsuccessful'` and
+ *       `'Record delete failed'` -- and each of those states that the TABLE refused the work. A request
+ *       that timed out, was throttled, or never reached a service did not get that far, so reporting one
+ *       of those sends an operator, and anyone they call, to look for a database failure that never
+ *       happened. These two sentences say what actually occurred, and they are catalogued in
+ *       `ui/src/messages/messages.ts` rather than authored here.
+ * WHY : ⚠️ Assumptions: the classification is read through the client's OWN published predicate rather
+ *       than by comparing statuses, because the client is where the classification is defined -- it lists
+ *       408, 429, 502, 503 and 504 beside a timeout -- and a screen that re-derived it would drift from
+ *       it silently.
+ * WHY : ⚠️ Assumptions: `null` is returned when neither arm applies, and the CALLER then paints its own
+ *       baseline sentence. That keeps every transcribed sentence reachable for the condition it was
+ *       transcribed for: a plain 500 is excluded from the transient set on the stated ground that it is
+ *       what a service answers for a defect it has already recorded, which is exactly the condition
+ *       `COTRTUPC`'s Db2 arms compose their diagnostics for.
+ * WHY : Assumptions: a failure that reached nothing and is NOT transient is the dropped connection alone
+ *       -- the timed-out one is answered by the transient arm above it -- so it earns the persistent
+ *       sentence rather than an invitation to try again immediately.
+ * WHY : Trade-offs: no REPEAT control is offered on either arm, so `isRepeatableFailure` gates nothing
+ *       here. This screen's own keys are the repeat mechanism: the operator presses ENTER, F5 or F4
+ *       again, which is the only repeat the reference offers. A control that repeated the last call by
+ *       itself would have to be gated on that predicate -- the client records that a gateway failure on
+ *       a write is transient but NOT repeatable, because the write may have been applied -- and the
+ *       reason none is added is that re-pressing a key the operator chose is the reference's own answer,
+ *       not that the distinction is unimportant.
+ * @param {unknown} failure - Whatever the call rejected with.
+ * @returns {string | null} The authored sentence, or `null` when the caller's baseline sentence applies.
+ */
+function authoredFailureMessage(failure: unknown): string | null {
+  if (!isApiRequestError(failure)) {
+    return null;
+  }
+  /*
+   * WHY : ⚠ Assumptions: a sentence the SERVICE supplied is preferred over each classification below and
+   *       rendered exactly as received, and the preference is scoped to THESE TWO ARMS rather than
+   *       applied to every failure. Within them it is the better sentence: both are classifications of
+   *       a transport outcome and say nothing about what was asked, so a service that named the
+   *       condition said more. Outside them the catalogued sentence is the better one, because every
+   *       remaining arm on this screen is a NAMED condition transcribed from the program for exactly
+   *       that condition -- the concurrency refusal, the lock refusal, the child-record instruction and
+   *       the cursor's abend replacement -- and each says something a general sentence cannot.
+   *       Alternatives Considered: preferring the member for every failure, which is what several
+   *       sibling screens do. Rejected on measured evidence from this screen's own siblings: the list
+   *       screen classifies a 400 filtered-empty refusal by the FIELD ENTRIES the document carries and
+   *       not by its prose, and a control case there proves a 400 naming `cursor` must report the fault
+   *       sentence. Preferring prose ahead of that classification made the control case report the
+   *       refusal sentence for a genuine fault, so the scope is narrow by evidence rather than by
+   *       preference.
+   *       Assumptions: `ui/src/api/client.ts` mints its own document for the two failures that reached
+   *       no service with `message: null`, so a non-empty member here is always a service's own words
+   *       and never the transport's diagnostic. Trade-offs: this screen cannot verify the prose it
+   *       renders; the redaction obligation sits with the service, and this screen's own duty -- never
+   *       composing a sentence from a status, a SQL code or a response body -- is unaffected.
+   */
+  const message = failure.problem.message;
+  const supplied = message !== null && message.trim() !== '' ? message : null;
+  /*
+   * WHY : ⚠ Assumptions: the status is read into a local BEFORE the classification, and the order is
+   *       forced by the predicate's declared shape rather than chosen. `isTransientFailure` narrows to
+   *       `ApiRequestError` -- the same type its argument already has here -- so TypeScript computes the
+   *       false branch as `Exclude<ApiRequestError, ApiRequestError>`, which is `never`, and a member
+   *       read after the branch fails to compile with `Property 'status' does not exist on type
+   *       'never'`. Reading the number first keeps it out of the narrowing entirely.
+   *       Alternatives Considered: re-testing `isApiRequestError` inside the second arm to widen the
+   *       type back. Rejected because it asserts the same fact twice and reads as though the value might
+   *       have changed between two statements, which it cannot.
+   */
+  const status = failure.status;
+  if (isTransientFailure(failure)) {
+    return supplied ?? TRANSIENT_FAILURE_TRY_AGAIN;
+  }
+  if (status === NO_TRANSPORT_STATUS) {
+    return supplied ?? PERSISTENT_FAILURE_REPORT_IT;
+  }
+  return null;
+}
+
+/**
  * Chooses the row-23 sentence a rejected read is reported with.
  *
  * Assumptions: a 404 is not a failure and never reaches here -- `9100-GET-TRANSACTION-TYPE` treats
@@ -920,15 +1236,46 @@ export function messageChannel(field: string): MessageBandChannel {
  * `'No record found for this key in database'`, which the reducer paints when it moves to
  * `detailsNotFound`. Everything else is the L1495 arm, whose registered replacement is the generic
  * abend sentence.
+ *
+ * WHY : ⚠️ Refactoring Rationale: an authority refusal is now reported AS a refusal. It used to reach
+ *       the L1495 arm and paint `'UNEXPECTED ABEND OCCURRED.'`, which told an operator the system had
+ *       failed when in fact their token carried no CardDemo group -- so they could not act on the one
+ *       thing they could have acted on, and a real authority problem was hidden behind a sentence that
+ *       invites a support call. A 401 paints nothing, because the client ends the session on it and the
+ *       guard swaps this screen for the sign-on screen in the same paint.
+ *
+ *       ⚠️ Refactoring Rationale: a failure that never reached the service no longer earns the
+ *       registered abend replacement. This comment recorded that it had to, because the catalogue
+ *       carried no authored sentence for a transient condition and this screen may not author one -- and
+ *       it now carries two, so {@link authoredFailureMessage} answers those conditions and the abend
+ *       sentence is left for the Db2 arm it was transcribed from. The other half of that shortfall was
+ *       already closed by {@link abendToSurface}, which withholds the fault SURFACE for the same
+ *       conditions; this closes the SENTENCE, and the two now agree.
  * @param {unknown} failure - Whatever the read rejected with.
- * @returns {string} The sentence to paint on row 23.
+ * @returns {string} The sentence to paint on row 23, empty when the outcome is reported elsewhere.
  */
 export function readFailureMessage(failure: unknown): string {
+  if (isApiRequestError(failure)) {
+    if (failure.status === SESSION_REFUSED_STATUS) {
+      return '';
+    }
+    if (failure.status === AUTHORITY_REFUSED_STATUS) {
+      return ACCESS_DENIED_NOT_AUTHORIZED;
+    }
+  }
+
+  /*
+   * WHY : ⚠ Assumptions: a message the SERVICE supplied is preferred over anything chosen here, and it
+   *       is rendered verbatim. It is the only sentence in this chain that can name the actual
+   *       condition -- `ABEND-ROUTINE` at `COTRTUPC.cbl` L1677-L1682 fills the generic text only when
+   *       the specific text is empty, so a filled message is the specific one and replacing it with a
+   *       classification would discard the more informative of the two.
+   */
   const problem = isApiRequestError(failure) ? failure.problem : null;
   if (problem !== null && problem.abend !== null && problem.abend.abendMsg.trim() !== '') {
     return problem.abend.abendMsg;
   }
-  return SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED;
+  return authoredFailureMessage(failure) ?? SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED;
 }
 
 /**
@@ -965,8 +1312,28 @@ export function writeFailureMessage(failure: unknown, operation?: 'create' | 're
   if (isConflictFailure(failure)) {
     return EDIT_STATUS.DATA_WAS_CHANGED_BEFORE_UPDATE.text;
   }
+  /*
+   * WHY : ⚠ Assumptions: the lock refusal is tested BEFORE the classification, and the order is
+   *       deliberate. 503 is a transient status by the client's own list, so an authored
+   *       `'The service is not available at the moment.'` would capture it and the baseline's
+   *       `'Could not lock record for update'` -- the sentence `SQLCODE -911` earns at L1561-L1566 --
+   *       would become unreachable. A named condition beats a classification: both tell the operator to
+   *       try again, and only one says what stopped them. Every OTHER transient status carries no such
+   *       baseline sentence, which is what the arm below answers.
+   */
   if (isApiRequestError(failure) && failure.status === SERVICE_UNAVAILABLE_STATUS) {
     return EDIT_STATUS.COULD_NOT_LOCK_REC_FOR_UPDATE.text;
+  }
+  /*
+   * WHY : ⚠ Refactoring Rationale: a throttle, a gateway failure, a timeout or a dropped connection
+   *       used to be reported with whichever Db2 arm's sentence matched the operation -- `'Update of
+   *       record failed'` or `'Changes unsuccessful'` -- both of which state that the table refused the
+   *       write. For a request that never arrived, that is a false report of a database failure. The two
+   *       arms below stay exactly as they were for the condition they were transcribed for.
+   */
+  const authored = authoredFailureMessage(failure);
+  if (authored !== null) {
+    return authored;
   }
   return operation === 'replace'
     ? EDIT_STATUS.TABLE_UPDATE_FAILED.text
@@ -995,7 +1362,19 @@ export function deleteFailureMessage(failure: unknown): string {
   if (isConflictFailure(failure)) {
     return SHARED_MESSAGES.PLEASE_DELETE_ASSOCIATED_CHILD_RECORDS_FIRST;
   }
-  return EDIT_STATUS.RECORD_DELETE_FAILED.text;
+  /*
+   * WHY : ⚠ Assumptions: a delete that never reached the service is reported as such rather than as
+   *       `'Record delete failed'`, which is the `9800-DELETE-PROCESSING` arm at L1650-L1657 and states
+   *       that the DELETE was attempted and refused. The distinction matters more on this path than on
+   *       any other on this screen: an operator told the delete failed will re-arm and press F4 again,
+   *       and for a dropped connection the row's fate is genuinely unknown -- `'That request did not
+   *       complete. Report it if it happens again.'` invites the re-read that answers it, where the
+   *       baseline sentence invites a second attempt at destroying a row that may already be gone.
+   *       Trade-offs: the honest fix for that ambiguity is an idempotency key on the operation, which
+   *       lives in the service contract this change may not edit; it is reported to the dispatcher
+   *       instead.
+   */
+  return authoredFailureMessage(failure) ?? EDIT_STATUS.RECORD_DELETE_FAILED.text;
 }
 
 /** Abend code the reference raises when its action `EVALUATE` reaches a mode it does not describe. */
@@ -1055,6 +1434,62 @@ export interface RefTypeEditRecord {
 const EMPTY_RECORD: RefTypeEditRecord = { typeCode: '', description: '' };
 
 /**
+ * Cuts text down to what a declared fixed-width field can carry, in canonical form.
+ *
+ * Purpose: a `PIC X(n)` field is n BYTES on the record, and the browser's own guard counts neither
+ * bytes nor characters -- `maxLength` counts UTF-16 units, so `'🎉'` spends two of them for one
+ * character and `'é'` typed as a base letter plus a combining accent spends two for one as well. This
+ * answers the question the control cannot: what of this value does the field actually hold.
+ *
+ * WHY : Assumptions: the value is normalised to NFC BEFORE it is measured, through
+ *       {@link normaliseForWire}, because the two spellings of an accented letter differ in length and
+ *       only one of them is what a fixed-width record should carry. Measuring first and normalising
+ *       afterwards could cut a value that would have fitted once composed.
+ *
+ *       Assumptions: the width is checked with {@link fitsDeclaredWidth}, which requires the value to
+ *       fit in code points AND in UTF-8 bytes. That helper records why both are needed; the short of it
+ *       is that the byte measure is the one a fixed-width record enforces and the character measure is
+ *       the one an operator sees.
+ *
+ *       Trade-offs: this screen's own alphanumeric edit -- `1210-EDIT-TTYPE` at
+ *       `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L893 -- refuses anything but letters, digits and
+ *       spaces, so for a value the operator TYPED the normalisation is identity and the cut is
+ *       unreachable. It is applied anyway, because the values this screen holds do not all come from the
+ *       keyboard: a response row is assigned straight into state, where no control guard of any kind
+ *       runs.
+ * @param {string} text - Text as it arrived, from an operator or from a response body.
+ * @param {number} declaredWidth - The field's `PIC X(n)` width; a non-negative integer.
+ * @returns {string} The normalised text, cut on a character boundary until it fits both measures.
+ * @throws {RangeError} If `declaredWidth` is negative or not an integer, raised by
+ *   {@link fitsDeclaredWidth} because the caller then did not pass a COBOL field width.
+ */
+export function holdInField(text: string, declaredWidth: number): string {
+  let held = normaliseForWire(text);
+
+  /*
+   * WHY : Assumptions: the cut walks CODE POINTS from the end, using the array spread rather than
+   *       `slice`, because `slice` indexes UTF-16 units and would be able to cut a surrogate pair in
+   *       half -- producing a lone surrogate, which is not text at all and which `TextEncoder` answers
+   *       with a replacement character. Walking code points can only ever remove whole characters.
+   *
+   *       Assumptions: it loops rather than computing a length, because the predicate is a BYTE budget
+   *       as well as a character budget and one code point can cost between one and four bytes. There is
+   *       no index arithmetic that answers "how many characters fit in n bytes" without measuring, so
+   *       the measurement is the loop condition.
+   *
+   *       Trade-offs: the loop is bounded by the code-point count of the value, so its cost is linear in
+   *       a field that is fifty characters wide. A binary search would be asymptotically better and is
+   *       not worth the reader's time at this size.
+   */
+  while (held !== '' && !fitsDeclaredWidth(held, declaredWidth)) {
+    const points = [...held];
+    points.pop();
+    held = points.join('');
+  }
+  return held;
+}
+
+/**
  * Adopts a row the service answered with as this screen's record pair.
  *
  * ⚠ Trade-offs: each member is COERCED to a string rather than trusted, even though
@@ -1065,13 +1500,23 @@ const EMPTY_RECORD: RefTypeEditRecord = { typeCode: '', description: '' };
  * showing an empty field. Per design rule UI8 a view that renders `undefined` is already wrong; one that
  * crashes on it is worse. The cost is two type guards that a well-behaved service makes redundant, which
  * is the anti-corruption layer AAP section 0.4.3 puts at exactly this seam.
+ *
+ * WHY : ⚠ Refactoring Rationale: each member is now cut to its declared width through
+ *       {@link holdInField}, and both were adopted whole. `maxLength` on a control governs TYPING and
+ *       does nothing to a value assigned programmatically, so a row whose description exceeded the field
+ *       arrived intact, was displayed in a field that cannot hold it, and was offered back on the next
+ *       save to a `CHAR(50)` column -- `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L4, matching
+ *       `TRAN-TYPE-DESC PIC X(50)` at `app/cpy/CVTRA03Y.cpy` L6. This is the seam to do it at, because it
+ *       is the one place a response row becomes screen state.
  * @param {TransactionType} row - The row as the response carried it.
- * @returns {RefTypeEditRecord} The pair, with any absent member as the empty string.
+ * @returns {RefTypeEditRecord} The pair, each member normalised and cut to the width its field declares,
+ *   with any absent member as the empty string.
  */
 export function adoptRow(row: TransactionType): RefTypeEditRecord {
   return {
-    typeCode: typeof row.typeCd === 'string' ? row.typeCd : '',
-    description: typeof row.description === 'string' ? row.description : '',
+    typeCode: typeof row.typeCd === 'string' ? holdInField(row.typeCd, TYPE_CODE_WIDTH) : '',
+    description:
+      typeof row.description === 'string' ? holdInField(row.description, DESCRIPTION_WIDTH) : '',
   };
 }
 
@@ -1265,6 +1710,49 @@ export type RefTypeEditRequest =
   | { readonly kind: 'delete'; readonly typeCd: string };
 
 /**
+ * Names the key whose turn is outstanding, from the call that turn decided on.
+ *
+ * ⚠️ Purpose: `ui/src/layout/PfKeyBar.tsx` paints the in-flight affordance on the entry declared `busy`,
+ * and the primitive's contract is that the entry is the one whose OWN turn is waiting -- not every entry
+ * on a screen that happens to have a call outstanding. This screen issues calls from three different
+ * keys, so the outstanding one cannot be a constant and is derived from the request instead.
+ *
+ * ⚠️ Assumptions: a `read` is attributed to ENTER even though the route can start one without a press.
+ * `'ENTER=Process'` at `app/app-transaction-type-db2/bms/COTRTUP.bms` L101-L105 is the legend for the
+ * action that fetches a row, and a route arrival performs the same fetch -- `answerRouteArrival` reads the
+ * key out of the address instead of out of the control. So the progress affordance appears on the control
+ * that names the work in progress, whichever way the work was started.
+ *
+ * Assumptions: `create` and `replace` are both attributed to PF5, because `'F5=Save'` at L121-L125 is the
+ * one legend covering both writes -- `2000-DECIDE-ACTION` at `COTRTUPC.cbl` routes a save to `UPDATE`
+ * from `changesOkNotConfirmed` and to `INSERT` from the not-found stage, and the mapset paints no separate
+ * insert legend.
+ *
+ * Alternatives Considered: recording the initiating identifier in the state as a separate member. Rejected
+ * because it would be a second field that has to agree with `request` on every transition, and the two
+ * could then disagree; the request already says which action is outstanding, so the attribution is derived
+ * rather than stored.
+ * @param {RefTypeEditRequest | null} request - The call in flight, or `null` when none is.
+ * @returns {RefTypeEditKeyAid | null} The identifier whose turn is outstanding, or `null` when none is.
+ */
+export function outstandingKeyAid(request: RefTypeEditRequest | null): RefTypeEditKeyAid | null {
+  if (request === null) {
+    return null;
+  }
+  switch (request.kind) {
+    case 'read':
+      return 'ENTER';
+    case 'create':
+    case 'replace':
+      return 'PFK05';
+    case 'delete':
+      return 'PFK04';
+    default:
+      return null;
+  }
+}
+
+/**
  * Everything one turn of this screen carries, standing in for the reference's own communication area.
  *
  * Assumptions: `request` and `requestSeq` are a pair. The reducer decides WHETHER a call is needed
@@ -1301,6 +1789,14 @@ export interface RefTypeEditState {
 export type RefTypeEditAction =
   /** The route carried a key, so the row is read without a press. */
   | { readonly type: 'routeKeyReceived'; readonly typeCd: string }
+  /** The route carried the add sentinel, so this turn is the screen's first turn. */
+  | { readonly type: 'addRouteEntered' }
+  /** The route carried something the key field cannot hold, so it is refused rather than read. */
+  | {
+      readonly type: 'routeKeyRefused';
+      readonly entry: string;
+      readonly refusal: RefTypeEditRefusal;
+    }
   /** The operator typed into one of the two controls. */
   | { readonly type: 'fieldChanged'; readonly field: RefTypeEditField; readonly value: string }
   /** One of the six keys this screen honours was pressed. */
@@ -1736,7 +2232,19 @@ function decideKeyPress(state: RefTypeEditState, aid: RefTypeEditKeyAid): RefTyp
       //   key written is the normalised one held in `TTUP-NEW-TTYP-TYPE`. Which call is issued follows
       //   from whether a row was read, mirroring `9600-WRITE-PROCESSING` falling into
       //   `9700-INSERT-RECORD` on `SQLCODE +100` at L1558-L1560.
-      const description = turn.newRecord.description.trim();
+      /*
+       * WHY : Assumptions: TRIM first and then hold to the declared width, in that order. The reference
+       *       trims at L1538-L1542 and the field is `PIC X(50)`, so a value whose surplus is trailing
+       *       blanks fits once trimmed -- holding first would cut characters the trim was about to make
+       *       room for.
+       *
+       *       Trade-offs: this repeats a guarantee {@link adoptRow} already makes for a row that came
+       *       from the service, and the repetition is deliberate: this is the last line before the value
+       *       becomes a request body, and it is the only place that holds for a value however it reached
+       *       state. For every reachable input today the call is identity, because the alphanumeric edit
+       *       admits only ASCII and the control's `maxLength` stops the fifty-first keystroke.
+       */
+      const description = holdInField(turn.newRecord.description.trim(), DESCRIPTION_WIDTH);
       return withRequest(
         turn,
         turn.stored === null
@@ -1841,20 +2349,54 @@ export function refTypeEditReducer(
   action: RefTypeEditAction,
 ): RefTypeEditState {
   switch (action.type) {
-    case 'routeKeyReceived':
+    case 'routeKeyReceived': {
       // Assumptions: a key on the route is treated as a key already typed and accepted, because the
       //   reference is transferred to with `CDEMO-*` selection context already set and reads it without
       //   a press. It is normalised on the way in for the reason recorded at
-      //   {@link normaliseTypeCode}.
+      //   {@link normaliseTypeCode}, and normalised ONCE into a local rather than at both sites, so the
+      //   value shown on the glass and the value read can never diverge.
+      const routeKey = normaliseTypeCode(action.typeCd);
+
       return withRequest(
         {
           ...state,
-          newRecord: { ...state.newRecord, typeCode: normaliseTypeCode(action.typeCd) },
+          newRecord: { ...state.newRecord, typeCode: routeKey },
           refusals: [],
           returnMessage: null,
         },
-        { kind: 'read', typeCd: normaliseTypeCode(action.typeCd) },
+        { kind: 'read', typeCd: routeKey },
       );
+    }
+    case 'addRouteEntered':
+      /*
+       * WHY : ⚠️ Refactoring Rationale: arriving at the add sentinel used to leave the turn EXACTLY as it
+       *       was, because the effect simply returned without dispatching. That is wrong whenever the
+       *       screen is already showing a record: the address then says a new record is being added while
+       *       the glass still carries the previous one, its before-image and its version -- so a save
+       *       would have replaced a record the operator believed they were creating. The reference cannot
+       *       reach that state at all, because a transfer with no key enters a fresh task whose
+       *       `WORKING-STORAGE` is initialised (`0000-MAIN` at L362 clears the message line before
+       *       deciding anything), so returning to the declared first turn IS the transcription.
+       *
+       *       Alternatives Considered: clearing only the two record members and leaving the mode. Rejected
+       *       because the mode is what the prompt, the legend and the delete arm are all derived from, so
+       *       a cleared record in `showDetails` would offer a delete for a record that is no longer named.
+       */
+      return REF_TYPE_EDIT_INITIAL_STATE;
+    case 'routeKeyRefused':
+      /*
+       * WHY : Assumptions: the refusal is reported exactly as a TYPED key of the same shape is reported --
+       *       key-entry mode, the sentence on row 23, the control marked -- which is `1210-EDIT-TTYPE`
+       *       reached through `processInputs` at L720-L732. An address is one more way a key arrives, so
+       *       an unusable one earns the answer the operator already recognises rather than a second
+       *       vocabulary invented for the address bar.
+       */
+      return {
+        ...REF_TYPE_EDIT_INITIAL_STATE,
+        newRecord: { ...EMPTY_RECORD, typeCode: action.entry },
+        refusals: [action.refusal],
+        returnMessage: action.refusal.message,
+      };
     case 'fieldChanged':
       // Assumptions: typing clears nothing but the refusal on the field being typed into, because the
       //   reference re-derives every flag from the received map on the next turn and the operator is
@@ -1906,7 +2448,7 @@ export function refTypeEditReducer(
         stored: null,
         refusals: [],
         returnMessage: readFailureMessage(action.failure),
-        abend: isApiRequestError(action.failure) ? action.failure.problem.abend : null,
+        abend: abendToSurface(action.failure),
       });
     case 'writeSucceeded':
       // Assumptions: L1556-L1557 and L1587-L1588 -- a committed write syncpoints and reports
@@ -1984,6 +2526,22 @@ export function RefTypeEditScreen(): ReactElement {
   const performedSeq = useRef(0);
 
   /**
+   * The address segment the arrival effect has already answered, or `null` before the first arrival.
+   *
+   * WHY : ⚠️ Refactoring Rationale: a ref rather than a dependency comparison, and it exists because the
+   *       screen now REPLACES its own address once a record is loaded. That replacement changes the route
+   *       parameter, which re-runs the arrival effect -- and without a record of what has already been
+   *       answered, the effect would issue a second read of the row just read, clearing the row-22 prompt
+   *       and the row-23 sentence the first read produced. Recording the answered segment makes the
+   *       effect answer each arrival once.
+   *
+   *       Assumptions: it also absorbs `StrictMode`'s deliberate double invocation, for the same reason
+   *       {@link performedSeq} does -- `ui/src/main.tsx` mounts the tree inside it, and two dispatches of
+   *       one arrival would advance the request sequence twice and read twice.
+   */
+  const answeredRouteKey = useRef<string | null>(null);
+
+  /**
    * Handle on the transaction-type-code control, so the cursor can be placed on it per turn.
    *
    * Assumptions: a ref rather than a DOM query, because the control is antd's and its inner `<input>`
@@ -2003,6 +2561,35 @@ export function RefTypeEditScreen(): ReactElement {
      * Assumptions: each promise is settled with two handlers rather than a `catch` after a `then`, so a
      * rejection raised INSIDE the success handler cannot be reported as a transport failure -- which
      * would paint a refusal sentence for a rendering fault.
+     *
+     * ⚠ WHY : Alternatives Considered: `isConfirmingAnswer` from `ui/src/api/client.ts`. Not
+     *       applicable, and recorded so the absence does not read as an oversight: this screen's
+     *       confirmation is a SECOND press of the same key rather than a character an operator types.
+     *       `0001-CHECK-PFKEYS` at `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L588-L593 accepts
+     *       PF4 in both the detail and the confirming mode and `2000-DECIDE-ACTION` arms on the first
+     *       press and deletes on the second, and `COTRTUP.bms` declares no confirmation field for an
+     *       answer to be collected into. There is no `Y`/`N` to classify.
+     *
+     * ⚠ WHY : Alternatives Considered: `requireConditionalOn`, which guards a precondition passed as
+     *       its own argument. Not applicable here: the version travels as a MEMBER of the replace
+     *       body, and `replaceTransactionType` in `ui/src/api/reference.ts` validates that body
+     *       through `requireWithinPublishedWidths('TransactionTypeReplaceRequest', ...)`. Calling the
+     *       precondition guard from this screen as well would put a second authority over one member's
+     *       validity in the layer that does not own the contract, and the version this screen sends is
+     *       never composed -- it is the one `state.stored` was delivered with, which is what makes the
+     *       optimistic-concurrency refusal reachable at all.
+     *
+     * ⚠ WHY : Alternatives Considered: `withoutConcurrentDuplicate` around the deletion. Rejected as a
+     *       duplicate guard -- `deleteTransactionType` already wraps itself in it at
+     *       `ui/src/api/reference.ts`, keyed on the method and target, which is the layer that
+     *       composes that target.
+     *
+     * ⚠ WHY : Alternatives Considered: retaining an outcome with `retainOutcome` for a later
+     *       `claimRetainedOutcome` or `subscribeToRetainedOutcomes`. Nothing to retain: `withRequest`
+     *       raises `busy` for the whole duration of a call and every key entry is built `disabled`
+     *       while it is raised, PF3 included, so this screen cannot be left mid-write. A retained
+     *       outcome exists for the screen that unmounted before its write settled, which this one
+     *       cannot do.
      * @param {RefTypeEditRequest} request - The call the reducer decided on.
      * @returns {void} Completion is represented by the action this dispatches.
      */
@@ -2099,22 +2686,111 @@ export function RefTypeEditScreen(): ReactElement {
     [perform, performedSeq, state.request, state.requestSeq],
   );
 
+  /**
+   * The key of the record currently on the glass, or `null` when the glass holds none.
+   *
+   * Assumptions: the key comes from the STORED row rather than from the control, so the address can only
+   * ever name a record the service resolved. The control holds whatever the operator is part-way through
+   * typing, and an address minted from that would name a record that does not exist yet.
+   */
+  const storedKey = state.stored === null ? null : state.stored.typeCd;
+
   useEffect(
     /**
-     * Reads the row the route names, and prompts instead when the route carries the add sentinel.
+     * Answers the address: reads the row it names, prompts at the add sentinel, refuses anything else.
      *
      * Assumptions: the sentinel is recognised rather than read, so entering at the add sentinel issues no
      * request at all -- which is what the reference does when it is transferred to with no key: the edits
-     * find nothing to fetch and the screen prompts for one.
+     * find nothing to fetch and the screen prompts for one. It now also RESETS the turn, for the reason
+     * recorded on the `addRouteEntered` arm.
+     *
+     * WHY : ⚠️ Refactoring Rationale: the segment is VALIDATED before it is normalised, and it was not.
+     *       `normaliseTypeCode` is `Number.parseInt` followed by `padStart`, so an address ending in a
+     *       non-numeric segment produced the three characters `NaN` -- which the screen then displayed in
+     *       a two-character field and sent to the service as a key. An operator following a stale or
+     *       mistyped link was shown a key nobody had typed and a failure for a record nobody had asked
+     *       for. The value the field can hold is refused the way a typed value of the same shape is
+     *       refused, through the screen's own transcription of `1210-EDIT-TTYPE`.
+     *
+     *       Assumptions: the segment is first cut to the field's declared width, because that is the
+     *       width the key HAS: `app/cpy/CVTRA03Y.cpy` L5 declares `TRAN-TYPE PIC X(02)` and
+     *       `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L2 declares `CHAR(2)`, and the reference
+     *       receives its key through a two-byte field that longer text cannot reach. So `'123'` is
+     *       answered for the key it can carry rather than refused for a length the reference has no
+     *       sentence for -- and the address is then replaced with the key actually read, so what the
+     *       operator sees and what was fetched agree.
+     *
+     *       Alternatives Considered: gating on {@link isReferenceTypeCode} alone and refusing everything
+     *       else. Rejected because it is stricter than the field: `'5'` is a key the screen accepts when
+     *       typed, normalises to `'05'` and reads, so refusing it from an address would answer one
+     *       arrival differently from the other for no reason the reference states. That predicate is
+     *       instead used where the canonical form genuinely matters -- building the address below.
      * @returns {void} Completion is represented by the dispatched action.
      */
-    function readRouteKey(): void {
-      if (routeTypeCd === undefined || routeTypeCd === REF_TYPE_NEW_SENTINEL) {
+    function answerRouteArrival(): void {
+      if (routeTypeCd === undefined || answeredRouteKey.current === routeTypeCd) {
         return;
       }
-      dispatch({ type: 'routeKeyReceived', typeCd: routeTypeCd });
+      answeredRouteKey.current = routeTypeCd;
+
+      if (routeTypeCd === REF_TYPE_NEW_SENTINEL) {
+        dispatch({ type: 'addRouteEntered' });
+        return;
+      }
+
+      const carried = routeTypeCd.slice(0, TYPE_CODE_WIDTH);
+      const refusal = refuseTypeCode(carried);
+
+      if (refusal !== null) {
+        dispatch({ type: 'routeKeyRefused', entry: carried, refusal });
+        return;
+      }
+      dispatch({ type: 'routeKeyReceived', typeCd: carried });
     },
     [routeTypeCd],
+  );
+
+  useEffect(
+    /**
+     * Replaces the address with the canonical route of the record now on the glass.
+     *
+     * WHY : ⚠️ Refactoring Rationale: keying a code at the add sentinel loaded the record IN PLACE while
+     *       the address stayed on `new`, so a fetched record was not addressable -- a reload lost it, a
+     *       bookmark could not name it, and the browser's back control returned to an address that had
+     *       never described what was on the screen. `ui/src/routes/navigation.ts` records this repair as
+     *       two halves and owns the other one: the route exists and validates its key there, and this is
+     *       the half that belongs to the screen.
+     *
+     *       Assumptions: the entry is REPLACED and not pushed. A record loading is not a place the
+     *       operator navigated to, so pushing would make the exit key and the browser's back control
+     *       disagree -- back would return to the same screen with a different address rather than to the
+     *       caller, which is the behaviour `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L429-L443
+     *       states for the exit.
+     *
+     *       Assumptions: the caller is carried across the replacement, because the exit destination is
+     *       read from it -- dropping it on the replacement would strand an operator who arrived from the
+     *       list screen at the administrative menu instead.
+     *
+     *       Trade-offs: a DELETED record leaves the address alone, because the delete clears the stored
+     *       row rather than storing another one. Reloading that address then reports the record as not
+     *       found, which is what it is; rewriting the address to the add sentinel on a delete is the
+     *       alternative, and it would discard the address before the operator had read the sentence
+     *       confirming what the address referred to.
+     * @returns {void} Completion is the replaced history entry.
+     */
+    function useCanonicalAddress(): void {
+      if (storedKey === null || !isReferenceTypeCode(storedKey)) {
+        return;
+      }
+      const canonical = referenceTypeEditRoute(storedKey);
+
+      if (location.pathname === canonical) {
+        return;
+      }
+      answeredRouteKey.current = storedKey;
+      navigateSafely(navigate, canonical, screenTransitionState(location.state), { replace: true });
+    },
+    [location.pathname, location.state, navigate, storedKey],
   );
 
   /*
@@ -2196,6 +2872,369 @@ export function RefTypeEditScreen(): ReactElement {
   }
 
   /**
+   * Renders the pointer route to the delete: one dangerous control that raises PF4.
+   *
+   * ⚠ Refactoring Rationale: this renders the CONTROL alone. The confirmation moved to
+   * {@link renderDeleteConfirmation}, which is mounted beside it rather than around it, because a `Modal`
+   * is anchored to the viewport and needs no trigger to align against. Two earlier revisions are
+   * superseded and recorded so neither is reintroduced. One wrapped the control in an overlay in BOTH
+   * modes while the accept invoked PF4 exactly once, so accepting from `showDetails` merely ARMED the
+   * delete and dismissed a dialogue that had just asked `'Delete this record ? Press F4 to confirm'` and
+   * been told yes -- measured in a browser: the record survived and the operator had to press again
+   * through a control that no longer looked armed. The other gave the click handler to the arming mode
+   * only, because while the overlay was click-opened a handler on both paths would have committed the
+   * delete with the very click meant to reveal the confirmation -- which left a danger-styled control
+   * labelled `'F4=Delete'` inert.
+   *
+   * ⚠ Assumptions: the control means the SAME thing in both modes and the mode decides what PF4 does,
+   * exactly as the reference does. `0001-CHECK-PFKEYS` accepts PF4 in `TTUP-SHOW-DETAILS` and in
+   * `TTUP-CONFIRM-DELETE` (`app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L588-L593), and
+   * `2000-DECIDE-ACTION` L479-L498 arms on the first press and deletes on the second. One control, one
+   * legend, two presses.
+   * @returns {ReactElement} The dangerous arming-and-confirming button.
+   */
+  function renderDeleteControl(): ReactElement {
+    const unavailable = !matrix.PFK04.accepted || state.busy;
+    /*
+     * WHY : ⚠️ Assumptions: the legend is verbatim in BOTH modes and the click carries the press the
+     *       legend promises in both. `'F4=Delete'` is what `COTRTUP.bms` L116-L120 paints, and rule T8 carries
+     *       it character for character, so the control cannot be relabelled to say which press this is --
+     *       which is exactly why the dialogue beside it exists to say so instead.
+     *       Alternatives Considered: keeping the click inert in the confirming mode and requiring the
+     *       dialogue's accept. Rejected because a danger-styled control that ignores a click is the
+     *       defect an earlier revision introduced while arming, read the other way round.
+     */
+    const trigger = (
+      <Button
+        danger
+        disabled={unavailable}
+        onClick={
+          /**
+           * Raises PF4, which arms the delete on the first press and commits it on the second.
+           * @returns {void} Completion is represented by the dispatched action.
+           */
+          (): void => {
+            invokeAid('PFK04');
+          }
+        }
+      >
+        {REF_TYPE_EDIT_KEY_LABELS.PFK04}
+      </Button>
+    );
+
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the nested provider carries `destructiveFocusTheme` and wraps the
+     *       CONTROL rather than the screen, which is the usage that module prescribes. The global focus
+     *       ring in `ui/src/theme/antdTheme.ts` is hue-neutral because the design system derives one
+     *       outline for every button variant, so a destructive control asserted danger at rest and on
+     *       hover and none of it on focus -- the weakest signal at the moment of commitment. That
+     *       module records the measurement behind the replacement ring: 10.718:1 against the painted
+     *       surface where the destructive hover is 7.748:1, so rest -> hover -> focus is strictly
+     *       increasing.
+     *       Assumptions: a nested provider MERGES per component name rather than replacing, verified
+     *       there against the pinned package, so this control keeps every other decision the
+     *       application theme makes and changes only its ring.
+     */
+    return <ConfigProvider theme={destructiveFocusTheme}>{trigger}</ConfigProvider>;
+  }
+
+  /**
+   * Names the record the armed delete would destroy, in the mapset's own vocabulary.
+   *
+   * ⚠ Assumptions: the record is named with the mapset's OWN field labels and the BEFORE-IMAGE's values,
+   * and nothing here is authored. `REF_TYPE_EDIT_FIELD_LABELS` transcribes
+   * `app/app-transaction-type-db2/bms/COTRTUP.bms` L79-L83 and L90-L93, which is the vocabulary the two
+   * protected fields behind the dialogue are already labelled with, so the operator checks the record
+   * against the words they were reading. The before-image is the authority rather than the current
+   * entries because a delete removes the STORED row: `2000-DECIDE-ACTION` at `COTRTUPC.cbl` L479-L498
+   * arms on the fetched record, and an edited description in the control is not what would be destroyed.
+   *
+   * Assumptions: the key is rendered in the fixed-pitch face and the description is not, which is the
+   * same distinction the two controls draw -- a two-character key is column data and a fifty-character
+   * description is proportional text with nothing to align against.
+   *
+   * Assumptions: an empty list is returned outside the confirming mode rather than the dialogue being
+   * rendered conditionally, because `open` already answers whether the surface exists and the design
+   * system keeps a closed dialogue's content unmounted.
+   *
+   * ⚠ Refactoring Rationale: this is a FUNCTION rather than the `const` it was first written as, and the
+   * difference is not stylistic. Every one of the thirteen delete cases across both suites failed with
+   * `ReferenceError: Cannot access 'fixedPitchStyle' before initialization`, because a `const` in the
+   * component body is evaluated where it is written and `fixedPitchStyle` is declared several hundred
+   * lines further down, inside the same temporal dead zone. A function declaration is hoisted and its
+   * body runs only when {@link renderDeleteConfirmation} calls it from the returned tree, by which point
+   * every binding it reads exists. Alternatives Considered: moving the `const` below `fixedPitchStyle`.
+   * Rejected because it would separate the record naming from the dialogue that presents it purely to
+   * satisfy an initialisation order, and the next edit that moves either one would reintroduce the fault.
+   * ⚠️ Assumptions: the return type EXCLUDES `undefined`, which the design system's own member permits.
+   * `exactOptionalPropertyTypes` is on, so an optional prop and a prop that may be `undefined` are two
+   * different types -- handing the permissive member straight to `items` fails to compile with
+   * `Type 'undefined' is not assignable to type 'DescriptionsItemType[]'`. Both arms below return an
+   * array, so excluding it states what this function already does.
+   * @returns {NonNullable<DescriptionsProps['items']>} The two labelled rows, or an empty list when
+   *   nothing is armed.
+   */
+  function deleteConfirmationItems(): NonNullable<DescriptionsProps['items']> {
+    if (state.mode !== 'confirmDelete') {
+      return [];
+    }
+
+    return [
+      {
+        key: 'typeCode',
+        label: REF_TYPE_EDIT_FIELD_LABELS.typeCode,
+        children: (
+          <Typography.Text style={fixedPitchStyle}>{state.oldRecord.typeCode}</Typography.Text>
+        ),
+      },
+      {
+        key: 'description',
+        label: REF_TYPE_EDIT_FIELD_LABELS.description,
+        children: <Typography.Text>{state.oldRecord.description}</Typography.Text>,
+      },
+    ];
+  }
+
+  /**
+   * Renders the destructive confirmation for an armed delete.
+   *
+   * ⚠ Refactoring Rationale: the primitive is a `Modal` where it was an anchored `Popconfirm`, and it is
+   * mounted at SCREEN level where it wrapped the `'F4=Delete'` control. The primitive changed because a
+   * `Popconfirm` cannot be a dialogue at this package version: its overlay is the tooltip primitive and
+   * `ui/node_modules/@rc-component/tooltip/lib/Popup.js` writes `role: 'tooltip'` onto the surface with
+   * no prop that overrides it, so the confirmation guarding a `DELETE` was announced as a tooltip,
+   * carried no `aria-modal`, trapped no focus, and left Tab walking the page behind it. `Modal` renders
+   * through the dialog primitive, which sets `role="dialog"`, `aria-modal="true"` and `aria-labelledby`
+   * from the title at `ui/node_modules/@rc-component/dialog/lib/Dialog/Content/Panel.js` L113-L115,
+   * locks focus inside itself while open, and restores focus on close.
+   *
+   * It moved out of the control because a modal is anchored to the VIEWPORT: it no longer needs a trigger
+   * to align against, which also retires the whole `trigger={[]}` arrangement that existed to stop a
+   * click on the `'F4=Delete'` button being read as a dismissal.
+   *
+   * ⚠ Assumptions: everything the previous revision earned is carried across, and each piece is listed so
+   * a later edit cannot drop one silently. The surface is OPEN for as long as the delete is armed, so the
+   * confirmation is on the glass on the KEYBOARD path too -- an F4 from the key bar used to arm the delete
+   * and show only the row-22 prompt, leaving the operator one further F4 from a committed delete with
+   * nothing focused. Its title is the same catalogued row-22 sentence the arming press put on the band, so
+   * one question has one wording. It NAMES the record, because `'Delete this record ?'` identifies the row
+   * only by what the glass happens to show. Initial focus is on the DECLINING choice. Nothing focuses
+   * anything after the dialogue opens -- {@link editableField} answers `null` for `confirmDelete`, so the
+   * per-turn cursor effect returns early and cannot pull focus off Cancel.
+   *
+   * ⚠ Assumptions: BOTH dismissal routes now arrive at ONE handler, and the `onOpenChange` arrangement the
+   * previous revision needed is retired rather than lost. `Popconfirm` never called `onCancel` for
+   * Escape -- the portal detects it (`@rc-component/portal/lib/useEscKeyDown.js` L25-L32) and the trigger
+   * routes it through `onOpenChange` -- so the withdrawal had to hang off that callback, and `onCancel` had
+   * to be omitted to stop the cancel BUTTON dispatching PF12 twice. `Modal` has no such split: its own
+   * Escape handling and its cancel button both call `onCancel` exactly once
+   * (`@rc-component/dialog/lib/Dialog/index.js` `onInternalClose`), so one callback covers both and cannot
+   * double-dispatch. That matters here rather than being tidiness: `TTUP-DETAILS-NOT-FETCHED` is absent
+   * from the PF12 list at `COTRTUPC.cbl` L594-L601, so a second PF12 would be refused as an invalid key and
+   * `'Invalid key pressed'` would replace `'Delete was cancelled'` on row 23.
+   *
+   * Assumptions: PF12 is the transition dispatched for a withdrawal, because the reference already owns it
+   * -- L594-L601 accepts PF12 while confirming and its cancel arm answers a pending delete with
+   * `'Delete was cancelled'` back to key entry at L1000-L1002. PF4 is dispatched for an acceptance, which
+   * is the reference's own SECOND press.
+   *
+   * ⚠ Trade-offs: the accept keeps the design system's stock `OK` rather than taking the confirming key's
+   * legend. `COTRTUP.bms` declares no literal for a dialogue accept -- a 3270 has no dialogue -- so rule
+   * T8 has no verbatim string to preserve here, and authoring one would put invented operator-visible text
+   * beside a title that is transcribed. The key's own legend `'F4=Delete'` stays verbatim on the control
+   * behind the dialogue, which is where the reference puts it.
+   * @returns {ReactElement} The confirmation surface, closed unless a delete is armed.
+   */
+  function renderDeleteConfirmation(): ReactElement {
+    return (
+      <Modal
+        cancelButtonProps={{ autoFocus: true, 'aria-describedby': DELETE_CONFIRMATION_RECORD_ID }}
+        /*
+         * WHY : ⚠️ Refactoring Rationale: a withdrawn confirmation is DESTROYED rather than kept hidden,
+         *       so that the `autoFocus` on the line above keeps working past the first opening.
+         *       `autoFocus` is applied when a control ENTERS the document, and the design system keeps a
+         *       closed dialogue mounted at `display:none`; a re-opening therefore re-shows controls that
+         *       never left, and nothing re-applies the attribute. Measured on the sibling authorization
+         *       screen: focus on `Cancel` for the first opening, and on the dialogue's own container
+         *       element for every later one -- which on a DELETE leaves the operator off the answer that
+         *       walks away. A note further down this module previously rejected this flag on the grounds
+         *       that the panel would VANISH rather than fade; that reasoning was wrong on the fact.
+         *       `@rc-component/dialog/lib/Dialog/Content/index.js` passes it straight through as the
+         *       motion's `removeOnLeave`, so the panel is removed when the leave animation COMPLETES and
+         *       the design system's own withdrawal affordance is untouched.
+         *       Trade-offs: one extra mount per confirmation. It does NOT replace the idle guard below --
+         *       that guard exists because a closing panel holds a stale closure for the length of its
+         *       animation, which is exactly the window this flag leaves in place.
+         */
+        destroyOnHidden
+        /*
+         * WHY : Assumptions: the accept carries `danger` on top of the default primary type rather than
+         *       the legacy `okType="danger"` this surface used before. `convertLegacyProps` maps that
+         *       operand to `danger` with the DEFAULT variant, which renders the destructive control as
+         *       the quieter of the two buttons -- emphasis inverted against risk. The pair renders the
+         *       solid dangerous variant instead.
+         * WHY : Assumptions: `disabled` accompanies `loading` and is not redundant. The design system's
+         *       `Button` returns early from its own click handler while loading, so the accept was
+         *       already inert during the `DELETE`; `disabled` is what states that unavailability to
+         *       assistive technology, which a spinner does not.
+         */
+        okButtonProps={{
+          danger: true,
+          'aria-describedby': DELETE_CONFIRMATION_RECORD_ID,
+          disabled: state.busy,
+          loading: state.busy,
+        }}
+        open={state.mode === 'confirmDelete'}
+        title={EDIT_STATUS.PROMPT_DELETE_CONFIRM.text}
+        /*
+         * WHY : ⚠ Assumptions: BOTH handlers go through {@link whenIdle}, so neither is accepted while the
+         *       `DELETE` this dialogue authorised is still outstanding. The accept is additionally inert
+         *       through its `okButtonProps`, and the guard is what covers CANCEL -- which carries no
+         *       loading state and would otherwise write `'Delete was cancelled'` over a delete in
+         *       progress.
+         */
+        onCancel={whenIdle(
+          /**
+           * Withdraws the armed delete, from Escape and from the declining control alike.
+           * @returns {void} Completion is represented by the dispatched action.
+           */
+          (): void => {
+            invokeAid('PFK12');
+          },
+        )}
+        onOk={whenIdle(
+          /**
+           * Dispatches the reference's confirming second press.
+           * @returns {void} Completion is represented by the dispatched action.
+           */
+          (): void => {
+            invokeAid('PFK04');
+          },
+        )}
+        footer={
+          /**
+           * Composes the footer so only the accept carries the destructive focus ring.
+           *
+           * Assumptions: the two stock controls are placed by hand rather than restyled in place, because
+           * the nested provider has to wrap ONE of them. Wrapping the whole dialogue would put the
+           * error-ramp ring around the cancel control as well, and a focus ring is a risk signal -- cancel
+           * is the one control on this surface that risks nothing.
+           * Assumptions: the `controls` members are typed as element-returning functions rather than as
+           * the design system's own `ComponentType` name, which is not imported here; importing a type
+           * solely to mention it in a doc comment trades one lint failure for another, so the structural
+           * form is written instead.
+           * @param {ReactNode} _stockFooter - The stock pair, unused; both members are placed below.
+           * @param {{ OkBtn: () => ReactElement, CancelBtn: () => ReactElement }} controls - The stock
+           *   buttons, each of which reads this dialogue's own button props and handlers.
+           * @returns {ReactElement} Cancel first, then the destructive accept.
+           */
+          (_stockFooter: ReactNode, controls): ReactElement => (
+            <>
+              {/*
+               * WHY : Assumptions: cancel is rendered FIRST, which is both the stock order and the safe
+               *       one -- the first control a keyboard reaches is the one that changes nothing.
+               */}
+              <controls.CancelBtn />
+              {/*
+               * WHY : Assumptions: the nested provider carries `destructiveFocusTheme` so the accept's
+               *       focus ring sits in the error ramp. `ui/src/theme/antdTheme.ts` records the
+               *       measurement: the destructive hover is 7.748:1 against the painted surface and this
+               *       ring is 10.718:1, so rest -> hover -> focus is strictly increasing, where the
+               *       global hue-neutral ring left the strongest signal missing at exactly the moment of
+               *       commitment. A nested provider MERGES per component name, so nothing else about
+               *       this control changes.
+               */}
+              <ConfigProvider theme={destructiveFocusTheme}>
+                <controls.OkBtn />
+              </ConfigProvider>
+            </>
+          )
+        }
+      >
+        <Descriptions
+          column={DELETE_CONFIRMATION_RECORD_COLUMNS}
+          id={DELETE_CONFIRMATION_RECORD_ID}
+          items={deleteConfirmationItems()}
+          size="small"
+        />
+      </Modal>
+    );
+  }
+
+  /**
+   * The outstanding-call flag, in a form a stale closure can still read correctly.
+   *
+   * ⚠️ Purpose: {@link whenIdle} is attached to controls the design system may hold in a snapshot -- a
+   * dialogue that has been told to close stays mounted for its leave animation and is not re-rendered
+   * with its parent -- so a handler on that panel closes over the state as it was when the panel last
+   * rendered. Reading the flag through a ref makes the guard answer with the CURRENT value, because the
+   * closure captures the ref object rather than a boolean.
+   *
+   * Alternatives Considered: `destroyOnHidden` on the dialogue, so a closing panel is unmounted and its
+   * controls cannot be reached at all. That flag IS now set, for an unrelated reason recorded at the
+   * dialogue itself, and it does NOT make this ref redundant. The flag reaches the design system as the
+   * leave motion's `removeOnLeave` -- see `@rc-component/dialog/lib/Dialog/Content/index.js` -- so the
+   * panel is removed when the animation COMPLETES, which means the stale-closure window this ref covers
+   * is exactly the window the flag leaves open. An earlier revision of this paragraph rejected the flag
+   * on the belief that it would make the panel vanish instead of fade; that was wrong on the fact, and
+   * it is corrected here rather than deleted so a reader who remembers the old claim can see it settled.
+   */
+  const busyRef = useRef(false);
+
+  useEffect(
+    /**
+     * Keeps the outstanding-call flag in step with the turn that carries it.
+     * @returns {void} Nothing; the ref is updated in place.
+     */
+    (): void => {
+      busyRef.current = state.busy;
+    },
+    [state.busy],
+  );
+
+  /**
+   * Wraps a handler so it runs only while no call is outstanding.
+   *
+   * ⚠️ Purpose: the confirmation dialogue's own controls are reached by pointer WITHOUT going through the
+   * key hook, so the `disabled` declarations {@link keyEntry} makes cannot cover them. The reachable case
+   * is CANCEL: it carries no loading state of its own, so it stayed clickable during the `DELETE` it had
+   * just confirmed, and a withdrawal accepted mid-call would put `'Delete was cancelled'` on row 23 for a
+   * row the service was in the middle of destroying. The accept is already inert -- its `okButtonProps`
+   * carry `disabled` and `loading` -- and this guard covers both routes with one statement.
+   *
+   * Assumptions: a press arriving during a call is declined SILENTLY rather than reported. That is the
+   * same treatment `usePfKeys` gives a `busy` entry and the same treatment the terminal gave a key pressed
+   * while the keyboard was inhibited: a valid key pressed early is not an invalid key, and inventing
+   * `'Invalid key pressed'` for it would misreport the reference.
+   *
+   * ⚠️ Assumptions: the flag is read from {@link busyRef} and NOT from `state.busy`, and the first form of
+   * this guard read the state -- which did not work. Measured: with the delete held outstanding, a click
+   * on the closing panel's cancel control still produced `'Invalid key pressed'` on row 23, and the
+   * panel's own accept control still rendered enabled. The design system keeps a closing dialogue mounted
+   * for its leave animation and does not re-render it with the parent, so every prop and every handler on
+   * that panel is the SNAPSHOT taken while the delete had not yet been decided -- in which `state.busy`
+   * was false. A ref survives that, because the closure captures the ref OBJECT and reads its current
+   * value when the click arrives.
+   *
+   * Assumptions: the exclusion has to be written at all because the reference gets it for free -- a CICS
+   * task holds the terminal until it returns, so no second attention identifier can arrive mid-transaction.
+   * @param {() => void} turn - The handler to run when nothing is outstanding.
+   * @returns {() => void} A handler that runs `turn` only while this screen is idle.
+   */
+  function whenIdle(turn: () => void): () => void {
+    /**
+     * Runs the wrapped turn unless a call is outstanding.
+     * @returns {void} Nothing; the turn is skipped while a call is in flight.
+     */
+    return (): void => {
+      if (busyRef.current) {
+        return;
+      }
+      turn();
+    };
+  }
+
+  /**
    * Dispatches one of the six keys this screen honours.
    *
    * Assumptions: PF3 is the one identifier that leaves, and it leaves for {@link exitDestination} --
@@ -2225,16 +3264,33 @@ export function RefTypeEditScreen(): ReactElement {
   }
 
   /**
-   * Builds one entry of the key map, carrying the mapset's label and this mode's availability.
+   * Builds one entry of the key map, carrying the mapset's label, risk and this mode's availability.
    *
    * Assumptions: `disabled` follows ACCEPTANCE and not visibility, so PF5 during a delete stays live
-   * with no legend, and a call in flight disables everything -- which no reference mode expresses and a
-   * browser needs, because a pseudo-conversational task held the terminal for the whole turn and a
-   * browser does not.
+   * with no legend, and a call in flight makes every key that is NOT the outstanding one unavailable --
+   * which no reference mode expresses and a browser needs, because a pseudo-conversational task held the
+   * terminal for the whole turn and a browser does not.
+   *
+   * WHY : ⚠ Refactoring Rationale: the outstanding key reports BUSY where a call in flight used to
+   *       disable everything, and the two are not interchangeable. A disabled control is announced as
+   *       unavailable and `ui/src/layout/usePfKeys.ts` reports a disabled press to `onInvalidKey` -- so
+   *       pressing PF4 twice during its own `DELETE` was classified with the baseline's
+   *       `'Invalid key pressed'` text for a key the reference accepts. `busy` says the true thing: the
+   *       control stays present, enabled, focusable and named, the second press is declined SILENTLY,
+   *       and the bar paints the in-flight affordance on the control the operator pressed. That is the
+   *       3270 input-inhibit analogue -- a valid key pressed early.
+   * WHY : ⚠ Assumptions: exactly ONE entry carries `busy`, chosen by {@link outstandingKeyAid} from the
+   *       call in flight, and the other five stay `disabled` while it runs. Marking all six busy would
+   *       claim each of them is waiting on an answer, when five of them are different actions this
+   *       screen genuinely cannot perform mid-call -- it cannot read a second row, save, or transfer
+   *       while a write is outstanding. `disabled` is the honest classification for those, and the
+   *       progress affordance belongs on the key whose turn it is.
    * @param {RefTypeEditKeyAid} aid - The identifier to bind.
    * @returns {PfKeyHandlerEntry} The entry for that identifier.
    */
   function keyEntry(aid: RefTypeEditKeyAid): PfKeyHandlerEntry {
+    const outstanding = state.busy && aid === outstandingKeyAid(state.request);
+
     return {
       /**
        * Dispatches this identifier.
@@ -2244,7 +3300,9 @@ export function RefTypeEditScreen(): ReactElement {
         invokeAid(aid);
       },
       label: REF_TYPE_EDIT_KEY_LABELS[aid],
-      disabled: !matrix[aid].accepted || state.busy,
+      risk: REF_TYPE_EDIT_KEY_RISKS[aid],
+      disabled: !matrix[aid].accepted || (state.busy && !outstanding),
+      busy: outstanding,
     };
   }
 
@@ -2302,10 +3360,26 @@ export function RefTypeEditScreen(): ReactElement {
    *       `message-band` test handle where every caller expects exactly one. `ui/src/layout/AppShell.tsx`
    *       records at {@link useShellSlot} that all ten delivered screens opt in and none composes those
    *       three itself.
-   * WHY : Assumptions: the row-22 INFORMATION band stays in the body, which is the documented exception
-   *       -- the account view, the account update and the card detail keep theirs the same way, because it
-   *       is a SECOND message field the mapset declares separately from the row-23 error line the shell
-   *       owns. This mapset declares both, `INFOMSG` at `POS=(22,23)` and `ERRMSG` at `POS=(23,1)`.
+   * WHY : ⚠ Refactoring Rationale: the row-22 INFORMATION band is delegated too, and it was composed in
+   *       the body. That is why it rendered roughly two hundred pixels BELOW the row-23 line the shell
+   *       pins -- the two adjacent mapset fields appeared in the wrong order and the further one fell
+   *       below the fold at every width, while the shell's own row-22 strip stood empty and
+   *       `aria-hidden` above it. `ui/src/layout/AppShell.tsx` owns both terminal rows in one pinned
+   *       zone and renders `message.information` immediately above `message.text`, which is the order
+   *       `INFOMSG` at `POS=(22,23)` and `ERRMSG` at `POS=(23,1)` are declared in at
+   *       `app/app-transaction-type-db2/bms/COTRTUP.bms`. Publishing is therefore the only arrangement
+   *       that puts them adjacent and in order; composing one of them here cannot.
+   * WHY : Assumptions: the information member names no severity, so the band's own table answers it.
+   *       `MESSAGE_BAND_CHANNELS` in `ui/src/layout/MessageBand.tsx` records row 22 as `COLOR=NEUTRAL`
+   *       and row 23 as `COLOR=RED`, and {@link messageChannel} reads the catalogue's own `field` to
+   *       confirm this screen's prompts are declared under `WS-INFO-MSG` -- so the channel and its
+   *       colour are both the mapset's record rather than a choice made here. Naming `neutral` again
+   *       would put a second authority beside that table.
+   * WHY : Assumptions: the row-23 severity IS named, and named as a constant rather than derived from a
+   *       response. `ERRMSG` is `COLOR=RED ATTRB=(ASKIP,BRT,FSET)` at `COTRTUP.bms` L107 on every turn,
+   *       so the line's colour is a mapset attribute. `messageBandSeverityForApiSeverity` is used on the
+   *       sibling list screen instead, where the band reports a browse failure that carries a severity
+   *       of its own; here every row-23 sentence is a refusal or an outcome this screen composed.
    * WHY : Assumptions: `legendColor` is passed explicitly as `YELLOW` rather than left to the bar's
    *       default, because it is a per-mapset attribute this screen owns -- all five row-24 fields are
    *       `COLOR=YELLOW` at `COTRTUP.bms` L112, L117, L122, L127 and L132, where the sibling list screen's
@@ -2321,6 +3395,7 @@ export function RefTypeEditScreen(): ReactElement {
       text: state.returnMessage,
       severity: 'error',
       mapset: REF_TYPE_EDIT_MAPSET,
+      information: { text: infoMessage },
     },
     pfKeys: { keys: revealedBindings, onInvoke: invoke, legendColor: 'YELLOW' },
   });
@@ -2335,13 +3410,47 @@ export function RefTypeEditScreen(): ReactElement {
   };
 
   /*
-   * WHY : Assumptions: the marker takes the error TEXT token rather than the surface error colour.
-   *       `FIELD_ERROR_TOKENS.errorColor` is `BMS_TEXT_COLOR_TOKENS.RED`, the contrast-audited token for
-   *       red text on the container background, which is what `DFHRED` in a field's colour attribute
-   *       amounts to here -- a foreground, not a fill.
+   * WHY : ⚠ Refactoring Rationale: the refusal rendering and the blank marker are taken from
+   *       `ui/src/layout/fieldHelp.tsx` where this screen composed its own. That module records that the
+   *       same nine lines had been authored independently on three of eight forms and were missing from
+   *       five, and it carries two properties this screen's copy did not: the marker is `aria-hidden`,
+   *       because a lone asterisk announced beside a value conveys nothing to a listener and the same
+   *       fact already reaches assistive technology through `aria-invalid` and the row-23 sentence; and
+   *       it carries a stable handle, so a case can tell this marker from the design system's always-on
+   *       required asterisk, which is the same glyph meaning something else.
+   *
+   *       Assumptions: the copybook's asymmetry is unchanged and is now enforced in one place --
+   *       `app/cpy/CSSETATY.cpy` L18-L22 moves the colour for either refused state and L23-L26 writes
+   *       the asterisk for the BLANK state only.
    */
-  const refusedMarkerStyle: CSSProperties = {
-    color: cssVar[FIELD_ERROR_TOKENS.errorColor],
+  const typeCodeRefusal = fieldRefusalRendering(refusalFor('typeCode')?.state, cssVar);
+  const descriptionRefusal = fieldRefusalRendering(refusalFor('description')?.state, cssVar);
+
+  /*
+   * WHY : ⚠ Refactoring Rationale: the protected key control now states its value in the DEFAULT text
+   *       colour, and it inherited the design system's disabled grey. Measured on the delivered build,
+   *       a real record key rendered `rgba(0, 0, 0, 0.25)` on `rgba(0, 0, 0, 0.04)` -- so `'01'`, the
+   *       row actually loaded, read exactly like placeholder text. The reference protects this field
+   *       and does not darken it: `3310-PROTECT-ALL-ATTRS` at
+   *       `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L1368-L1371 moves `DFHBMPRF`, which is
+   *       protected plus modified-data-tag, and nothing anywhere moves a dark attribute to `TRTYPCDA`.
+   *       The field's own colour is the terminal default, because `TRTYPCD` at
+   *       `app/app-transaction-type-db2/bms/COTRTUP.bms` L84-L87 declares `ATTRB=(IC,UNPROT)` with no
+   *       `COLOR` operand -- which the bridge resolves through `BMS_TEXT_COLOR_TOKENS.DEFAULT`.
+   *
+   *       Alternatives Considered: rendering the protected control `readOnly` instead of `disabled`,
+   *       which is the closer HTML analogue of a protected field and would restore the contrast on its
+   *       own. Rejected as the larger change: `readOnly` keeps the control in the tab order, so it
+   *       would add a stop that answers nothing on every turn where the key is protected, and the
+   *       greyed BACKGROUND that `disabled` supplies is the only affordance distinguishing an
+   *       enterable field from a protected one on this form.
+   *
+   *       Trade-offs: the background stays the design system's disabled fill. That is accepted: what
+   *       was measured as ambiguous is the VALUE reading as placeholder text, and a value at full
+   *       contrast on a grey fill cannot be mistaken for one.
+   */
+  const protectedValueStyle: CSSProperties = {
+    color: cssVar[BMS_TEXT_COLOR_TOKENS.DEFAULT],
   };
 
   /*
@@ -2365,6 +3474,23 @@ export function RefTypeEditScreen(): ReactElement {
 
   return (
     <Flex vertical gap="large">
+      {/*
+        ⚠️ Purpose: a call in flight is ANNOUNCED as well as painted. The key bar's in-flight affordance and
+        each control's `aria-busy` state are both properties of a control the operator has to be looking at
+        or focused on; a screen reader driven by row 23 hears nothing at all between the press and the
+        answer, because the reference had nothing to say there -- a pseudo-conversational task held the
+        terminal, so the wait needed no sentence.
+
+        ⚠️ Refactoring Rationale: the sentence is `REQUEST_IN_PROGRESS` from
+        `ui/src/messages/messages.ts`, and an earlier revision of this screen recorded that the catalogue
+        carried no sentence for this condition and that a screen may not author one. It now carries one, so
+        the shortfall is closed rather than restated.
+
+        Assumptions: the live region is mounted on EVERY turn and emptied when idle, not mounted with the
+        sentence, because a region added to the tree at the moment it acquires text is not reliably
+        announced -- the platform has to have been watching it.
+      */}
+      {busyAnnouncement(state.busy ? REQUEST_IN_PROGRESS : undefined)}
       <ScreenTitle style={captionStyle}>{REF_TYPE_EDIT_SUBTITLE}</ScreenTitle>
       {/*
         Assumptions: the abend surface REPLACES the form rather than sitting beside it, because the
@@ -2409,8 +3535,65 @@ export function RefTypeEditScreen(): ReactElement {
                 ref={typeCodeRef}
                 value={state.newRecord.typeCode}
                 maxLength={TYPE_CODE_WIDTH}
-                style={fixedPitchStyle}
-                aria-invalid={refusalFor('typeCode') !== undefined || keyReddenedByMode(state.mode)}
+                /*
+                 * WHY : ⚠ Assumptions: the WIDTH goes on `style` and the FACE goes on `styles.input`,
+                 *       and the split is not cosmetic. With a suffix present -- which is now every
+                 *       turn, per {@link MARKER_SLOT_UNOCCUPIED} -- `@rc-component/input` puts `style`
+                 *       on the affix WRAPPER (`BaseInput.js` L124 and L137-L142) and `styles.input` on
+                 *       the input itself (`Input.js` L171). The width belongs on the wrapper, because
+                 *       that is the bordered box `copybookFieldWidthStyle` sizes. The colour does not:
+                 *       `.ant-input` carries `color: token.colorText` of its own
+                 *       (`antd/lib/input/style/index.js` L74 through L322), so a colour on the wrapper
+                 *       is overridden on the very element whose text it was meant to change -- the
+                 *       refusal red and the protected default would both be lost.
+                 *       Assumptions: sizing the key control to two characters is also the other half of
+                 *       the blank marker's remedy. `ui/src/layout/recordLayout.ts` records the marker
+                 *       measured roughly 1150 pixels from the value it qualified on a full-width
+                 *       control; no suffix can be brought to a value while the field is far wider than
+                 *       the data.
+                 *       Assumptions: within the face, the refusal colour is merged LAST so it wins over
+                 *       the field's own colour for as long as the refusal stands, which is what
+                 *       `fieldRefusalRendering` asks its callers to do.
+                 */
+                /*
+                 * WHY : ⚠️ Refactoring Rationale: the marker slot is declared to the measure, and this
+                 *       control is where the omission was measured. With the slot always occupied per
+                 *       {@link MARKER_SLOT_UNOCCUPIED}, a maximum computed for two characters alone
+                 *       gave this input a 12-pixel content box for a 17-pixel value, and the record's
+                 *       own key `01` rendered as `0:` at 375, 768, 1280 and 1920 alike -- a fixed cap
+                 *       does not vary with the viewport. The key is authoritative data on this screen,
+                 *       so a key an operator cannot read is a correctness failure and not a cosmetic
+                 *       one. Its fifty-character sibling below never showed the fault because there the
+                 *       container bound the width long before the cap did.
+                 */
+                style={copybookFieldWidthStyle(
+                  TYPE_CODE_WIDTH,
+                  cssVar,
+                  BLANK_FIELD_MARKER_CHARACTERS,
+                )}
+                styles={{
+                  input: {
+                    ...fixedPitchStyle,
+                    ...(editable === 'typeCode' ? {} : protectedValueStyle),
+                    ...typeCodeRefusal.style,
+                  },
+                }}
+                suffix={typeCodeRefusal.suffix ?? MARKER_SLOT_UNOCCUPIED}
+                {...fieldAriaProps(TYPE_CODE_CONTROL_ID, {
+                  invalid: refusalFor('typeCode') !== undefined || keyReddenedByMode(state.mode),
+                  /*
+                   * WHY : Assumptions: `hasError` is false although the field IS refused, and
+                   *       `fieldAriaProps` documents exactly this pairing. The reference writes every
+                   *       refusal to `WS-RETURN-MSG`, painted by the row-23 line, and marks the field
+                   *       itself with colour and the blank asterisk -- so rendering the sentence under
+                   *       the control as well would put one refusal on the glass twice. No element
+                   *       carrying this control's error identifier is rendered, so naming one would be
+                   *       a dangling reference.
+                   */
+                  hasError: false,
+                  hasHint: false,
+                })}
+                {...busyProps(state.busy)}
                 disabled={editable !== 'typeCode' || state.busy}
                 inputMode="numeric"
                 onChange={
@@ -2434,18 +3617,14 @@ export function RefTypeEditScreen(): ReactElement {
                 }
               />
               {/*
-                ⚠ Assumptions: the literal asterisk is written for the BLANK case ONLY. The templated
-                highlight `app/cpy/CSSETATY.cpy` sets the colour for either refusal at L18-L22 and then
-                gates the marker on an INNER `IF FLG-(TESTVAR1)-BLANK` at L23-L26 -- so a malformed entry
-                reddens without a marker and a missing one is marked as well. Writing it for both would
-                also overwrite the operator's own malformed entry with an asterisk, which the reference
-                only ever does to an empty field.
+                ⚠ Assumptions: the literal asterisk is written for the BLANK case ONLY, and it is now
+                the control's own `suffix` rather than an element beside it. The templated highlight
+                `app/cpy/CSSETATY.cpy` sets the colour for either refusal at L18-L22 and then gates the
+                marker on an INNER `IF FLG-(TESTVAR1)-BLANK` at L23-L26 -- so a malformed entry reddens
+                without a marker and a missing one is marked as well. The reference wrote its asterisk
+                INTO the field's own columns, which is what a suffix inside the control's box
+                corresponds to and what an element after the control did not.
               */}
-              {refusalFor('typeCode')?.state === 'BLANK' ? (
-                <Typography.Text style={refusedMarkerStyle}>
-                  {FIELD_ERROR_TOKENS.blankMarker}
-                </Typography.Text>
-              ) : null}
             </Form.Item>
             <Form.Item
               label={
@@ -2461,7 +3640,32 @@ export function RefTypeEditScreen(): ReactElement {
                 ref={descriptionRef}
                 value={state.newRecord.description}
                 maxLength={DESCRIPTION_WIDTH}
-                aria-invalid={refusalFor('description') !== undefined}
+                /*
+                 * WHY : Assumptions: the slot is declared here too although this field is wide enough
+                 *       that the container binds before the cap does, so the allowance changes nothing
+                 *       an operator can see. It is declared for consistency of contract rather than for
+                 *       effect: the slot IS occupied on every turn on this control, and a measure that
+                 *       states the truth about its own box cannot become wrong if the declared width is
+                 *       ever reduced.
+                 */
+                style={copybookFieldWidthStyle(
+                  DESCRIPTION_WIDTH,
+                  cssVar,
+                  BLANK_FIELD_MARKER_CHARACTERS,
+                )}
+                styles={{
+                  input: {
+                    ...(editable === 'description' ? {} : protectedValueStyle),
+                    ...descriptionRefusal.style,
+                  },
+                }}
+                suffix={descriptionRefusal.suffix ?? MARKER_SLOT_UNOCCUPIED}
+                {...fieldAriaProps(DESCRIPTION_CONTROL_ID, {
+                  invalid: refusalFor('description') !== undefined,
+                  hasError: false,
+                  hasHint: false,
+                })}
+                {...busyProps(state.busy)}
                 disabled={editable !== 'description' || state.busy}
                 onChange={
                   /**
@@ -2478,41 +3682,23 @@ export function RefTypeEditScreen(): ReactElement {
                   }
                 }
               />
-              {refusalFor('description')?.state === 'BLANK' ? (
-                <Typography.Text style={refusedMarkerStyle}>
-                  {FIELD_ERROR_TOKENS.blankMarker}
-                </Typography.Text>
-              ) : null}
             </Form.Item>
           </Form>
           {/*
-            Assumptions: the delete is additionally confirmed through a `Popconfirm`, which is a browser
+            ⚠ Assumptions: the delete is additionally confirmed through a `Modal`, which is a browser
             addition ON TOP OF the reference's own two-press confirmation rather than a replacement for
-            it. A pointer can activate a control by accident where a function key cannot, and the
-            design-system mapping assigns `Popconfirm` with `okType="danger"` to exactly this role. The
-            key path is unaffected: PF4 still asks on the first press and deletes on the second, and the
-            prompt this dialogue carries is the same catalogued sentence the row-22 band shows.
+            it. A pointer can activate a control by accident where a function key cannot. The key path is
+            unaffected: PF4 still asks on the first press and deletes on the second, and the prompt the
+            dialogue carries is the same catalogued sentence the row-22 band shows.
+
+            ⚠ Refactoring Rationale: the control and the confirmation are rendered SEPARATELY, where the
+            confirmation used to wrap the control. A `Popconfirm` had to wrap its trigger because it
+            aligned against it; a `Modal` is anchored to the viewport, so the two are independent and the
+            control cannot be mistaken for the dialogue's opener. See {@link renderDeleteConfirmation}
+            for why the primitive changed.
           */}
-          <Flex gap="small">
-            <Popconfirm
-              title={EDIT_STATUS.PROMPT_DELETE_CONFIRM.text}
-              okType="danger"
-              disabled={!matrix.PFK04.accepted || state.busy}
-              onConfirm={
-                /**
-                 * Dispatches the delete key from the pointer path.
-                 * @returns {void} Completion is represented by the dispatched action.
-                 */
-                () => {
-                  invokeAid('PFK04');
-                }
-              }
-            >
-              <Button danger disabled={!matrix.PFK04.accepted || state.busy}>
-                {REF_TYPE_EDIT_KEY_LABELS.PFK04}
-              </Button>
-            </Popconfirm>
-          </Flex>
+          <Flex gap="small">{renderDeleteControl()}</Flex>
+          {renderDeleteConfirmation()}
         </>
       ) : (
         <Result
@@ -2532,23 +3718,13 @@ export function RefTypeEditScreen(): ReactElement {
         />
       )}
       {/*
-        ⚠ Assumptions: TWO bands, never merged -- this one and the row-23 line delegated to the shell
-        above -- because this mapset declares two message fields and they carry different things at the
-        same time: `INFOMSG` at `POS=(22,23)` is the mode prompt and `ERRMSG` at `POS=(23,1)` is the
-        rejection or outcome. Their severities are read off the mapset rather than chosen per message: row
-        22 is `COLOR=NEUTRAL HILIGHT=OFF` on every turn, so it renders neutral, and row 23 is `COLOR=RED
-        ATTRB=(ASKIP,BRT,FSET)` on every turn, so the delegated slot names `error`. Collapsing them into
-        one line would drop whichever message the other overwrote, and deriving a severity from the
-        message text would make the rendering depend on the sentence rather than on the field it was
-        declared under.
+        ⚠ Assumptions: TWO bands, never merged -- and NEITHER is composed here any more. This mapset
+        declares two message fields that carry different things at the same time: `INFOMSG` at
+        `POS=(22,23)` is the mode prompt and `ERRMSG` at `POS=(23,1)` is the rejection or outcome.
+        Collapsing them into one line would drop whichever message the other overwrote. Both are
+        published on the shell slot above, which is what keeps them adjacent and in the declared order;
+        the rationale for the move is recorded there.
       */}
-      <MessageBand
-        mapset={REF_TYPE_EDIT_MAPSET}
-        message={infoMessage}
-        severity="neutral"
-        line="information"
-        channel={messageChannel(EDIT_STATUS.PROMPT_FOR_SEARCH_KEYS.field)}
-      />
     </Flex>
   );
 }

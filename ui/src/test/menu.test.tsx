@@ -1047,4 +1047,230 @@ function mainMenuScreenCases(): void {
   );
 }
 
+/**
+ * Asserts the option row can wrap while the prompt and the field keep their declared measures.
+ *
+ * Purpose: the regression guard for the row that could not wrap. Browser measurement of the rendered
+ * screen recorded it surviving a 375 px viewport by 6.52 px, reaching exactly 0.00 px of clearance at
+ * 360 and, below that, pushing the submit control out of the viewport while squeezing the two-character
+ * field to 24.00 px.
+ *
+ * ⚠️ Assumptions: this asserts the three STYLE properties that decide the outcome rather than measuring
+ * a rendered width, and that is a property of the runner rather than a weaker test. `jsdom` performs no
+ * layout -- every `getBoundingClientRect` is zero and no flex line is ever computed -- so a width
+ * assertion here would pass whatever the styles said. The three properties are jointly sufficient and
+ * individually necessary: the row must permit wrapping, or the trailing control leaves the viewport; the
+ * prompt must refuse to break, or the 25-character field of `app/bms/COMEN01.bms` L140-L144 renders on
+ * two lines; and the field must refuse to shrink, or the row's overflow is taken out of the two columns
+ * `app/bms/COMEN01.bms` L148 declares before it is taken out of anything else.
+ *
+ * Assumptions: the row is reached from the field rather than by a test identifier, because the row is a
+ * layout element with no name of its own and adding one to address it in a test would put a hook in the
+ * screen that only the test uses. `parentElement` of the antd wrapper is the flex line the prompt, the
+ * field and the submit control share.
+ * @returns {Promise<void>} Resolves once the three properties have been asserted.
+ */
+async function letsTheOptionRowWrapWithoutBreakingThePromptOrTheField(): Promise<void> {
+  await signOnWithGroups([CARDDEMO_USER_GROUP]);
+  await mountMenu();
+
+  const field = optionField();
+  const prompt = screen.getByText(MAIN_MENU_HEADINGS.OPTION_PROMPT);
+  const row = field.parentElement;
+  expect(row, 'the option field must sit inside a row element').not.toBeNull();
+
+  /*
+   * WHY : ⚠️ Assumptions: the row's wrapping is asserted through the design system's own CLASS and NOT
+   *       through an inline style, because that is where the library puts it and an inline-style
+   *       assertion here is worthless. `node_modules/antd/es/flex/utils.js` `genClsWrap` emits
+   *       `${prefixCls}-wrap-${wrap}` and maps `true` onto the keyword `wrap`, while `Flex` itself
+   *       (`node_modules/antd/es/flex/index.js` L42-L56) copies only `flex` and `gap` into the style
+   *       object -- so `wrap={false}` produces NO class and NO inline value, and the row falls back to
+   *       the CSS initial `nowrap` with nothing on the element to read. A first draft of this case
+   *       asserted `style.flexWrap !== 'nowrap'` and PASSED against the restored defect, which is how
+   *       this was found; the class is the only observable that distinguishes the two states.
+   */
+  expect(
+    (row as HTMLElement).className,
+    'the option row must permit wrapping so the submit control drops instead of leaving the viewport',
+  ).toContain('ant-flex-wrap-wrap');
+  expect(
+    prompt.style.whiteSpace,
+    'the 25-character prompt must stay on the one line the mapset paints it on',
+  ).toBe('nowrap');
+  expect(
+    field.style.flexShrink,
+    'the option field must keep its declared two columns rather than absorbing the row overflow',
+  ).toBe('0');
+}
+
+/**
+ * Asserts the two ENTER controls share one name and are still told apart by a screen reader.
+ *
+ * ⚠️ Purpose: this case is NEW and it is the guard on the keep-both decision recorded at the call site.
+ * Keeping two controls for one action is defensible -- `app/bms/COMEN01.bms` L158-L162 declares the
+ * row-24 legend `ATTRB=(ASKIP,NORM)`, a protected literal, so the terminal had NO operable `ENTER`
+ * control and both browser controls are additions -- but it is only defensible while the two do not
+ * present as one control announced twice. The case above proves the glyph stays out of the NAME; this
+ * one proves something separate and previously unmeasured: that a screen reader moving through the two
+ * tab stops hears a difference.
+ *
+ * ⚠️ Assumptions: the shared NAME is asserted rather than a difference in it. WCAG 2.2 SC 3.2.4 asks
+ * one name for one function, and these two invoke the identical function, so a case demanding different
+ * names would demand a violation. The difference has to live somewhere that is not the name, and the
+ * DESCRIPTION is where it is put.
+ *
+ * Assumptions: the description asserted is the catalogued option prompt, already on the glass labelling
+ * the field, so Rule T8 is satisfied without inventing a second string for this screen.
+ * @returns {Promise<void>} Resolves once both controls have been inspected.
+ */
+async function tellsTheTwoEnterControlsApartWithoutRenamingEither(): Promise<void> {
+  await signOnWithGroups([CARDDEMO_USER_GROUP]);
+  const run = await mountMenu();
+
+  const label = MAIN_MENU_KEY_LABELS.ENTER;
+  const legend = screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL });
+  const named = screen.getAllByRole('button', { name: label });
+
+  expect(named, 'the screen paints exactly two controls carrying the shared label').toHaveLength(2);
+
+  const own = named.find(
+    /**
+     * Keeps the candidate outside the legend region.
+     * @param {HTMLElement} candidate - One button carrying the shared label.
+     * @returns {boolean} True when the button sits outside the legend.
+     */
+    (candidate) => !legend.contains(candidate),
+  );
+  const inLegend = named.find(
+    /**
+     * Keeps the candidate inside the legend region.
+     * @param {HTMLElement} candidate - One button carrying the shared label.
+     * @returns {boolean} True when the button sits inside the legend.
+     */
+    (candidate) => legend.contains(candidate),
+  );
+  expect(own, 'the screen must offer its own submit control outside the legend').toBeDefined();
+  expect(inLegend, 'the legend must offer the same key').toBeDefined();
+
+  /*
+   * WHY : Assumptions: the description is resolved through the referenced element's own text rather
+   *       than compared as an attribute value, because that is what an assistive technology does -- an
+   *       `aria-describedby` naming an element that does not exist reads as no description at all and
+   *       would otherwise pass an attribute comparison.
+   */
+  const describedBy = (own as HTMLElement).getAttribute('aria-describedby') ?? '';
+  const description = describedBy === '' ? null : document.getElementById(describedBy);
+  expect(
+    description,
+    'the screen control must be described by an element that exists',
+  ).not.toBeNull();
+  expect(
+    (description as HTMLElement).textContent,
+    'the screen control must be described by the catalogued option prompt',
+  ).toBe(MAIN_MENU_HEADINGS.OPTION_PROMPT);
+
+  expect(
+    (inLegend as HTMLElement).getAttribute('aria-describedby'),
+    'the legend copy must carry no description, so the two do not read alike',
+  ).toBeNull();
+  expect(
+    (inLegend as HTMLElement).getAttribute('aria-keyshortcuts'),
+    'the legend copy must announce the key it stands for',
+  ).not.toBeNull();
+
+  /*
+   * WHY : Assumptions: the glyph is asserted ABSENT from the accessibility tree rather than asserted to
+   *       carry `aria-hidden`, because absence is the property that matters and it holds however the
+   *       hiding is expressed. `@ant-design/icons` renders `role="img"` with the icon's own name as its
+   *       label, so a queryable image inside this control is exactly the second announcement the
+   *       decorative glyph must not make.
+   */
+  expect(
+    within(own as HTMLElement).queryByRole('img'),
+    'the decorative glyph must not appear in the accessibility tree',
+  ).toBeNull();
+
+  run.unmount();
+}
+
+/**
+ * Asserts the screen's own submit control and the legend entry are one operation, distinguishably.
+ *
+ * Purpose: the regression guard for two pixel-identical primary controls about 330 px apart. On the
+ * sibling report screen the same pair genuinely DIVERGED -- one opened a confirmation and the other did
+ * not -- so the property that matters most here is that these two cannot: both must invoke the same
+ * function and reach the same address from the same entry.
+ *
+ * ⚠️ Assumptions: the accessible name of the screen's control is required to be EXACTLY the catalogued
+ * label. The control carries a decorative glyph, and every `@ant-design/icons` export renders
+ * `role="img"` with `aria-label` set to the icon's own name
+ * (`node_modules/@ant-design/icons/es/components/AntdIcon.js` L48-L50), so an unhidden glyph would make
+ * the control announce "arrow-right ENTER=Continue" and read twice. Asserting the exact name is what
+ * catches that, and it is not hypothetical -- omitting `aria-hidden` failed eighteen cases across this
+ * screen's suites in one run.
+ *
+ * Assumptions: the two controls are told apart by landmark membership rather than by document order,
+ * because they share the label deliberately and a DOM-order query would survive a layout change that
+ * inverted them.
+ * @returns {Promise<void>} Resolves once both controls have entered the same option.
+ */
+async function entersOneOperationFromBothEnterSurfaces(): Promise<void> {
+  await signOnWithGroups([CARDDEMO_USER_GROUP]);
+
+  const label = MAIN_MENU_KEY_LABELS.ENTER;
+  const firstOption = MAIN_MENU_OPTIONS[0];
+  expect(firstOption, 'the option catalog must not be empty').toBeDefined();
+  const expected = MAIN_MENU_DESTINATIONS[(firstOption as MainMenuOption).programName];
+  expect(expected, 'option 1 must resolve to a delivered route').toBeDefined();
+
+  const pointerRun = await mountMenu();
+  const legend = screen.getByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL });
+  const named = screen.getAllByRole('button', { name: label });
+  const own = named.find(
+    /**
+     * Keeps the candidate that is not part of the legend region.
+     * @param {HTMLElement} candidate - One button carrying the shared label.
+     * @returns {boolean} True when the button sits outside the legend.
+     */
+    (candidate) => !legend.contains(candidate),
+  );
+  expect(own, 'the screen must offer its own submit control outside the legend').toBeDefined();
+  expect(
+    (own as HTMLElement).textContent,
+    'the glyph must not join the label the control announces',
+  ).toBe(label);
+
+  await pointerRun.user.type(
+    optionField(),
+    String((firstOption as MainMenuOption).optionNumber).padStart(OPTION_NUMBER_DIGITS, '0'),
+  );
+  await pointerRun.user.click(own as HTMLElement);
+  const fromPointer = currentAddress();
+  pointerRun.unmount();
+
+  const keyRun = await mountMenu();
+  await selectOption(keyRun.user, (firstOption as MainMenuOption).optionNumber);
+  const fromKey = currentAddress();
+  keyRun.unmount();
+
+  expect(fromPointer, 'the screen control must enter the option').toBe(expected);
+  expect(fromKey, 'the two ENTER surfaces must reach the identical address').toBe(fromPointer);
+}
+
+/** Registers the cases about the option row's measure and its two ENTER surfaces. */
+function optionRowCases(): void {
+  it(
+    'lets the option row wrap without breaking the prompt or the field',
+    letsTheOptionRowWrapWithoutBreakingThePromptOrTheField,
+  );
+  it('enters one operation from both ENTER surfaces', entersOneOperationFromBothEnterSurfaces);
+  it(
+    'tells the two ENTER controls apart without renaming either',
+    tellsTheTwoEnterControlsApartWithoutRenamingEither,
+  );
+}
+
 describe('main menu screen at /menu', mainMenuScreenCases);
+
+describe('the option row holds its measure and its one operation', optionRowCases);

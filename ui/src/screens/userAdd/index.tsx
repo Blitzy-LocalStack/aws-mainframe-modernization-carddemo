@@ -82,9 +82,16 @@ import type {
 } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp, fieldHintId } from '../../layout/fieldHelp';
+import {
+  BLANK_FIELD_MARKER_CHARACTERS,
+  busyAnnouncement,
+  fieldAriaProps,
+  fieldErrorHelp,
+  fieldHintId,
+} from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
+import { copybookFieldWidthStyle } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
@@ -93,8 +100,11 @@ import {
   INVALID_KEY_PRESSED,
   MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
+  fitsDeclaredWidth,
   formatMessageTemplate,
+  normaliseForWire,
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
 import { ADMIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
@@ -244,6 +254,72 @@ export const USER_ADD_FIELD_WIDTHS = {
   userId: USER_ID_MAX_LENGTH,
   userType: 1,
 } as const satisfies Readonly<Record<UserAddField, number>>;
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: entry is now measured against the declared width in the two units the
+ *       RECORD is stated in, where the control's `maxLength` was the only bound. `maxLength` stops the
+ *       keystroke, which is the right interaction, but it counts UTF-16 CODE UNITS -- a unit neither
+ *       `PIC X(20)` nor a `VARCHAR(20)` column is declared in. A rendering review measured the
+ *       consequence on these name fields directly: `Ünïcödé Émoji 🎉🏦` is sixteen characters and
+ *       eighteen code units, so a twenty-position field stops accepting after eighteen of them, and a
+ *       field filled entirely with astral characters stops after ten. The operator meets a field that
+ *       silently holds half of what its own hint advertises, and nothing says so.
+ * WHY : ⚠️ Assumptions: BOTH measures have to fit and the BYTE measure usually binds, which is why the
+ *       shared predicate is used rather than a character count here. `SEC-USR-FNAME PIC X(20)`
+ *       (`app/cpy/CSUSR01Y.cpy` L19) is twenty BYTES on the record, so twenty accented letters are
+ *       twenty code points and forty bytes -- a value `maxLength` admits and the record cannot hold.
+ *       In the other direction one astral character is a single code point that `maxLength` counts
+ *       twice, refusing a character the field has room for. Clamping on the record's own units removes
+ *       both errors at once.
+ * WHY : ⚠️ Trade-offs: an over-long entry is CLAMPED rather than refused with a sentence, and the reason
+ *       is that no sentence exists to say it in. `app/cbl/COUSR01C.cbl` L120-L144 declares five field
+ *       refusals -- the four controls this screen paints plus the withdrawn credential's -- and every
+ *       one of them is a BLANK test, `... can NOT be empty...`, with no length arm at all, because a 3270
+ *       field of length n physically cannot hold n+1 characters, so an over-length condition never
+ *       arose for the program to report. The catalog is transcribed from the program, so stating one
+ *       here would mean authoring operator prose the reference never wrote. Clamping is the terminal's
+ *       own behaviour: the keyboard simply stopped accepting into a full field.
+ * WHY : Alternatives Considered: importing `clampToDeclaredWidth` from `ui/src/screens/accountUpdate`,
+ *       which states the identical rule for the same reason. Rejected because every screen is mounted
+ *       through `lazy()` in `ui/src/router.tsx`, so a value import from another screen folds that
+ *       screen's chunk into this one; the rule is restated and the shared PREDICATES it consults --
+ *       `normaliseForWire` and `fitsDeclaredWidth` -- are imported, so the two screens agree by
+ *       construction on the part that could actually diverge.
+ */
+
+/**
+ * Clamps one entry to a declared field width, measured as the record measures it.
+ *
+ * Purpose: keep the value the operator can see identical to the value the field can store, so nothing
+ * is accepted on the glass that the record then cannot hold.
+ *
+ * Assumptions: the entry is normalised to Normalization Form C FIRST and the clamp then walks whole
+ * CODE POINTS rather than UTF-16 units, so a surrogate pair is kept or dropped as one character and can
+ * never be cut in half into a lone surrogate -- a value no byte measure could make sense of.
+ *
+ * Trade-offs: the fit is re-tested per candidate length rather than computed from a byte count in one
+ * step. That is a loop over at most the entry's own length on a keystroke, and it buys the property that
+ * this function and any validator agree BY CONSTRUCTION because both consult one predicate, where byte
+ * arithmetic of its own here would be a second implementation of the same rule.
+ * @param {string} entry - The value the control reported, exactly as it arrived.
+ * @param {number} declaredWidth - The field's `PIC X(n)` width; a positive integer.
+ * @returns {string} The normalised entry, shortened by whole code points until it fits the width.
+ * @throws {RangeError} If `declaredWidth` is negative or not an integer, raised by the predicate.
+ */
+export function clampToDeclaredWidth(entry: string, declaredWidth: number): string {
+  const normalised = normaliseForWire(entry);
+  if (fitsDeclaredWidth(normalised, declaredWidth)) {
+    return normalised;
+  }
+
+  const codePoints = Array.from(normalised);
+  let kept = codePoints.length - 1;
+  while (kept > 0 && !fitsDeclaredWidth(codePoints.slice(0, kept).join(''), declaredWidth)) {
+    kept -= 1;
+  }
+
+  return codePoints.slice(0, kept).join('');
+}
 
 /** How one control is presented, with every member measured from the mapset's own operands. */
 interface UserAddFieldPresentation {
@@ -535,6 +611,14 @@ export function resolveApiFieldErrors(problem: ApiError): readonly UserAddFieldE
  * screen let through, so its sentence is shown for the control it names, which is the same shape the
  * reference produces for its own refusals: one sentence, about the first offending field, with the
  * cursor on it.
+ *
+ * ⚠️ Alternatives Considered: the message catalogue now publishes two AUTHORED failure sentences --
+ * `TRANSIENT_FAILURE_TRY_AGAIN` for a condition that may clear and `PERSISTENT_FAILURE_REPORT_IT` for
+ * one that will not -- selected on the classification `ui/src/api/client.ts` already computes. Neither
+ * is taken here, and the reason is Rule T8 rather than inertia: this screen's failure sentence HAS a
+ * mainframe source, so substituting an authored one would replace a verbatim operator-facing string
+ * with a better-worded invention. The authored pair is for screens and states the reference never had a
+ * sentence for -- which is why the busy announcement above does take one.
  * @param {unknown} failure - Whatever the request rejected with, normally the normalised
  *   `ApiRequestError` that `ui/src/api/client.ts` mints.
  * @returns {UserAddFailureReport} The sentence to band, the refusals to mark, and the control to focus.
@@ -758,8 +842,21 @@ export function UserAddScreen(): ReactElement {
    * Builds the change handler for one control.
    *
    * Assumptions: the user type is normalised on the way IN rather than on the way out, so the control
-   * can never hold a value outside the contract's domain and the request needs no cast. Every other
-   * control stores what was typed, bounded only by its `maxLength`.
+   * can never hold a value outside the contract's domain and the request needs no cast.
+   *
+   * ⚠️ Refactoring Rationale: every other control is now clamped to its DECLARED width by
+   * {@link clampToDeclaredWidth} on the way in, where it stored what was typed bounded only by
+   * `maxLength`. That comment recorded the old behaviour accurately and the behaviour was wrong: the
+   * WHY block above {@link clampToDeclaredWidth} records the measurement and the reason a UTF-16 bound
+   * is neither of the bounds a fixed-width record has. `maxLength` is KEPT on the control alongside
+   * this, because stopping the keystroke is the affordance a 3270 had and this only corrects the unit.
+   *
+   * ⚠️ Assumptions: the user type is normalised and NOT additionally clamped, and the order matters.
+   * {@link normaliseUserType} returns `''`, `'A'` or `'U'` -- a domain whose every member is one ASCII
+   * character, so it already satisfies the one-position width in both units and a clamp after it could
+   * only be a no-op. Running the clamp FIRST instead would be worse than redundant: it would truncate
+   * a two-character paste to one character and hand the domain check a value the operator never
+   * intended, where discarding the whole entry is what the reference's own field length did.
    * @param {UserAddField} field - Control whose value the handler records.
    * @returns {(event: ChangeEvent<HTMLInputElement>) => void} Handler for that control's change event.
    */
@@ -780,7 +877,10 @@ export function UserAddScreen(): ReactElement {
          */
         (current: UserAddValues): UserAddValues => ({
           ...current,
-          [field]: field === 'userType' ? normaliseUserType(typed) : typed,
+          [field]:
+            field === 'userType'
+              ? normaliseUserType(typed)
+              : clampToDeclaredWidth(typed, USER_ADD_FIELD_WIDTHS[field]),
         }),
       );
     };
@@ -1083,24 +1183,24 @@ export function UserAddScreen(): ReactElement {
    *       second, unadvertised way to write.
    * WHY : Assumptions: no key carries an `action` override, because `DEFAULT_PF_KEY_ACTIONS` already
    *       maps all four to the semantics this screen uses -- ENTER to `submit`, PF3 to `back`, PF4 to
-   *       `clear` and PF12 to `cancel`. Button emphasis follows from the AID through
-   *       `PRIMARY_ACTION_AIDS`, which lists ENTER and PF5, so Enter renders as the primary control and
-   *       PF3, PF4 and PF12 render as default ones exactly as the design-system mapping requires,
-   *       without this screen restating either decision.
-   * WHY : ⚠️ Assumptions: ALL FOUR keys carry `disabled` for the whole in-flight window, where only
-   *       ENTER did. A 3270 keyboard was LOCKED for the duration of the turn -- the terminal accepted no
-   *       attention identifier at all between the send and the reply -- so no arm of the reference
-   *       describes what a second key mid-write would do, and each of the three that is not Enter would
-   *       otherwise resolve the turn the operator's way while the write resolved it the service's way:
-   *       PF3 would leave and PF4 would blank the form while the create was still on its way to
-   *       committing, so the operator would be shown an abandoned or emptied screen for a user that
-   *       exists. The earlier note argued that greying the exits would trap an operator, which the
-   *       window's own length answers: it is one request long and closes on the response whichever way
-   *       that resolves, so nothing is trapped.
+   *       `clear` and PF12 to `cancel`. Button emphasis is a separate question and is answered by the
+   *       `risk` each entry declares below; the note that stood here, that emphasis "follows from the
+   *       AID through `PRIMARY_ACTION_AIDS`", described the mechanism as it was and no longer does.
+   * WHY : ⚠️ Assumptions: ALL FOUR keys decline for the whole in-flight window, where only ENTER did. A
+   *       3270 keyboard was LOCKED for the duration of the turn -- the terminal accepted no attention
+   *       identifier at all between the send and the reply -- so no arm of the reference describes what a
+   *       second key mid-write would do, and each of the three that is not Enter would otherwise resolve
+   *       the turn the operator's way while the write resolved it the service's way: PF3 would leave and
+   *       PF4 would blank the form while the create was still on its way to committing, so the operator
+   *       would be shown an abandoned or emptied screen for a user that exists. The earlier note argued
+   *       that withdrawing the exits would trap an operator, which the window's own length answers: it
+   *       is one request long and closes on the response whichever way that resolves, so nothing is
+   *       trapped.
    *       Trade-offs: a mid-write key is therefore ignored in silence rather than painting the
-   *       invalid-key sentence, because the sink below returns for a `disabled` rejection. That is the
-   *       faithful outcome -- during a locked turn the terminal accepted nothing at all, so painting a
-   *       refusal would report a condition the reference never reported.
+   *       invalid-key sentence. That is the faithful outcome -- during a locked turn the terminal
+   *       accepted nothing at all, so painting a refusal would report a condition the reference never
+   *       reported -- and it holds under both mechanisms: the sink below returns for a `disabled`
+   *       rejection, and `usePfKeys` never routes a `busy` press into that sink at all.
    * WHY : Assumptions: PF12 is registered so that its legend keeps being PAINTED, and it is bound to
    *       {@link refuseUnacceptedKey} because that is the arm the reference answers the key with. It
    *       carries `action: 'screen-defined'` so the bar describes it as this screen's own decision
@@ -1108,18 +1208,60 @@ export function UserAddScreen(): ReactElement {
    *       cancels nothing.
    * WHY : Assumptions: the in-handler `busy` guard in {@link handleAdd} is kept as well rather than
    *       replaced by this flag. State updates are batched, so a second activation dispatched inside the
-   *       same batch can still reach a handler whose binding has not yet re-rendered as disabled, and
-   *       the guard is also what a test can exercise deterministically.
+   *       same batch can still reach a handler whose binding has not yet re-rendered, and the guard is
+   *       also what a test can exercise deterministically.
+   * WHY : ⚠️ Refactoring Rationale: all four keys report `busy` where they reported `disabled`, and the
+   *       DECISION they encode is unchanged -- `usePfKeys` declines a busy key exactly as it declined a
+   *       disabled one, so every argument above about why a mid-write key must not act still holds and
+   *       is still enforced. What changes is only what the operator sees: `disabled` WITHDREW four
+   *       controls whose legends are painted on the glass in front of them, while `busy` leaves each
+   *       present, enabled, focusable and named and wears the design system's own in-flight affordance.
+   *       Both forms decline silently on this screen -- the sink below already returns for a `disabled`
+   *       rejection, and `usePfKeys` never routes a busy press into that channel at all -- so the
+   *       silence the notes above call faithful survives the change intact.
+   * WHY : ⚠️ Refactoring Rationale: every entry declares its `risk`, read off this mapset's own legend
+   *       literal at `app/bms/COUSR01.bms` L159, `ENTER=Add User  F3=Back  F4=Clear  F12=Exit`. Only
+   *       `ENTER=Add User` writes -- it performs `WRITE-USER-SEC-FILE` at `app/cbl/COUSR01C.cbl` -- so
+   *       it alone is `'mutating'`; `F3=Back` navigates, `F4=Clear` empties controls on the client, and
+   *       `F12=Exit` is answered with the invalid-key sentence and reaches nothing at all, so all three
+   *       are `'read-only'`.
+   * WHY : Assumptions: the rendered emphasis is UNCHANGED by these declarations, and stating them is
+   *       still worth doing. The AID fallback happens to be right on this screen -- it lists `ENTER`,
+   *       which is also the only key here that writes -- so this is the one user screen where the old
+   *       rule and the new one agree. Declaring the risk anyway removes the coincidence: the emphasis
+   *       now rests on what the keys DO, so binding a fifth key or moving the create arm cannot silently
+   *       change which control is emphasised.
+   * WHY : Assumptions: `F12=Exit` is `'read-only'` and not left unclassified, even though it is the one
+   *       key this screen refuses. Risk describes what an action does to stored state, and an action
+   *       that is refused does nothing to it -- so classifying it read-only is a statement about the
+   *       arm, not an endorsement of the legend. The advertised-but-unbound mismatch is the reference's
+   *       own and is preserved elsewhere in this file; the classification does not touch it.
    */
   const keyHandlers: PfKeyHandlerMap = {
-    ENTER: { onInvoke: handleAdd, label: USER_ADD_KEY_LABELS.ENTER, disabled: busy },
-    PFK03: { onInvoke: exitToAdminMenu, label: USER_ADD_KEY_LABELS.PFK03, disabled: busy },
-    PFK04: { onInvoke: clearScreen, label: USER_ADD_KEY_LABELS.PFK04, disabled: busy },
+    ENTER: {
+      onInvoke: handleAdd,
+      label: USER_ADD_KEY_LABELS.ENTER,
+      risk: 'mutating',
+      busy,
+    },
+    PFK03: {
+      onInvoke: exitToAdminMenu,
+      label: USER_ADD_KEY_LABELS.PFK03,
+      risk: 'read-only',
+      busy,
+    },
+    PFK04: {
+      onInvoke: clearScreen,
+      label: USER_ADD_KEY_LABELS.PFK04,
+      risk: 'read-only',
+      busy,
+    },
     PFK12: {
       onInvoke: refuseUnacceptedKey,
       label: USER_ADD_KEY_LABELS.PFK12,
       action: 'screen-defined',
-      disabled: busy,
+      risk: 'read-only',
+      busy,
     },
   };
 
@@ -1285,7 +1427,56 @@ export function UserAddScreen(): ReactElement {
       onChange: changeHandler(field),
       disabled: busy,
       autoFocus: presentation.initialCursor === true,
-      ...(presentation.fixedPitch === true ? { style: fixedPitchStyle } : {}),
+      /*
+       * WHY : ⚠️ Refactoring Rationale: every control now carries the CEILING its copybook width
+       *       declares, where only the identifier carried a style at all and that one was the
+       *       fixed-pitch face. A rendering review measured what the absence cost: an eight-character
+       *       input rendered 1172 pixels wide and the blank-field asterisk this screen writes at the
+       *       field's right-hand edge landed at x≈1211, roughly 1150 pixels from the value it
+       *       qualifies -- and the one-position user type rendered at the same full width as a
+       *       twenty-character name, so the control said nothing about how much it would take.
+       *       `ui/src/layout/recordLayout.ts` records the same measurement and states the conclusion
+       *       this adopts: the marker cannot be brought to the value by moving the marker, so the field
+       *       has to stop being many times wider than the data it holds.
+       * WHY : ⚠️ Assumptions: the measure is spread onto the DESIGN-SYSTEM CONTROL and not onto the
+       *       `Form.Item` or a wrapper, which that module records as a measured constraint rather than
+       *       a preference: the theme scopes its custom properties to component class scopes, so
+       *       `--ant-control-padding-horizontal` resolves on an `.ant-input` and returns the empty
+       *       string on an arbitrary element. Spread here, the padding term resolves; spread on a
+       *       wrapper it would not, and the `calc()` would be dropped at computed-value time.
+       * WHY : Assumptions: the width style is merged UNDER the fixed-pitch face rather than replacing
+       *       it, so the identifier keeps both -- the monospaced face that makes two eight-character
+       *       keys render at equal width, and the eight-column ceiling. The two describe different
+       *       properties and neither overwrites a member of the other; the merge order is the idiom
+       *       `ui/src/screens/reports/index.tsx` L2611-L2613 already uses for the same pair.
+       * WHY : Trade-offs: the helper publishes a MAXIMUM alongside `inlineSize: '100%'`, so a field
+       *       declared wider than the viewport still shrinks to fit rather than forcing the page to
+       *       scroll sideways. The declared width is therefore a ceiling and not a fixed size, which
+       *       departs from the terminal -- where every field was exactly its declared width because the
+       *       display was exactly 80 columns. AAP gap G1 already records that departure for POSITION;
+       *       this is the same trade for SIZE, and it is what keeps the narrow viewports the same review
+       *       measured free of horizontal overflow.
+       */
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the marker slot is declared to the measure, and only on the turn
+       *       the marker is rendered. With a suffix present the design system sizes the affix WRAPPER,
+       *       whose space the value and the slot then share, so a maximum computed for the value alone
+       *       leaves the value short by whatever the slot takes -- measured on a sibling screen's
+       *       two-character field as a record key that rendered as one glyph and a sliver. The narrowest
+       *       marker-bearing control here is the one-character user type, where the shortfall is larger
+       *       still.
+       *       Assumptions: the allowance is CONDITIONAL on the very test that renders the suffix below,
+       *       so an accepted field keeps exactly the measure it has always had. Widening every field
+       *       unconditionally would change the whole form to fix a state none of its fields are in.
+       */
+      style: {
+        ...(presentation.fixedPitch === true ? fixedPitchStyle : {}),
+        ...copybookFieldWidthStyle(
+          USER_ADD_FIELD_WIDTHS[field],
+          cssVar,
+          refusal?.state === 'BLANK' ? BLANK_FIELD_MARKER_CHARACTERS : 0,
+        ),
+      },
       ...(refusal?.state === 'BLANK'
         ? {
             suffix: (
@@ -1462,15 +1653,51 @@ export function UserAddScreen(): ReactElement {
    *       full-width control, because the identifier's own width hint sits beside it at `(11,24)` and
    *       the grouping is what the reading order above preserves; a lone control on a row is what the
    *       mapset would show if the second field were not painted.
-   * WHY : ⚠️ Assumptions: the handover surface is rendered ABOVE the form and not inside it. It is not
-   *       an input, so a `Form.Item` would give it a label, a validation slot and a control identifier
-   *       it has no use for; and placing it above the caption's controls is what puts it where an
-   *       operator looks after a write, rather than below four fields the same write has just blanked.
+   * WHY : Assumptions: the handover surface is rendered as a SIBLING of the form and not inside it. It
+   *       is not an input, so a `Form.Item` would give it a label, a validation slot and a control
+   *       identifier it has no use for.
+   * WHY : ⚠️ Refactoring Rationale: it is rendered AFTER the form, where it used to be rendered between
+   *       the caption and the form. A responsive review measured the cost of the earlier position: the
+   *       panel's insertion moved everything below it by roughly 150 pixels, and everything below it is
+   *       the whole form -- including the first-name control, which the success path has just placed the
+   *       cursor on (`app/cbl/COUSR01C.cbl` L289 moves `-1` into `FNAMEL`). So the one control the
+   *       operator was about to type into slid out from under the cursor at the same instant. Rendered
+   *       last, the panel grows the column downward and no element already on the glass changes
+   *       position at all, which is the property the same review recorded as holding across roughly 180
+   *       other controls on this application and found broken only here.
+   * WHY : ⚠️ Assumptions: moving it below costs nothing in discoverability, and the reference is what
+   *       settles that. `app/bms/COUSR01.bms` L151-L154 paints this mapset's only message field at
+   *       `POS=(23,1)` -- BELOW all four controls -- so after a write the reference already directs the
+   *       operator downward, and the shell paints the acknowledgement sentence there. The panel now sits
+   *       on the same side as the sentence it accompanies rather than opposite it. For an operator not
+   *       reading the layout at all, position was never the mechanism: the surface carries
+   *       `role="status"`, so it is announced on insertion wherever it sits.
+   * WHY : Alternatives Considered: keeping the panel above and RESERVING its height at all times, the
+   *       way the message band reserves row 23. Rejected because the band's reservation is one line and
+   *       this surface is a titled alert with a value and two controls -- reserving it would leave a
+   *       permanent void above the form on every arrival, to spare a shift that occurs on one turn in a
+   *       session. Also considered: keeping the position and suppressing the cursor move, so nothing
+   *       moves under the operator; rejected because the cursor move is the reference's own behaviour at
+   *       L289 and the shift is the part with no source.
    */
   return (
     <Flex vertical gap="large">
       <ScreenTitle style={captionStyle}>{USER_ADD_CAPTION}</ScreenTitle>
-      {handover === null ? null : renderCredentialHandover(handover)}
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the screen ANNOUNCES its outstanding turn, where it previously
+       *       only showed one. A review found `aria-busy` on no button anywhere and no live region
+       *       naming the wait, so an operator who could not see the in-flight affordance had nothing at
+       *       all: the controls stayed reachable, the request was in flight, and the screen said nothing
+       *       about it. `busyAnnouncement` renders one visually hidden `role="status"` region -- always
+       *       mounted, empty while idle, because a live region has to be in the accessibility tree
+       *       BEFORE its content changes for the first change to be announced.
+       * WHY : Assumptions: the sentence is `REQUEST_IN_PROGRESS` from the message catalogue, which is
+       *       AUTHORED rather than transcribed, and taking an authored sentence here does not weaken
+       *       Rule T8. The reference has no equivalent to carry: a 3270 turn simply locked the keyboard,
+       *       so there is no mapset literal this could be displacing. Every sentence on this screen that
+       *       DOES have a mainframe source is still that source's, verbatim.
+       */}
+      {busyAnnouncement(busy ? REQUEST_IN_PROGRESS : undefined)}
       <Form layout="vertical">
         <Flex gap="middle" wrap align="flex-start">
           <Flex vertical flex="1 1 0">
@@ -1489,6 +1716,7 @@ export function UserAddScreen(): ReactElement {
 
         {renderField('userType')}
       </Form>
+      {handover === null ? null : renderCredentialHandover(handover)}
     </Flex>
   );
 }

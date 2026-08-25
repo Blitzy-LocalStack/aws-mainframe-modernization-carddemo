@@ -67,11 +67,21 @@
  * Message fidelity
  * ----------------
  * Assumptions: every sentence an operator reads here is a catalog constant from
- * `ui/src/messages/messages.ts`, taken verbatim from the originating program with its trailing
- * ellipsis and interior spacing intact, so the wording is the reference's and never this screen's.
- * The painted labels and the decoration are the other half of the split that module documents at
- * L153-L182: a screen's own field labels and its mapset decoration belong to the screen that renders
- * them, so they are declared here rather than catalogued centrally.
+ * `ui/src/messages/messages.ts`, and the wording is never this screen's. The five sentences that have
+ * a program source are taken verbatim from it, with the trailing ellipsis and the interior spacing
+ * intact. The painted labels and the decoration are the other half of the split that module documents
+ * at L153-L182: a screen's own field labels and its mapset decoration belong to the screen that
+ * renders them, so they are declared here rather than catalogued centrally.
+ *
+ * Refactoring Rationale: ⚠️ this paragraph read "taken verbatim from the originating program" of
+ * EVERY sentence, and three of the sentences this screen now publishes have no originating program at
+ * all — the arrival explanation for a guard's bounce, the replacement-credential explanation, and the
+ * in-flight announcement. Each describes a condition a 3270 program could not observe: a browser
+ * session being evicted, a credential the provider requires replaced, and a request crossing a
+ * network while the operator watches. All three are AUTHORED, all three are registered in that
+ * module's `AUTHORED_OPERATOR_SENTENCES` so the register can tell them from transcriptions, and the
+ * rule that matters here is unchanged and is why they are catalogued rather than written inline: a
+ * user-visible string may only be born in the catalog.
  *
  * Export surface
  * --------------
@@ -84,24 +94,32 @@
  * the identifier the router imports — a screen whose name disagrees with its only consumer does not
  * mount at all.
  *
- * Alternatives Considered: declaring the eleven transcribed constants and the four pure helpers
+ * Alternatives Considered: declaring the eleven transcribed constants and the pure helpers
  * module-private instead of exported, since nothing outside this file imports them today. Rejected on
  * a specific ground rather than on taste: the constants ARE the transformation-rule-T8 transcription,
  * and the per-screen test tree the architecture places at `ui/src/test/**` cannot assert a verbatim
  * string it cannot import — it would have to retype `Type your User ID and Password, then press
  * ENTER:` and the nine 42-character banknote lines, which puts a byte-exact transcription in two
- * places and makes silent drift between them possible. The four helpers are exported for the narrower
- * reason that each encodes one reference decision worth asserting in isolation: the blank test that
- * treats an all-blanks field as empty, the refusal-to-sentence mapping, the per-control refusal split
- * and the cursor-destination choice. Exporting them keeps those assertable without a test having to
- * drive the whole screen to reach one branch.
+ * places and makes silent drift between them possible. The helpers are exported for the narrower
+ * reason that each encodes one decision worth asserting in isolation: the blank test that treats an
+ * all-blanks field as empty, the refusal-to-sentence mapping, the per-control refusal split, the
+ * cursor-destination choice, the discriminator that tells a refused challenge SESSION from a refused
+ * proposed password, and the reading of the guard's bounce reason. Exporting them keeps those
+ * assertable without a test having to drive the whole screen to reach one branch.
+ *
+ * Refactoring Rationale: ⚠️ this paragraph counted "the four pure helpers" and enumerated four while
+ * the module exported six, so it under-reported by two — the session-refusal discriminator and now
+ * {@link signOnArrivalMessage}. The count is dropped rather than corrected to a number: a figure in
+ * prose beside a list that carries the same information goes stale on the next addition, and this one
+ * already had.
  */
 
+import { LoginOutlined } from '@ant-design/icons';
 import { Button, Card, Flex, Form, Grid, Input, Space, Typography, theme } from 'antd';
 import type { InputRef } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 
 import { PASSWORD_MAX_LENGTH, SIGN_ON_CHALLENGE, USER_ID_MAX_LENGTH } from '../../api/auth';
 import { SIGN_ON_NEW_PASSWORD_LABEL, SIGN_ON_SUBMIT_LABEL } from '../../messages/messages';
@@ -111,12 +129,30 @@ import type { ApiError, FieldError } from '../../api/types';
 import { ADMIN_GROUP, groupsFromIdToken, useAuth } from '../../hooks/useAuth';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp, fieldHintId } from '../../layout/fieldHelp';
+import {
+  busyAnnouncement,
+  busyProps,
+  fieldAriaProps,
+  fieldErrorHelp,
+  fieldHintId,
+} from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyRejection } from '../../layout/usePfKeys';
-import { INVALID_KEY_PRESSED, PROGRAM_MESSAGES, THANK_YOU_CARDDEMO } from '../../messages/messages';
-import { ADMIN_MENU_ROUTE, MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import {
+  INVALID_KEY_PRESSED,
+  PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
+  SIGN_ON_NEW_PASSWORD_REQUIRED,
+  SIGN_ON_SESSION_REQUIRED,
+  THANK_YOU_CARDDEMO,
+} from '../../messages/messages';
+import {
+  ADMIN_MENU_ROUTE,
+  MAIN_MENU_ROUTE,
+  navigateSafely,
+  signOnBounceState,
+} from '../../routes/navigation';
 import { BMS_TEXT_COLOR_TOKENS, BREAKPOINT_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 
 /** The five sign-on sentences, keyed by the program that emits them. */
@@ -624,6 +660,69 @@ export function isSessionRefusal(failure: unknown): boolean {
 }
 
 /**
+ * Severity the arrival explanation is published at when a guard turned the operator away.
+ *
+ * Assumptions: `error`, which is the band's ASSERTIVE channel, and not the polite `info` the
+ * farewell uses. Two grounds. The row this stands in for is `ERRMSG` at `app/bms/COSGN00.bms` L197,
+ * declared `COLOR=RED ATTRB=BRT` — the band's `error` severity is the one that resolves to that
+ * treatment — and `ui/src/layout/MessageBand.tsx` reserves its polite channel for guidance "the
+ * operator has not asked to be interrupted by". This is the opposite case: the operator asked for a
+ * screen, was refused it, and is looking at a form they did not navigate to, so an interruption is
+ * exactly what the sentence is for.
+ *
+ * Alternatives Considered: `info`, on the reading that an evicted session is not the operator's
+ * mistake and red text implies fault. Rejected because the band's severities are chosen for URGENCY
+ * rather than for blame — every one of the 21 mapsets paints row 23 red, including for conditions no
+ * operator caused — and a polite region announced on a screen the operator did not ask for is the
+ * announcement most likely to be missed.
+ */
+const SIGN_ON_ARRIVAL_SEVERITY: MessageBandSeverity = 'error';
+
+/**
+ * Severity the replacement-credential explanation is published at.
+ *
+ * Assumptions: `info`, the polite channel, because nothing has been refused. The provider accepted
+ * the credential and is asking for a replacement, so painting the sentence in the refusal channel
+ * would tell an operator their password was wrong at the exact moment it was right — which is the
+ * confusion `auth-api.yaml` cites when it refuses to reuse `Wrong Password. Try again ...` for this
+ * outcome.
+ */
+const SIGN_ON_CHALLENGE_SEVERITY: MessageBandSeverity = 'info';
+
+/**
+ * Reports the sentence explaining why the operator is looking at sign-on, if anything explains it.
+ *
+ * Purpose: close the operator-visible half of the silent bounce. `ui/src/routes/guards.tsx` already
+ * redirects an operator holding no session to this screen and already hands the history entry a
+ * reason, and nothing read it — so an audit measured the band present and EMPTY on all nineteen
+ * guarded routes, with a bounce out of `/users/USER0100/delete` indistinguishable from a first visit.
+ *
+ * Assumptions: the reason is read through `signOnBounceState` rather than off the state object here,
+ * and that is what keeps this screen out of the trust decision. `useLocation().state` is whatever the
+ * previous entry wrote, including a hand-edited value, so the reader in
+ * `ui/src/routes/navigation.ts` validates it structurally and admits only its own literal; an
+ * unrecognised value reads as no reason at all, which is the same as a first visit.
+ *
+ * Assumptions: only the BOUNCE reason produces a sentence here. The same channel also carries the
+ * deliberate sign-off reason, and that one is claimed by `ui/src/layout/AppShell.tsx`, which replaces
+ * the whole frame with its own acknowledgement surface — so a sentence for it here would either
+ * duplicate that surface or paint an explanation behind it. `signOnBounceState` narrows to the bounce
+ * literal alone, which is why this function does not have to make that distinction itself.
+ *
+ * Assumptions: the attempted destination the same state carries is deliberately NOT rendered. It is a
+ * value the address bar supplied, so echoing it would paint an operator's mistyped account identifier
+ * or card number onto the screen and into any screenshot of it — the withholding
+ * `ui/src/messages/messages.ts` records for the rejected path on the not-found surface. Resuming the
+ * destination after a successful sign-on is a separate behaviour and is not attempted here.
+ * @param {unknown} entryState - The `state` member of this screen's location, of any shape.
+ * @returns {string | null} The catalogued sentence to publish, or `null` when nothing put the
+ *   operator here.
+ */
+export function signOnArrivalMessage(entryState: unknown): string | null {
+  return signOnBounceState(entryState).reason === undefined ? null : SIGN_ON_SESSION_REQUIRED;
+}
+
+/**
  * Renders the sign-on screen migrated from `COSGN00C`.
  *
  * Assumptions: the component mounts in the reference's own first-entry state — both controls empty,
@@ -675,7 +774,34 @@ export function SignOnScreen(): ReactElement {
    */
   const screens = Grid.useBreakpoint();
   const artFitsViewport = screens[SIGN_ON_ART_BREAKPOINT.screenKey] !== false;
-  const [message, setMessage] = useState<ScreenMessage | null>(null);
+  /*
+   * WHY : Assumptions: the location's `state` is read as a PROPERTY through an `unknown` cast rather
+   *       than destructured, which is the pattern `ui/src/layout/AppShell.tsx` uses on the same value
+   *       and for the same reason: the routing package types `state` as `any` because any page may
+   *       write anything onto a history entry, and destructuring an `any` member spreads that `any`
+   *       through this file. {@link signOnArrivalMessage} is the only reader and it narrows
+   *       structurally, so nothing here ever reads a member off an untrusted value.
+   */
+  const arrival = signOnArrivalMessage((useLocation() as { readonly state?: unknown }).state);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the band opens with the arrival explanation where it opened
+   *       EMPTY, which is the operator-visible half of the silent bounce. A guard turning an operator
+   *       away has always handed this screen a reason; nothing rendered it, so the screen presented an
+   *       ordinary cold sign-on that had silently discarded what the operator asked for.
+   * WHY : Alternatives Considered: deriving the band value each render as `message ?? arrival`, with
+   *       no seeded state. Rejected because every submission clears the band before dispatching, so a
+   *       derived arrival sentence would REAPPEAR under the operator's own in-flight sign-on and read
+   *       as a second eviction. Seeding makes it what it is -- a first-entry sentence, replaced by the
+   *       first thing this screen has to say for itself -- which is also how the reference's own
+   *       first-entry message behaved.
+   * WHY : Assumptions: a lazily-seeded initial value is sufficient BECAUSE a bounce always mounts this
+   *       screen fresh. The guard is the route element for every guarded path, so a bounce unmounts the
+   *       screen the operator was on and mounts this one; there is no path on which this component
+   *       stays mounted while the reason on its own entry changes.
+   */
+  const [message, setMessage] = useState<ScreenMessage | null>(
+    arrival === null ? null : { text: arrival, severity: SIGN_ON_ARRIVAL_SEVERITY },
+  );
   const [refusals, setRefusals] = useState<FieldRefusals>({});
   const [busy, setBusy] = useState(false);
   const [challenge, setChallenge] = useState<SignOnChallenge | null>(null);
@@ -940,6 +1066,25 @@ export function SignOnScreen(): ReactElement {
       const outcome = await signIn(userId.trim().toUpperCase(), password);
       if (outcome.outcome === SIGN_ON_CHALLENGE) {
         setChallenge(outcome);
+        /*
+         * ⚠️ Refactoring Rationale: the turn now EXPLAINS itself, where it transformed the form in
+         * silence. The identifier is disabled with the operator's own value still in it, the
+         * credential label changes to `New Password` and the field is cleared -- and an audit
+         * measured the band empty through all of it, so an operator was asked for a replacement with
+         * nothing on screen saying that the password they had just typed was accepted, that it is
+         * temporary or expired, or that setting a permanent one is what completes the sign-on.
+         * Assumptions: the sentence is the catalogued {@link SIGN_ON_NEW_PASSWORD_REQUIRED} and not
+         * the provider's `challengeName`. `NEW_PASSWORD_REQUIRED` is the pool's vocabulary and names
+         * a mechanism rather than an action, and this screen renders no service identifier anywhere
+         * else either.
+         * Alternatives Considered: painting the explanation beneath the replacement control as its
+         * `extra` text instead of in the band. Rejected because it would give this screen a second
+         * announcing surface for one condition -- the band is already published through
+         * `useShellSlot` and is the region an operator reads for what just happened -- and a
+         * subsequent policy refusal has to be able to REPLACE the explanation, which it does here by
+         * writing the same band.
+         */
+        setMessage({ text: SIGN_ON_NEW_PASSWORD_REQUIRED, severity: SIGN_ON_CHALLENGE_SEVERITY });
         // Assumptions: the accepted credential is dropped as soon as the provider has consumed it,
         //   so the replacement it is now asking for is entered into an empty control. The replacement
         //   slot is cleared alongside it: an operator who was challenged, had the session refused, and
@@ -1479,7 +1624,70 @@ export function SignOnScreen(): ReactElement {
              *       exit key is rendered by that bar rather than duplicated here, so this is the one
              *       control the form itself carries.
              */}
-            <Button type="primary" loading={busy} onClick={runSubmit}>
+            {/*
+             * WHY : ⚠️ Refactoring Rationale: the control now carries an `icon`, and the reason is
+             *       measurement rather than decoration. With no icon the design system inserts its
+             *       loading glyph through a motion that animates the slot FROM ZERO WIDTH -- measured in
+             *       `node_modules/antd/es/button/DefaultLoadingIcon.js`, whose `onAppearStart` returns
+             *       `{ width: 0 }` and whose `onAppearActive` returns the glyph's own `scrollWidth` -- so
+             *       the control grew from 78.5 to about 99 pixels, a 26 per cent jump, at the instant the
+             *       operator pressed it. `Button.js` L262 passes `existIcon: !!icon`, and L273-L278 puts
+             *       the loading glyph in the icon's own slot when one exists, which removes the motion
+             *       entirely: the slot is the same width in both states and the glyph is simply swapped.
+             * WHY : ⚠️ Alternatives Considered: reserving the slot with an invisible placeholder, and
+             *       fixing the control's width outright. The placeholder works and was rejected as an
+             *       empty element carrying no meaning, present solely to hold a measurement; a fixed
+             *       width would be a pixel value this screen is not allowed to hold, and would have to be
+             *       remeasured for every theme and every translation of the label. A real icon costs one
+             *       glyph and removes the jump for the same reason the placeholder would.
+             * WHY : Assumptions: the glyph is a sign-on glyph and not an arbitrary one, and it is
+             *       additive -- the mapset paints no iconography, and AAP section 0.3.2 admits
+             *       `@ant-design/icons` on that basis.
+             * WHY : ⚠️ Assumptions: `aria-hidden` on the glyph is load-bearing and not defensive. Every
+             *       `@ant-design/icons` export renders `role="img"` with `aria-label` set to the icon's
+             *       own name -- `node_modules/@ant-design/icons/es/components/AntdIcon.js` L48-L50 -- so
+             *       an unhidden glyph CONTRIBUTES its name to the button's, and this control announced
+             *       "login Sign on". That makes one control read twice and breaks every query that names
+             *       it by its label. Hiding it leaves the accessible name exactly the catalog's
+             *       `Sign on`, which is all a decorative glyph should ask for. Measured on the sibling
+             *       menu screens, where the same omission failed eighteen cases in one run.
+             * WHY : ⚠️ Refactoring Rationale: `aria-busy` is STATED on the control, through the shared
+             *       helper every other screen in this delivery states it with. A review found the screen
+             *       carrying two busy vocabularies for one action in a single frame -- this control
+             *       spinning while the legend's own ENTER entry greyed out -- and found `aria-busy` on no
+             *       button anywhere. The legend entry stays disabled deliberately, because that is the
+             *       3270 keyboard lock's only equivalent and the binding above records why; what was
+             *       missing was the control the operator actually pressed saying, in the one vocabulary
+             *       the rest of the application uses, that it is working.
+             * WHY : ⚠️ Refactoring Rationale: the audible half IS added now, and the reason it was
+             *       absent has been removed rather than argued around. This block recorded that
+             *       `busyAnnouncement` requires a SENTENCE, that every operator sentence belongs to
+             *       `ui/src/messages/messages.ts`, and that the catalog declared no busy sentence -- so
+             *       the gap was reported rather than filled, because inventing wording in a screen
+             *       would breach transformation rule T8. The catalog now declares
+             *       {@link REQUEST_IN_PROGRESS} as an AUTHORED sentence, registered and width-bounded
+             *       where a screen-local literal could never be, so the sentence comes from the one
+             *       place a user-visible string may be born and this screen only publishes it.
+             * WHY : Assumptions: the condition genuinely has no reference wording to transcribe, which
+             *       is why the sentence had to be authored rather than found. `CTRL=(ALARM,FREEKB)` at
+             *       `app/bms/COSGN00.bms` L19 held the terminal's keyboard until the task re-sent the
+             *       map, so the 3270 screen said nothing while a task ran because the operator
+             *       physically could not type into it. Nothing in a browser locks the keyboard, so the
+             *       property has to be stated in words.
+             * WHY : Trade-offs: the announcement is VISUALLY HIDDEN and adds no third busy vocabulary
+             *       to the frame. A review already found this screen showing two visible ones for one
+             *       action -- the control's spinner and the legend's greyed ENTER entry -- so the
+             *       missing half was never a second visible indicator; it was that a screen-reader
+             *       user was told nothing at all when the key they pressed started work.
+             */}
+            {busyAnnouncement(busy ? REQUEST_IN_PROGRESS : undefined)}
+            <Button
+              type="primary"
+              icon={<LoginOutlined aria-hidden />}
+              loading={busy}
+              onClick={runSubmit}
+              {...busyProps(busy)}
+            >
               {SIGN_ON_SUBMIT_LABEL}
             </Button>
           </Space>

@@ -56,12 +56,15 @@ import {
   ADMIN_MENU_ROUTE,
   AUTHORIZATION_SUMMARY_ROUTE,
   BILL_PAY_ROUTE,
+  CARD_DETAIL_ENTRY_ROUTE,
   CARD_LIST_ROUTE,
+  CARD_UPDATE_ENTRY_ROUTE,
   MAIN_MENU_ROUTE,
   REFERENCE_TYPE_ADD_ROUTE,
   REFERENCE_TYPE_LIST_ROUTE,
   REPORTS_ROUTE,
   TRANSACTION_ADD_ROUTE,
+  TRANSACTION_DETAIL_ENTRY_ROUTE,
   TRANSACTION_LIST_ROUTE,
   USER_ADD_ROUTE,
   USER_LIST_ROUTE,
@@ -70,31 +73,50 @@ import {
 /**
  * Reference program name to the browser route this delivery reaches it at.
  *
- * Assumptions: `COCRDSLC` and `COCRDUPC` both resolve to the card BROWSE rather than to a
- * single-card path, and that is the registered divergence `D-CARD-SELECTOR` rather than a shortcut.
- * The published contract keys a single card by an opaque selector the service mints, so there is no
- * card path an operator can be sent to before a card number has been exchanged for one — and the
- * browse is where that exchange happens: `ui/src/screens/cardList/index.tsx` takes a typed card
- * number, calls the lookup operation and navigates to the detail or update route with the selector it
- * returns. Sending these two options there puts the operator at the control that opens the card they
- * want, which is what the baseline's own empty detail screen did with its account and card fields.
+ * ⚠️ Refactoring Rationale: `COCRDSLC`, `COCRDUPC` and `COTRN01C` resolve to a KEYLESS ENTRY route of
+ * their own, where all three resolved to the browse that mints their selector. `app/cpy/COMEN02Y.cpy`
+ * gives the main menu's eleven options eleven distinct target programs, and while those three shared
+ * two destinations the menu reached only eight -- so an option an operator chose deliberately took them
+ * somewhere they had not asked for and left them to select a record before the screen they named could
+ * open at all. The three keyless routes are the addresses of each program's OWN first turn, which the
+ * reference paints: `app/cbl/COCRDSLC.cbl` L490-L491 falls back to `WS-PROMPT-FOR-INPUT` on an empty
+ * map with account and card fields to type into, and `app/cbl/COTRN01C.cbl` L103-L109 paints its empty
+ * map when the selection carrier arrives blank. Eleven options now reach eleven destinations, which is
+ * the reachability graph AAP section 0.1.3.1 preserves.
+ *
+ * Assumptions: registered divergence `D-CARD-SELECTOR` is UNCHANGED and stays documented. It records
+ * that a single card is addressable only through the opaque selector the service mints -- the published
+ * contract has no card-number path -- and nothing here invents one: `/cards/view` and `/cards/edit`
+ * carry no key, and the card the operator wants is still opened by exchanging an account and card number
+ * for a selector, either on the screen's own search turn or through the browse. What changes is only
+ * which screen the operator is standing on while they do it.
+ *
+ * Assumptions: the browse remains the destination of `COCRDLIC` and `COTRN00C`, which are the two
+ * programs that ARE the browse, so no option lost a destination in the repointing.
  *
  * ⚠️ Refactoring Rationale: `COUSR02C` resolves to the user BROWSE, where it resolved to a
- * selector-free `/users/edit`. That path was a twenty-second screen route -- AAP section 0.4.1.4
- * enumerates the twenty-one this migration delivers and names `/users/:id/edit` as the only
- * user-update route -- so it existed only to give a menu option a destination. The browse resolves it
- * for the same reason the two card options resolve to the card browse: the screen is addressable only
- * with a user identifier, a menu option carries none, and the browse is the turn that acquires one.
- * `ui/src/screens/userList/index.tsx` navigates to `/users/:id/edit` for a row marked `U`, which is
- * what `app/cbl/COUSR00C.cbl` L187-L209 does when it transfers to `COUSR02C` with the selected
+ * selector-free `/users/edit`. That path was withdrawn because it was a second route for a screen that
+ * already had one, and the screen is addressable only with a user identifier that a menu option does
+ * not carry -- so the browse, which is the turn that acquires one, is where administrative option 3
+ * lands. `ui/src/screens/userList/index.tsx` navigates to `/users/:id/edit` for a row marked `U`, which
+ * is what `app/cbl/COUSR00C.cbl` L187-L209 does when it transfers to `COUSR02C` with the selected
  * identifier.
+ *
+ * ⚠️ Assumptions: this is NOT the arrangement the three keyless entry routes above replace, and the
+ * difference is what the reference paints on the program's own first turn. `COCRDSLC` and `COTRN01C`
+ * each paint an EMPTY map with the key as a field to type into, so a keyless address lands the operator
+ * on a screen that can be used; `app/cbl/COUSR02C.cbl` L99-L104 pre-fills its identifier from the
+ * selection carrier and its first turn is otherwise the same waiting map, so the same treatment is
+ * available to it and is not taken here -- administrative options 3 and 4 are outside the finding this
+ * change answers, and extending the pattern to them without their own verification would be a second
+ * change wearing the first one's evidence.
  */
 export const PROGRAM_ROUTES: Readonly<Record<string, string>> = Object.freeze({
   COACTVWC: ACCOUNT_VIEW_ROUTE,
   COACTUPC: ACCOUNT_UPDATE_ROUTE,
   COCRDLIC: CARD_LIST_ROUTE,
-  COCRDSLC: CARD_LIST_ROUTE,
-  COCRDUPC: CARD_LIST_ROUTE,
+  COCRDSLC: CARD_DETAIL_ENTRY_ROUTE,
+  COCRDUPC: CARD_UPDATE_ENTRY_ROUTE,
   COTRN02C: TRANSACTION_ADD_ROUTE,
   /*
    * WHY : Refactoring Rationale: the browse and the report screen are registered here because both are
@@ -103,22 +125,22 @@ export const PROGRAM_ROUTES: Readonly<Record<string, string>> = Object.freeze({
    *       answered the baseline's not-installed sentence, which was correct for a screen that did not
    *       exist and became wrong the moment one did: it would refuse an operator two delivered flows the
    *       acceptance criteria name among those that must work end to end.
-   * WHY : ⚠️ Refactoring Rationale: `COTRN01C` is registered to the BROWSE, where it was previously left
-   *       out of this map so that main-menu option 7 answered the not-installed sentence. That sentence
-   *       was false: the transaction-view screen is mounted at `/transactions/:id` and the operation it
-   *       reads, `GET /api/v1/transactions/{transactionId}`, is delivered, so the option was reporting a
-   *       workflow the delivery carries as one it does not. The previous rationale was right that a menu
-   *       option carries no identifier and that navigating to a literal `:id` segment would be worse
-   *       than the sentence -- and wrong that those were the only two options. The browse is the
-   *       identifier-acquisition turn: `ui/src/screens/transactionList/index.tsx` marks a row `S` and
-   *       navigates to `/transactions/:id` with the identifier that row carries, which is what
-   *       `app/cbl/COTRN00C.cbl` L183-L195 does when it transfers to `COTRN01C` with the selected
-   *       identifier. Option 7 therefore enters the same browse option 6 enters, which is one
-   *       destination shared by two options -- the identical trade already accepted for the three card
-   *       options above, and recorded as `D-CARD-SELECTOR` there.
+   * WHY : ⚠️ Refactoring Rationale: `COTRN01C` is registered to its own KEYLESS ENTRY route, having
+   *       been registered first to nothing at all -- so option 7 answered the not-installed sentence for
+   *       a screen this delivery mounts -- and then to the BROWSE, which stopped the false sentence and
+   *       left option 7 entering the screen option 6 enters. Both corrections were right about what they
+   *       fixed and both left the operator somewhere they had not asked for. The reference's own answer
+   *       is neither: `app/cbl/COTRN01C.cbl` L103-L108 reads its selection carrier and L109 paints the
+   *       EMPTY map when it is blank, with the transaction identifier as a field to type into, so the
+   *       program has a first turn that needs no selection and this route is its address.
+   * WHY : Assumptions: the browse remains reachable and remains the destination of `COTRN00C`, so
+   *       nothing about row selection changes -- `ui/src/screens/transactionList/index.tsx` still marks
+   *       a row `S` and enters `/transactions/:id` with the identifier that row carries, which is what
+   *       `app/cbl/COTRN00C.cbl` L183-L195 does when it transfers to `COTRN01C` with a selection. The
+   *       two arrivals are the reference's two arrivals, and now each has an address.
    */
   COTRN00C: TRANSACTION_LIST_ROUTE,
-  COTRN01C: TRANSACTION_LIST_ROUTE,
+  COTRN01C: TRANSACTION_DETAIL_ENTRY_ROUTE,
   CORPT00C: REPORTS_ROUTE,
   /*
    * WHY : Refactoring Rationale: this entry names a route where the program was previously ABSENT from
@@ -164,8 +186,8 @@ export const PROGRAM_ROUTES: Readonly<Record<string, string>> = Object.freeze({
    *       `/users/:id/delete`. AAP section 0.1.3.1 keeps the reachability graph of the eighteen
    *       transactions, and an administrator has no other way in: the session is memory-only, so any
    *       hard load of an administrative route bounces to sign-on.
-   * WHY : Assumptions: it resolves to the browse for the SAME reason `COUSR02C` and `COTRN01C` do
-   *       above, which makes all three one rule rather than three workarounds -- the screen is
+   * WHY : Assumptions: it resolves to the browse for the SAME reason `COUSR02C` does above, which makes
+   *       the two administrative record options one rule rather than two workarounds -- the screen is
    *       addressed only per record and a menu option carries no selection, which is exactly the state
    *       the reference's own first turn paints. `app/cbl/COUSR03C.cbl` L99-L104 pre-fills the
    *       identifier only when its selection carrier arrives non-blank and otherwise leaves the screen

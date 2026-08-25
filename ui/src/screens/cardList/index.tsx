@@ -87,25 +87,44 @@
 
 import { Button, Flex, Input, Space, Table, Typography, theme } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { useCallback, useState } from 'react';
-import type { CSSProperties, ReactElement } from 'react';
-import { useNavigate } from 'react-router';
+import { useCallback, useRef, useState } from 'react';
+import type { CSSProperties, KeyboardEvent, MouseEvent, ReactElement } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 
+import { isTransientFailure } from '../../api/client';
 import { listCards, lookupCard } from '../../api/cards';
 import type { CardSummary, PageDirection, PageResponse } from '../../api/cards';
 import { useShellSlot } from '../../layout/AppShell';
 import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { usePfKeys } from '../../layout/usePfKeys';
-import { PROGRAM_MESSAGES, SHARED_MESSAGES, STATUS_MESSAGES } from '../../messages/messages';
+import {
+  PERSISTENT_FAILURE_REPORT_IT,
+  PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
+  SHARED_MESSAGES,
+  STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
+} from '../../messages/messages';
 import { cardDetailPath, cardEditPath, isCardNumber } from '../../routes/cards';
-import { CARD_LIST_ROUTE, MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
+import {
+  CARD_LIST_ROUTE,
+  MAIN_MENU_ROUTE,
+  navigateSafely,
+  screenTransitionState,
+} from '../../routes/navigation';
 import type { ScreenTransitionState } from '../../routes/navigation';
 import type { CardListQuery } from '../../api/types';
-import { VISUALLY_HIDDEN_STYLE, fieldAriaProps, fieldErrorId } from '../../layout/fieldHelp';
+import {
+  VISUALLY_HIDDEN_STYLE,
+  busyAnnouncement,
+  fieldAriaProps,
+  fieldErrorId,
+} from '../../layout/fieldHelp';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
 import { ScreenTitle } from '../../layout/ScreenTitle';
-import { TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { copybookFieldWidthStyle } from '../../layout/recordLayout';
+import { SPACING_TOKENS, TYPOGRAPHY_TOKENS, characterCellColumnMeasure } from '../../theme/tokens';
 
 /**
  * The `var(--…)` reference form of the design tokens, as antd's theme hook publishes it.
@@ -253,20 +272,6 @@ export const CARD_LIST_ENTRY_CONTROL_LABELS = {
   openUpdate: 'Open update',
 } as const;
 
-/**
- * Sentence shown when a page could not be read at all.
- *
- * Assumptions: this string is NEW, and it is the one message on this screen with no baseline
- * counterpart that may be carried across. The source composes `WS-FILE-ERROR-MESSAGE`
- * (`app/cbl/COCRDLIC.cbl` L153-L172, moved to the message field at L1254), which appends the internal
- * file name and the CICS response and reason codes -- the same class of detail the message catalog's
- * redaction register withholds at 28 other sites, and for the same reason: an internal identifier
- * must not reach a browser, a log line or a bug report. The replacement therefore names the
- * correlation identifier the operator already has instead of the file the request touched.
- */
-export const CARD_LIST_PAGE_UNAVAILABLE =
-  'Card data is temporarily unavailable. Use the request correlation identifier from the response when contacting support.';
-
 /*
  * WHY : Alternatives Considered: an antd `Form.Item` with `label` and `htmlFor`, which is the pattern
  *       the sign-on screen uses. It is rejected here because this entry is not a form -- it is one
@@ -333,6 +338,157 @@ const CARD_NUMBER_INPUT_ID = 'card-list-card-number';
  */
 const ROW_ACTION_WIDTH = 1;
 
+/**
+ * Key that activates a focused browse row.
+ *
+ * ⚠️ Assumptions: the space key and deliberately NOT Enter. Enter is this screen's turn: the mapset
+ * paints no Enter on its legend and the program's `CCARD-AID-ENTER` arms are what edit the filters and
+ * read the browse (`app/cbl/COCRDLIC.cbl` L517 and L545), so `usePfKeys` claims Enter document-wide and
+ * `KEYBOARD_KEY_TO_AID` maps it to that verb. Binding Enter on a row would give one key two meanings on
+ * one screen; the space key is claimed by no attention identifier -- `resolveAidFromKeyboardEvent`
+ * (`ui/src/layout/usePfKeys.ts` L318 to L324) resolves only Enter and the function keys -- so it is free
+ * and it is the key a browser already uses to activate a non-link widget.
+ */
+const ROW_ACTIVATION_KEY = ' ';
+
+/**
+ * Pointer affordance carried by every browse row.
+ *
+ * ⚠️ Refactoring Rationale: a browser measured `cursor: auto` on these rows both at rest and while
+ * hovered, with no `:hover` rule of their own, so nothing about a row said it could be acted on even
+ * though every row carries controls that act on it. The declaration is a cursor KEYWORD rather than a
+ * token because the design system publishes no cursor token and none of its components sets one; the
+ * zero-hardcoded-values rule exempts exactly this class of keyword alongside `auto` and `none`.
+ *
+ * Assumptions: no size floor is declared here, and the omission is deliberate rather than an oversight.
+ * `min-height` does not apply to a `display: table-row` box, so a `minBlockSize` set to
+ * `TARGET_SIZE_AA_MINIMUM` would be an inert declaration that reads as a guarantee. The row's pointer
+ * target is its cell box, whose height is a text line plus the theme's own cell padding and is several
+ * times that floor; the controls INSIDE it are the ones the floor governs, and they take their height
+ * from `controlHeight` and `controlHeightSM`, the latter raised to that floor by the theme's own
+ * `CONTROL_SCALE_DECISION` record in `ui/src/theme/tokens.ts` -- named in prose rather than as a link
+ * target, because it is an exported VALUE and not a type, and `jsdoc/no-undefined-types` resolves a
+ * link target against the type namespace alone.
+ */
+const ROW_AFFORDANCE_STYLE: CSSProperties = { cursor: 'pointer' };
+
+/**
+ * Discards a settled browse turn's outcome, for the three call sites that cannot observe it.
+ *
+ * Purpose: {@link usePagedQuery} now returns a promise from `reset`, `prevPage` and `nextPage`, where
+ * all three returned nothing. Every call site here is inside a `void`-returning key handler, so the
+ * promise can neither be returned nor awaited -- and `ui/eslint.config.js` configures
+ * `no-floating-promises` with `ignoreVoid: false`, which withdraws the `void` discard as well. Naming
+ * the discard is what is left, and it says at each site what is actually true there.
+ *
+ * ⚠️ Assumptions: discarding is CORRECT rather than merely permitted, because the outcome is observed
+ * somewhere else on a later render. The hook applies every outcome of a turn -- the rows, the boundary
+ * flags, the classified failure -- through its own reducer, so this screen reads the answer out of
+ * `browse` exactly as it reads the answer to the opening page. There is nothing at the call site to
+ * act on.
+ *
+ * ⚠️ Alternatives Considered: making the three handlers `async` and awaiting the turn. Rejected because
+ * `usePfKeys` types its handlers as returning `void`, and `no-misused-promises` with `checksVoidReturn`
+ * rejects a promise-returning function passed where `void` is expected -- so that trade replaces one
+ * error with another. Also considered a bare `.catch(...)`: rejected because the engine resolves on
+ * both outcomes, so a rejection handler alone would not satisfy the rule's requirement that the chain
+ * end in a handler for the settled case.
+ *
+ * Assumptions: the same function is supplied for BOTH outcomes. The rejection path is unreachable by
+ * construction -- the engine classifies a failure internally and resolves -- and a handler is written
+ * for it anyway, so a later change inside the engine cannot turn this into an unhandled rejection
+ * silently.
+ * @returns {void} Nothing; the outcome has already been recorded by the hook's own reducer.
+ */
+function ignoreSettledTurn(): void {
+  // Assumptions: an empty body is the whole implementation. Logging here would emit a line for every
+  //   ordinary page turn of every browse, which is noise loud enough to bury a real diagnostic.
+}
+
+/**
+ * Layout of the label beside each entry field, so the label cannot be squeezed out of shape.
+ *
+ * ⚠️ Assumptions: both properties here are LAYOUT KEYWORDS and not design values -- there is no colour,
+ * size, spacing or radius among them -- so the zero-hardcoded-values rule is untouched. `flex: '0 0
+ * auto'` refuses the label a share of the shrinking, and `whiteSpace: 'nowrap'` refuses it a line
+ * break.
+ *
+ * ⚠️ Assumptions: refusing the break is what the mapset declares. `app/bms/COCRDLI.bms` L84 to L88
+ * paints `Account Number    :` as ONE 19-character field at row 6 column 22, and L96 to L100 paints
+ * `Credit Card Number:` as one 19-character field at row 7 column 22 -- one field, one row, one line
+ * each. A browser measured the second of those broken into stacked one- and two-character pieces at a
+ * 375-pixel width, which is not a narrower rendering of that field but a different field.
+ *
+ * Alternatives Considered: letting the label wrap at its word boundaries and keeping the pair on one
+ * line. Rejected because the fragmenting label IS the defect being repaired: the row wraps instead, so
+ * a width too narrow for both moves the ENTRY to the next line while the label stays one line, and the
+ * entry keeps the `max-inline-size` ceiling its own PICTURE clause gives it either way.
+ */
+const FILTER_LABEL_LAYOUT: CSSProperties = { flex: '0 0 auto', whiteSpace: 'nowrap' };
+
+/**
+ * Finds the selection field belonging to one rendered browse row.
+ *
+ * Assumptions: the row is searched rather than an identifier being rebuilt from the row's index,
+ * because the search cannot go stale. antd re-creates a cell's contents on every render, so an index
+ * captured when a handler was built can name a field belonging to a row that has since been replaced by
+ * a page step; the row element the event was delivered to always contains its own field, and the
+ * selection column is the only column on this screen that renders one.
+ * @param {HTMLElement} row - The row element an event was delivered to.
+ * @returns {HTMLInputElement | null} That row's selection field, or `null` when the row renders none,
+ *   which is the state a page with no rows leaves the table in.
+ */
+function rowSelectionField(row: HTMLElement): HTMLInputElement | null {
+  return row.querySelector<HTMLInputElement>('input');
+}
+
+/**
+ * Places the cursor in a row's selection field when the row itself is clicked.
+ *
+ * ⚠️ Purpose: give a row an outcome, which is what a pointer cursor on it promises. The outcome is the
+ * reference's own: `1250-SETUP-ARRAY-ATTRIBS` repositions the cursor onto a row by moving `-1` into
+ * that row's selection-field length (`app/cbl/COCRDLIC.cbl` L766 to L773 and the four blocks after it),
+ * so landing in the row's own field is what the terminal did with a row the operator was directed to.
+ *
+ * Assumptions: a click that landed on a control inside the row is left alone. That control has its own
+ * behaviour -- the two immediate controls navigate, and the field is already the focus target -- so
+ * moving focus after it would either be a no-op or take focus off the thing just pressed.
+ * @param {MouseEvent<HTMLElement>} event - The click, as React delivers it to the row.
+ * @returns {void} Nothing; the cursor move is the effect.
+ */
+function focusRowSelectionOnPointer(event: MouseEvent<HTMLElement>): void {
+  if (
+    event.target !== event.currentTarget &&
+    (event.target as HTMLElement).closest('input,button,a') !== null
+  ) {
+    return;
+  }
+
+  rowSelectionField(event.currentTarget)?.focus();
+}
+
+/**
+ * Places the cursor in a row's selection field when a focused row is activated from the keyboard.
+ *
+ * Assumptions: the event is honoured only when the ROW is what carries focus, so a space typed into the
+ * selection field or pressed on one of the row's controls keeps its own meaning. `event.target` is the
+ * focused element and `event.currentTarget` is the row, so their identity is the test.
+ *
+ * Assumptions: the default action is cancelled, because space on a focusable element scrolls the page.
+ * A row that both moved the cursor and scrolled it out of view would be worse than one that did
+ * neither.
+ * @param {KeyboardEvent<HTMLElement>} event - The key press, as React delivers it to the row.
+ * @returns {void} Nothing; the cursor move is the effect.
+ */
+function focusRowSelectionOnKey(event: KeyboardEvent<HTMLElement>): void {
+  if (event.target !== event.currentTarget || event.key !== ROW_ACTIVATION_KEY) {
+    return;
+  }
+
+  event.preventDefault();
+  rowSelectionField(event.currentTarget)?.focus();
+}
+
 /*
  * WHY : ⚠️ Alternatives Considered: antd's `InputNumber` for the two numeric filter fields, which is the
  *       obvious control for an all-digits entry and is REJECTED on two independent grounds. The first is
@@ -375,8 +531,11 @@ const ROW_ACTION_WIDTH = 1;
  *       than migrate one. The catalog holds no entry for it either.
  * WHY : Assumptions: the composite `WS-FILE-ERROR-MESSAGE` (L153 to L171) is likewise not surfaced. It
  *       appends the internal file name and the CICS response and reason codes, which are internal
- *       identifiers that must not reach a browser; {@link CARD_LIST_PAGE_UNAVAILABLE} answers that
- *       class of failure with the correlation identifier the operator already has.
+ *       identifiers that must not reach a browser. ⚠️ Refactoring Rationale: that class of failure was
+ *       answered by ONE authored availability sentence, and is now answered by whichever of
+ *       {@link TRANSIENT_FAILURE_TRY_AGAIN} and {@link PERSISTENT_FAILURE_REPORT_IT} the failure's own
+ *       classification selects -- see the band composition below for why one sentence could not be
+ *       right for both.
  */
 
 /*
@@ -733,6 +892,103 @@ export function reduceCardListSelection(entries: readonly string[]): CardListSel
 }
 
 /**
+ * Character-cell extent of each browse column, counted off the mapset's own heading row.
+ *
+ * Purpose: give every column a width derived from the display it was transcribed from, so a viewport
+ * narrower than that row scrolls the GRID rather than squeezing the columns into each other.
+ *
+ * ⚠️ Refactoring Rationale: this grid declared no horizontal extent and no column widths at all, and a
+ * browser pass at a 375-pixel viewport measured two consequences of that, not one. The visible one is
+ * the finding's own: with four columns sharing 327 pixels, `00000000100` wrapped as `000000` / `00100`
+ * and the masked card number broke across three lines -- an account number and a primary account
+ * number split mid-digit-group, which for a card system is a misreading risk rather than a cosmetic
+ * one. The second is that the squeezed table still did not fit: it measured 359.92 pixels inside a
+ * 327-pixel `.ant-table-content` whose computed `overflow-x` was `visible`, and every one of the nine
+ * ancestors up to the content region reported the same and refused `scrollLeft`, so the 8.92-pixel
+ * remainder was paid for one level further out -- `#carddemo-shell-content` measured `scrollWidth` 384
+ * against `clientWidth` 375 and accepted `scrollLeft` 9. Content painted outside the viewport and the
+ * shell body panned sideways.
+ *
+ * ⚠️ Assumptions: declaring the extent is what CREATES the scrolling region, and the mechanism is the
+ * design system's own. In the pinned package `ui/node_modules/@rc-component/table/lib/Table.js`
+ * L259-L272 turns a declared horizontal extent into `overflow-x: auto` on the `-content` element and
+ * `width: <extent>; min-width: 100%` on the inner table, applied at L556-L575. `min-width: 100%` is
+ * why nothing changes above the floor: at any viewport wide enough the grid still fills its container
+ * exactly as it does today, which the same pass confirmed at 768, 1280 and 1920.
+ *
+ * ⚠️ Assumptions: the extents are the mapset's own row geometry rather than chosen numbers, and they
+ * are read the way the sibling user browse reads its own -- each heading spans from its start column
+ * to the NEXT heading's start column, and the last heading takes its declared `LENGTH`. On
+ * `app/bms/COCRDLI.bms` row 9 the four headings start at columns 10, 21, 45 and 66, and `'Active '`
+ * carries `LENGTH=7`, which gives 11, 24, 21 and 7 cells spanning columns 10 through 72. Every data
+ * field falls inside its own column's span: the selection field sits at column 14, `ACCTNO` at 22 for
+ * 11 characters, `CRDNUM` at 43 for 16 and `CRDSTS` at 67 for 1.
+ *
+ * ⚠️ Assumptions: the selection column's 11 cells hold what that column now renders, which was checked
+ * against the controls rather than assumed. It carries the row's one-character field -- itself capped
+ * by `copybookFieldWidthStyle` at one character plus two paddings -- and two `size="small"` buttons
+ * each labelled with a single action code, which together measure about 100 pixels against the
+ * 11-cell column's ceiling of roughly 124. Had they not fitted, the honest fix would have been to
+ * declare the wider extent the controls need and record the departure, not to squeeze them.
+ *
+ * Alternatives Considered: (1) letting the page keep the overflow. Rejected on the measurement: the
+ * shell's frame is bounded to one viewport precisely so rows 22 to 24 stay put, and a body that pans
+ * sideways slides the title band, the message band and the key legend out from under the operator --
+ * paying three persistent zones for one column. (2) `overflow-x: hidden` on the region, which would
+ * stop the pan and hide the remainder instead, making the active flag unreachable at 375 rather than
+ * merely off to the side. (3) Dropping a column below a breakpoint, rejected for the reason the user
+ * browse records for its own type column: a column that disappears is a column an operator cannot
+ * learn.
+ *
+ * Trade-offs: below the floor the grid scrolls sideways, which the terminal never did because it was
+ * exactly 80 columns wide. Design gap G1 already records that a fixed character grid can only scale or
+ * clip; scrolling ONE region is the least lossy of those, and it is the pattern the finding names as
+ * acceptable while naming page-level pan as the defect.
+ */
+const CARD_LIST_COLUMN_CELLS = Object.freeze({
+  /** `'Select    '` heads column 10 and `'Account Number'` heads 21. */
+  select: 11,
+  /** `'Account Number'` heads column 21 and `' Card Number '` heads 45. */
+  account: 24,
+  /** `' Card Number '` heads column 45 and `'Active '` heads 66. */
+  card: 21,
+  /** `'Active '` is the last heading, so it takes its own `LENGTH=7`. */
+  active: 7,
+  /** Columns 10 through 72 -- the sum of the four extents above. */
+  rowSpan: 63,
+});
+
+/** Columns the grid lays out, which fixes how many times the design system adds its cell padding. */
+const CARD_LIST_COLUMN_COUNT = 4;
+
+/**
+ * Least measure this grid may be laid out at, in the mapset's own character cells.
+ *
+ * Purpose: give {@link CARD_LIST_COLUMN_CELLS} a floor to resolve against, so the grid owns its
+ * horizontal overflow instead of handing it to the shell's content region.
+ *
+ * ⚠️ Assumptions: the design system adds its cell padding on both sides of each of the
+ * {@link CARD_LIST_COLUMN_COUNT} columns -- `antd/lib/table/style/index.js` derives the table's
+ * `cellPaddingInline` from the `padding` token -- so the total reserves it eight times while each
+ * column reserves it twice. Summing the four column measures therefore reproduces this expression
+ * exactly, and a change to either has to be a change to both to stay consistent.
+ *
+ * ⚠️ Assumptions: this measure is stated here rather than shared with the sibling browses that carry
+ * the same treatment, for the reason those files record: every screen is mounted through `lazy()` in
+ * `ui/src/router.tsx`, so importing a value from another screen would fold that screen's chunk into
+ * this one. There is no single value to share in any case -- 63 cells over four columns here against
+ * 71 over five on the user browse and 69 over three on the transaction-type browse.
+ * @param {AntdCssVariables} cssVar - The theme's CSS-variable reference map, from `theme.useToken()`;
+ *   only its `padding` member is read.
+ * @returns {string} The measure, as a CSS length expression the design system applies to the grid.
+ */
+export function cardListTableMeasure(cssVar: AntdCssVariables): string {
+  return `calc(${String(CARD_LIST_COLUMN_CELLS.rowSpan)}ch + ${String(
+    CARD_LIST_COLUMN_COUNT * 2,
+  )} * ${String(cssVar.padding)})`;
+}
+
+/**
  * Builds the four browse columns the mapset paints, in the order it paints them.
  *
  * Purpose: describe the selection column and the three data columns for the antd `Table`, so the
@@ -763,7 +1019,7 @@ export function reduceCardListSelection(entries: readonly string[]): CardListSel
  *   a pointer user who cannot reach the unpainted Enter key.
  * @param {(row: CardSummary) => void} options.onOpenUpdate - Opens one row's update form immediately.
  * @param {AntdCssVariables} options.tokens - The theme's CSS-variable references, from which the two
- *   identifier columns take the fixed-pitch face.
+ *   identifier columns take the fixed-pitch face and the selection field takes its width ceiling.
  * @returns {TableColumnsType<CardSummary>} The four columns, selection column first.
  */
 export function buildCardListColumns(options: {
@@ -823,6 +1079,7 @@ export function buildCardListColumns(options: {
     {
       title: CARD_LIST_LABELS.selectColumn.trim(),
       key: 'actions',
+      width: characterCellColumnMeasure(CARD_LIST_COLUMN_CELLS.select, options.tokens.padding),
       /**
        * Renders one row's action field and the two immediate controls beside it.
        * @param {CardSummary} row - The row the controls act on.
@@ -899,6 +1156,26 @@ export function buildCardListColumns(options: {
                 }
               }
               status={errored ? 'error' : ''}
+              /*
+               * WHY : ⚠️ Refactoring Rationale: the field is SIZED from the width its own PICTURE clause
+               *       declares, and it was left at the control's full-width default. A browser measured
+               *       the consequence rather than it being inferred: this one-character field rendered
+               *       about 217 pixels wide, against about 97 for the identical one-character selector
+               *       on the user browse, so one column of a four-column table carried a control more
+               *       than twice the width of the data it can hold. `CRDSEL1` is `LENGTH=1` at
+               *       `app/bms/COCRDLI.bms` L140 and `CRDSEL1I PIC X(1)` at `app/cpy-bms/COCRDLI.CPY`
+               *       L78, which is where {@link ROW_ACTION_WIDTH} comes from and is already the
+               *       `maxLength` above -- so the entry was bounded and only its rendering was not.
+               * WHY : Assumptions: the helper is spread onto the CONTROL and not onto a wrapper, which
+               *       `ui/src/layout/recordLayout.ts` L99 to L104 records as a measured constraint --
+               *       the padding token it reads resolves on an `.ant-input` and returns the empty
+               *       string on an arbitrary element, so a wrapper would drop the declaration.
+               * WHY : Trade-offs: the helper yields a CEILING and keeps `inlineSize: '100%'`, so the
+               *       cell may still render the field narrower at a phone width rather than forcing the
+               *       table to scroll sideways. That is the same departure from the terminal's fixed
+               *       character cells that design gap G1 already records for position.
+               */
+              style={copybookFieldWidthStyle(ROW_ACTION_WIDTH, options.tokens)}
               value={options.actionEntries[index] ?? ''}
             />
             {/*
@@ -981,6 +1258,7 @@ export function buildCardListColumns(options: {
     {
       title: CARD_LIST_LABELS.accountColumn,
       dataIndex: 'accountId',
+      width: characterCellColumnMeasure(CARD_LIST_COLUMN_CELLS.account, options.tokens.padding),
       /**
        * Renders one row's account number in the fixed-pitch face.
        * @param {string} accountId - The row's eleven-digit account number.
@@ -993,6 +1271,7 @@ export function buildCardListColumns(options: {
     {
       title: CARD_LIST_LABELS.cardColumn.trim(),
       dataIndex: 'displayCardNumber',
+      width: characterCellColumnMeasure(CARD_LIST_COLUMN_CELLS.card, options.tokens.padding),
       /**
        * Renders one row's card number in the fixed-pitch face.
        *
@@ -1015,6 +1294,7 @@ export function buildCardListColumns(options: {
     {
       title: CARD_LIST_LABELS.activeColumn.trim(),
       dataIndex: 'activeStatus',
+      width: characterCellColumnMeasure(CARD_LIST_COLUMN_CELLS.active, options.tokens.padding),
     },
   ];
 }
@@ -1039,8 +1319,10 @@ export function buildCardListColumns(options: {
  * Errors: this component THROWS NOTHING and renders in every state, because a screen is the last place a
  * rejection can be turned into something an operator can read. A refused page read is surfaced by
  * {@link usePagedQuery} as `isFailed` with a normalised `ApiError` -- the problem document
- * `ui/src/api/client.ts` produces -- on `error`, and it is painted as
- * {@link CARD_LIST_PAGE_UNAVAILABLE} at `error` severity while the informational sentence is suppressed,
+ * `ui/src/api/client.ts` produces -- on `error`, and it is painted on the row-23 line as the service's
+ * own sentence when the document carried one; when it did not, the sentence is selected from the
+ * failure's own `transient` judgement, which the hook publishes on `failure`. The row-22 informational
+ * sentence is suppressed either way,
  * so the screen never invites an operator to act on rows a failed read did not deliver. The rows, both
  * cursors and the screen ordinal already on display are LEFT INTACT by that hook
  * (`ui/src/hooks/usePagedQuery.ts` L654-L661), so a failed step forward leaves the operator on the page
@@ -1062,6 +1344,40 @@ export function buildCardListColumns(options: {
  */
 export function CardListScreen(): ReactElement {
   const navigate = useNavigate();
+  const location = useLocation();
+  /*
+   * WHY : ⚠️ Assumptions: an arrival may CARRY the narrowing that was in force when this browse last
+   *       transferred out, and re-establishing it is the reference's behaviour rather than a
+   *       convenience. `app/cbl/COCRDLIC.cbl` L838 to L855 repaints the account filter field from the
+   *       carried `CDEMO-ACCT-ID` on every entry EXCEPT a fresh one from the menu -- its `WHEN OTHER`
+   *       arm at L852 to L853 moves the carried identifier into `ACCTSIDO` and sets the modified-data
+   *       tag on the field. The identifier survives because the COMMAREA does: the transfer arms at
+   *       L520 to L534 and L548 to L562 write it before `XCTL`, and the destination hands the same area
+   *       back on its own exit arm (`app/cbl/COCRDUPC.cbl` L442 to L454). So an operator who narrowed
+   *       the browse, opened a card and pressed the exit key came back to the narrowed browse.
+   * WHY : Assumptions: the carrier is the history entry's STATE, read through the shared validator,
+   *       and never a query member -- the same rule the origin hand-over records on
+   *       {@link BROWSE_ORIGIN}, so one statement governs everything that may appear in a request line.
+   *       `ui/src/routes/navigation.ts` L58 to L62 declares this exact member for this exact purpose.
+   * WHY : Trade-offs: the fresh-arrival arm is the reference's `CONTINUE` at L841 to L842, reached when
+   *       the entry came from the menu. Here the equivalent is simply an arrival carrying no
+   *       identifier, which every menu transition is, so the two agree without this screen having to
+   *       ask which screen it was reached from.
+   */
+  const forwardedNarrowing = screenTransitionState(location.state).accountId;
+  /*
+   * WHY : Assumptions: a carried identifier is VALIDATED before it is adopted, and a malformed one is
+   *       dropped rather than reported. It reaches this screen through router state, which is
+   *       ordinary client-controlled input, and the service's own contract refuses anything that is
+   *       not eleven digits -- so adopting one unchecked would send a request the contract rejects and
+   *       replace the reference's own filter sentence with a service problem document. There is no
+   *       sentence to state for it either: the reference has no arm for a malformed carried
+   *       identifier, because a COMMAREA field could not be malformed.
+   */
+  const adoptedNarrowing =
+    forwardedNarrowing !== undefined && isAccountFilterWellFormed(forwardedNarrowing)
+      ? forwardedNarrowing.trim()
+      : '';
   // WHY : Assumptions: read here, at the top of the component and above every early return, because
   //       the rules of hooks require an unconditional call site -- the early returns below would make
   //       a later call conditional. Reading it during render is deliberate rather than incidental: the
@@ -1124,14 +1440,28 @@ export function CardListScreen(): ReactElement {
     return filterRefusals[field] !== null;
   }
   const [cardNumber, setCardNumber] = useState('');
-  const [accountFilter, setAccountFilter] = useState('');
+  /*
+   * WHY : Assumptions: the entry field OPENS on the carried narrowing, which is what makes the
+   *       repainted field of `app/cbl/COCRDLIC.cbl` L852 to L853 observable -- the reference paints the
+   *       carried identifier into the field itself, not merely into the request. An initial value
+   *       rather than an effect is deliberate: a route change unmounts and remounts this screen, so the
+   *       first paint already knows the narrowing, and an effect would show one frame of an empty box
+   *       with a narrowed list beneath it -- the exact disagreement between box and rows that the
+   *       finding this addresses describes in the other direction.
+   */
+  const [accountFilter, setAccountFilter] = useState(adoptedNarrowing);
   // WHY : Assumptions: the ENTRY and the APPLIED narrowing are separate pieces of state, because the
   //       reference separates them too: `CC-ACCT-ID` is the received map field and `CDEMO-ACCT-ID` is
   //       what `2210-EDIT-ACCOUNT` moves into the carried area once the edit has passed
   //       (`app/cbl/COCRDLIC.cbl` L1027). Reading the page from the entry directly would re-narrow the
   //       browse on every keystroke, and a cursor sealed under one narrowing addresses nothing under
   //       another.
-  const [appliedAccountId, setAppliedAccountId] = useState('');
+  // WHY : Assumptions: the APPLIED narrowing opens on the same carried value, so the opening read is
+  //       narrowed rather than the box merely looking narrowed. These two are seeded from one
+  //       expression for that reason: seeding only the entry would show the operator their filter over
+  //       an unfiltered list, and seeding only the applied value would narrow the list beside an empty
+  //       box. The reference cannot exhibit either, because one COMMAREA field feeds both.
+  const [appliedAccountId, setAppliedAccountId] = useState(adoptedNarrowing);
   const [resolving, setResolving] = useState(false);
   /*
    * WHY : ⚠️ Assumptions: the action characters are held POSITIONALLY, one per rendered row, because
@@ -1230,6 +1560,25 @@ export function CardListScreen(): ReactElement {
    * WHY : Assumptions: entries and marks belonging to another page read as absent, which is what makes
    *       the stamp above load-bearing rather than decorative.
    */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: which DIRECTION a page turn is outstanding in is now tracked, so the
+   *       two paging keys can be declined independently. `ui/src/hooks/usePagedQuery.ts` publishes
+   *       `isLoading` for the browse as a whole and does not say which way the outstanding turn went, and
+   *       one flag for both keys is the wrong shape here: it would decline `F7` because `F8` is waiting,
+   *       which withdraws a key at a moment the reference does not -- a 3270 inhibits the keyboard for
+   *       the turn and then releases EVERY key at once, never one key because of another.
+   * WHY : ⚠️ Assumptions: a ref rather than state, because the value is read on the DISPATCH path --
+   *       `ui/src/layout/usePfKeys.ts` evaluates a `busy` predicate inside `invoke`, in the same task as
+   *       the key event -- and a state update scheduled by the first press is not visible to a second
+   *       press in that same task. That is the measured double-submit shape: two identical reads 400 ms
+   *       apart. The rendered affordance is not lost by using a ref: `isLoading` flips on dispatch and
+   *       again on settlement, so a render happens on both edges and reads the current value.
+   * WHY : Trade-offs: the ref is cleared in the SAME settled handler that discards the turn's outcome,
+   *       so a turn that rejects clears it too. A flag left set would make the key inert, which is the
+   *       hazard `usePfKeys` names for `busy`, and clearing it on both outcomes is what forecloses that.
+   */
+  const outstandingPageDirection = useRef<PageDirection | null>(null);
+
   const selectionIsCurrent = selection.pageNumber === browse.pageNumber;
   const actionEntries = selectionIsCurrent ? selection.entries : [];
   const erroredRows = selectionIsCurrent ? selection.erroredRows : [];
@@ -1385,7 +1734,7 @@ export function CardListScreen(): ReactElement {
      *       `9000-READ-FORWARD` and re-sends the map (`app/cbl/COCRDLIC.cbl` L565 to L578).
      */
     if (narrowing === appliedAccountId) {
-      browse.reset();
+      browse.reset().then(ignoreSettledTurn, ignoreSettledTurn);
     }
   }
 
@@ -1457,6 +1806,34 @@ export function CardListScreen(): ReactElement {
   }
 
   /**
+   * Builds the hand-over every transfer out of this browse carries.
+   *
+   * Purpose: carry BOTH halves of what the reference's transfer arms write into the carried area before
+   * `EXEC CICS XCTL` -- the origin, from `MOVE LIT-THISTRANID TO CDEMO-FROM-TRANID`, and the narrowing
+   * in force, from `MOVE CC-ACCT-ID TO CDEMO-ACCT-ID` (`app/cbl/COCRDLIC.cbl` L520 to L534 for the
+   * detail arm and L548 to L562 for the update arm; the narrowing itself is written by
+   * `2210-EDIT-ACCOUNT` at L1027). The destination hands the same area back on its exit arm, which is
+   * what returns the operator to the browse they left rather than to an unnarrowed one.
+   *
+   * Assumptions: the APPLIED narrowing travels and not the entry, because the applied value is the one
+   * the reference carries -- `CDEMO-ACCT-ID` holds what the edit accepted, and the entry field may hold
+   * a half-typed identifier the edit has not seen. Handing the entry over would return an operator to a
+   * browse narrowed by something the service never accepted.
+   *
+   * Assumptions: an absent narrowing is an ABSENT member rather than an empty string, because
+   * `ui/tsconfig.json` enables `exactOptionalPropertyTypes` and because the arrival arm treats absence
+   * as "this arrival carries none" -- an empty string would be a carried value that then has to be
+   * distinguished from a real one at the far end.
+   * @returns {ScreenTransitionState} The origin, and the narrowing when one is in force.
+   */
+  function transferHandover(): ScreenTransitionState {
+    return {
+      ...BROWSE_ORIGIN,
+      ...(appliedAccountId === '' ? {} : { accountId: appliedAccountId }),
+    };
+  }
+
+  /**
    * Opens one row's card detail immediately, for a pointer user.
    *
    * Assumptions: the row's own sealed selector is the address, so no card number reaches the route.
@@ -1471,7 +1848,7 @@ export function CardListScreen(): ReactElement {
    * @returns {void} Nothing; navigation is the effect.
    */
   function openRowDetail(row: CardSummary): void {
-    navigateSafely(navigate, cardDetailPath(row.key), BROWSE_ORIGIN);
+    navigateSafely(navigate, cardDetailPath(row.key), transferHandover());
   }
 
   /**
@@ -1488,7 +1865,7 @@ export function CardListScreen(): ReactElement {
    * @returns {void} Nothing; navigation is the effect.
    */
   function openRowUpdate(row: CardSummary): void {
-    navigateSafely(navigate, cardEditPath(row.key), BROWSE_ORIGIN);
+    navigateSafely(navigate, cardEditPath(row.key), transferHandover());
   }
 
   /**
@@ -1560,7 +1937,7 @@ export function CardListScreen(): ReactElement {
           navigateSafely(
             navigate,
             edit.action === 'U' ? cardEditPath(row.key) : cardDetailPath(row.key),
-            BROWSE_ORIGIN,
+            transferHandover(),
           );
           return;
         }
@@ -1619,7 +1996,7 @@ export function CardListScreen(): ReactElement {
        */
       (answer) => {
         setResolving(false);
-        navigateSafely(navigate, buildPath(answer.key), BROWSE_ORIGIN);
+        navigateSafely(navigate, buildPath(answer.key), transferHandover());
       },
       /*
        * WHY : Assumptions: the failure text names no card and does not distinguish "no such card" from
@@ -1633,6 +2010,19 @@ export function CardListScreen(): ReactElement {
         setError(CARD_LIST_STATUS_MESSAGES.WS_NO_RECORDS_FOUND.text);
       },
     );
+  }
+
+  /**
+   * Releases the paging key whose turn has settled, whichever way that turn went.
+   *
+   * Assumptions: the outcome itself is discarded for the reason {@link ignoreSettledTurn} records -- the
+   * hook applies every outcome through its own reducer, so there is nothing at the call site to act on
+   * -- and this adds exactly one effect to that: clearing the direction so the key becomes pressable
+   * again. It is supplied for BOTH outcomes, so a rejected turn cannot leave a key inert.
+   * @returns {void} Nothing; the release is the effect.
+   */
+  function releaseOutstandingPageDirection(): void {
+    outstandingPageDirection.current = null;
   }
 
   /**
@@ -1676,7 +2066,13 @@ export function CardListScreen(): ReactElement {
       setError(CARD_LIST_PAGING_MESSAGES.NO_PREVIOUS_PAGES_TO_DISPLAY);
       return;
     }
-    browse.prevPage();
+    /*
+     * WHY : Assumptions: the direction is recorded BEFORE the dispatch, synchronously, so a second
+     *       press arriving in the same task already sees this key as busy. Recording it after the
+     *       dispatch would leave the window the busy flag exists to close.
+     */
+    outstandingPageDirection.current = 'previous';
+    browse.prevPage().then(releaseOutstandingPageDirection, releaseOutstandingPageDirection);
   }
 
   /**
@@ -1717,13 +2113,37 @@ export function CardListScreen(): ReactElement {
       setEndOfBrowseReported(true);
       return;
     }
-    browse.nextPage();
+    // Assumptions: recorded before the dispatch, for the reason given on the backward key.
+    outstandingPageDirection.current = 'next';
+    browse.nextPage().then(releaseOutstandingPageDirection, releaseOutstandingPageDirection);
   }
 
   /*
    * WHY : Assumptions: exactly the four attention identifiers `app/cbl/COCRDLIC.cbl` L371-L374 admits
    *       are bound, and only three of them carry a label -- Enter's is empty because this mapset
    *       paints no Enter legend, which `usePfKeys` treats as a keyboard-only handler.
+   * WHY : ⚠️ Refactoring Rationale: every key now DECLARES what its action risks, and none did.
+   *       `ui/src/layout/PfKeyBar.tsx` used to derive emphasis from the attention identifier alone,
+   *       through `PRIMARY_ACTION_AIDS`, and that table cannot be right across this application: the
+   *       same identifier carries a browse on one mapset and a save or a delete on another, so one
+   *       AID-keyed answer paints them identically. The risk is read off the LABEL -- what the key says
+   *       it does -- and never off the key it is bound to.
+   * WHY : ⚠️ Assumptions: ALL FOUR are `read-only`, and that is what this program is. `COCRDLIC` is a
+   *       browse: `2200-EDIT-INPUTS` edits the filters and the selection array (L989-L996),
+   *       `9000-READ-FORWARD` and `9100-READ-BACKWARDS` read pages, and PF3 transfers to the menu
+   *       (L390-L399). There is no `WRITE`, `REWRITE` or `DELETE` anywhere in the program -- the two
+   *       row action codes NAVIGATE to the detail and update screens, and the writing happens there,
+   *       under that screen's own confirmation. So nothing here is `mutating`.
+   * WHY : ⚠️ Assumptions: Enter's declaration is documentary, because `PfKeyBar` skips a binding whose
+   *       label is blank (L473) and this mapset paints no Enter legend -- so there is no control whose
+   *       emphasis it could resolve today. It is declared anyway rather than omitted: an omitted risk
+   *       falls back to the AID table, which contains `ENTER`, so a future revision that gave this key
+   *       a label would silently paint an acting emphasis on a browse.
+   * WHY : ⚠️ Assumptions: the paging keys report busy INDEPENDENTLY, each on its own direction, and not
+   *       on the browse's `isLoading`. One flag for both would decline `F7` because `F8` is waiting,
+   *       which withdraws a key at a moment the reference does not; per-direction, a key declines only
+   *       its OWN outstanding turn. `F3` declares no busy at all, so leaving the screen stays available
+   *       while any read is in flight -- the reference never withdraws a key.
    */
   const { bindings, invoke } = usePfKeys(
     {
@@ -1740,6 +2160,16 @@ export function CardListScreen(): ReactElement {
           submitTurn();
         },
         label: CARD_LIST_KEY_LABELS.ENTER,
+        risk: 'read-only',
+        /*
+         * WHY : Refactoring Rationale: the condition is the one `submitTurn` and `applyFilters` already
+         *       test on entry, declared here as well rather than moved. Both are needed: the declaration
+         *       is what makes the KEY decline silently, and the in-function test is what protects the
+         *       other two ways in -- the Filter control's click, and this screen's own invalid-key arm,
+         *       which coerces an unmapped key by calling `submitTurn` directly and so bypasses the key
+         *       path's busy gate entirely.
+         */
+        busy: browse.isLoading || resolving,
       },
       PFK03: {
         /**
@@ -1785,16 +2215,35 @@ export function CardListScreen(): ReactElement {
           navigateSafely(navigate, MAIN_MENU_ROUTE);
         },
         label: CARD_LIST_KEY_LABELS.PFK03,
+        risk: 'read-only',
       },
       PFK07: {
         /** Pages backward, or reports that this is already the first page. */
         onInvoke: pageBackward,
         label: CARD_LIST_KEY_LABELS.PFK07,
+        risk: 'read-only',
+        /**
+         * Reports whether a BACKWARD turn of this browse is outstanding.
+         *
+         * Assumptions: a predicate rather than a value, because `usePfKeys` evaluates it inside `invoke`
+         * -- in the same task as the key event -- which is what makes a ref written by the previous
+         * press effective against a second press before any render.
+         * @returns {boolean} `true` while this key's own turn is in flight.
+         */
+        busy: (): boolean => outstandingPageDirection.current === 'previous',
       },
       PFK08: {
         /** Pages forward, or reports that no further page exists. */
         onInvoke: pageForward,
         label: CARD_LIST_KEY_LABELS.PFK08,
+        risk: 'read-only',
+        /**
+         * Reports whether a FORWARD turn of this browse is outstanding.
+         *
+         * Assumptions: a predicate for the reason given on the backward key.
+         * @returns {boolean} `true` while this key's own turn is in flight.
+         */
+        busy: (): boolean => outstandingPageDirection.current === 'next',
       },
     },
     {
@@ -1883,29 +2332,114 @@ export function CardListScreen(): ReactElement {
     browse.pageNumber === CARD_LIST_FIRST_PAGE;
 
   /*
-   * WHY : ⚠️ Assumptions: the informational sentence is SUPPRESSED when no records were found, which is
-   *       the guard `1400-SETUP-MESSAGE` puts on painting the 45-character field:
-   *       `IF NOT WS-NO-INFO-MESSAGE AND NOT WS-NO-RECORDS-FOUND` at `app/cbl/COCRDLIC.cbl` L926 to
-   *       L930. The reference has TWO fields and the frame provides one band, so the two collapse onto
-   *       it with the error taking precedence -- `INFOMSG` is a `COLOR=NEUTRAL` 45-character field at
-   *       row 20 (`app/bms/COCRDLI.bms` L324 to L328) and `ERRMSG` a `COLOR=RED` 78-character field at
-   *       row 23 (L331 to L334), the latter bounded by `CCARD-ERROR-MSG PIC X(75)` at
-   *       `app/cpy/CVCRD01Y.cpy` L28, which the band enforces.
+   * WHY : ⚠️ Refactoring Rationale: the two message fields are published on TWO channels, where they
+   *       were collapsed onto one band whose severity was switched between `info` and `error`. The
+   *       collapse was recorded here as forced -- "the reference has TWO fields and the frame provides
+   *       one band" -- and the frame now provides both: `ShellMessageSlot.information` is the row-22
+   *       channel and exists precisely because five mapsets declare a line above row 23. So the
+   *       collapse is withdrawn rather than merely re-tuned. What it produced was an informational
+   *       alert painted INSIDE the row-23 error field, which is the one field the reference reserves
+   *       for what the operator must act on: `1400-SETUP-MESSAGE` moves `WS-ERROR-MSG` into `ERRMSGO`
+   *       and, under its own separate guard, `WS-INFO-MSG` into `INFOMSGO` with `DFHNEUTR`
+   *       (`app/cbl/COCRDLIC.cbl` L924 to L929) -- two fields, two colours, populated on the SAME turn.
+   *       `INFOMSG` is `COLOR=NEUTRAL` 45 characters at row 20 (`app/bms/COCRDLI.bms` L324 to L328) and
+   *       `ERRMSG` is `COLOR=RED` 78 characters at row 23 (L331 to L334), the latter bounded by
+   *       `CCARD-ERROR-MSG PIC X(75)` at `app/cpy/CVCRD01Y.cpy` L28.
+   * WHY : Assumptions: neither channel names a severity, so each takes the appearance its own BMS field
+   *       declares -- `error` for row 23 and `neutral` for row 22, which is what `MESSAGE_BAND_CHANNELS`
+   *       records and `defaultMessageBandSeverity` resolves. Naming one here could only disagree with
+   *       the mapset, and naming `info` for row 22 is what put a blue informational alert in a field the
+   *       mapset declares red.
+   */
+  /*
+   * WHY : ⚠️ Assumptions: a FAILED read shows the service's OWN sentence when the problem document
+   *       carried one, and the authored fallback only when it did not. The fallback alone was shown for
+   *       every failure, so a described refusal -- a 404, a 400, a 403 -- was reported as
+   *       `Card data is temporarily unavailable`, which names a transient condition none of those is:
+   *       `listCards` declares 400, 401, 403, 405, 406, 413, 415 and 500 and NO 404 at all, and states
+   *       that an exhausted or entirely-filtered page answers 200 with an empty array
+   *       "rather than 404, because a query that matched nothing succeeded"
+   *       (`services/card-service/src/main/resources/openapi/card-api.yaml` L509 to L537). So absence
+   *       never arrives as a failure here, and a failure is never absence.
+   *       Alternatives Considered: classifying the status in this screen, which is what the sibling
+   *       authorization summary does. Rejected here because `ui/src/api/client.ts` records at
+   *       `isTransientFailure` that copying its status list into a screen is the defect that produced
+   *       this finding, and the service's sentence needs no list: it was authored server-side to be
+   *       read, so re-wording it here would be a second voice for one message.
+   *       Trade-offs: the fallback is still reached for a failure that carried no document at all -- a
+   *       network fault, or a reader that rejected with a bare `Error` -- and for those it is the only
+   *       thing that can be said.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: a bodiless failure now selects between TWO sentences on the
+   *       failure's own `transient` judgement, and it used to be answered by one authored sentence
+   *       reading `Card data is temporarily unavailable. Report it with the correlation id.` That
+   *       sentence asserts BOTH remedies at once -- wait, and report -- so it was wrong whichever the
+   *       failure actually was, and `ui/src/api/client.ts` names this screen in the measured finding it
+   *       records at `ApiFailureRemedy`: "a timeout, a dropped connection and a 500 indistinguishable on
+   *       every screen, and a 404 presented as 'temporarily unavailable' on `/cards`". The two sentences
+   *       are the catalogue's authored pair, so one voice answers this condition on every screen rather
+   *       than each screen wording it again.
+   * WHY : ⚠️ Assumptions: the judgement is READ from `browse.failure` through `isTransientFailure` and
+   *       is not computed here. That client module owns which kinds and statuses are transient -- a
+   *       timeout plus 408, 429, 502, 503 and 504 -- and it records that copying its status list into a
+   *       screen is the defect that produced this very finding. It also classifies a TIMEOUT, which
+   *       carries no status at all, so a status comparison here could not reach that case.
+   * WHY : ⚠️ Assumptions: a `NETWORK` failure -- a dropped connection, an unresolved host -- is
+   *       therefore reported as PERSISTENT and not as an outage to wait out. That is the client's own
+   *       deliberate classification, argued at `remedyFor`: a request that timed out reached something,
+   *       whereas one that never resolved a host fails again identically, and inviting a retry for it
+   *       sends the operator into a loop with no exit. This screen adopts that judgement rather than
+   *       second-guessing it, so the two cannot disagree.
+   * WHY : Assumptions: NO repeat control is added to this screen, so `isRepeatableFailure` is not
+   *       consulted. `ui/src/api/client.ts` permits a screen to put a repeat control behind that member
+   *       "and behind nothing else", and this screen already has the reference's own repeat: `F8` and
+   *       `F7` re-issue the read, and `ENTER` re-reads the page. Adding a control that duplicates a key
+   *       the mapset paints would put two affordances on one action, so the member has nothing to gate.
+   * WHY : Assumptions: the service's own sentence still wins over both, unchanged, because the service
+   *       transcribed the same COBOL literals and is the authority on which of them applies. The pair
+   *       below is the fallback for a rejection that arrived without a document.
    */
   const bandMessage =
     error ??
     (browse.isFailed
-      ? CARD_LIST_PAGE_UNAVAILABLE
+      ? (browse.error?.message ??
+        (isTransientFailure(browse.failure)
+          ? TRANSIENT_FAILURE_TRY_AGAIN
+          : PERSISTENT_FAILURE_REPORT_IT))
       : noRecordsFound
         ? CARD_LIST_STATUS_MESSAGES.WS_NO_RECORDS_FOUND.text
-        : CARD_LIST_STATUS_MESSAGES.WS_INFORM_REC_ACTIONS.text);
+        : null);
 
-  const bandSeverity = error === null && !browse.isFailed && !noRecordsFound ? 'info' : 'error';
+  /*
+   * WHY : Assumptions: the advisory is suppressed on EXACTLY ONE condition, an empty opening page, which
+   *       is the reference's own guard character for character: `1400-SETUP-MESSAGE` paints the
+   *       45-character field only `IF NOT WS-NO-INFO-MESSAGE AND NOT WS-NO-RECORDS-FOUND`
+   *       (`app/cbl/COCRDLIC.cbl` L926 to L930), and `WS-NO-RECORDS-FOUND` is set only for an
+   *       end-of-file reached with the screen ordinal at one and the row counter at zero (L1242 to
+   *       L1245). Every other turn paints it, INCLUDING a turn that also reports a fault or a refused
+   *       filter -- the sentence is `TYPE S FOR DETAIL, U TO UPDATE ANY RECORD` (L115 to L116), the
+   *       legend for the row selection codes, and the reference's own `EVALUATE` reaches
+   *       `SET WS-INFORM-REC-ACTIONS TO TRUE` on the file-error path through its `WHEN
+   *       WS-NO-INFO-MESSAGE` arm at L917 to L919. So the two lines speak together, which is the whole
+   *       reason the mapset declares two.
+   *       Alternatives Considered: suppressing it whenever no rows are on display, which reads as the
+   *       kinder rule and was written here first. Rejected as a divergence with no source behind it: it
+   *       would withdraw the advisory on a refused FILTER, where the previous page's rows are still
+   *       displayed and still selectable, and the reference leaves it painted there.
+   *       Assumptions: it is therefore painted from the first commit, including while the opening read is
+   *       outstanding. The reference has no read-in-flight turn to compare against -- it sends the map
+   *       only after the browse -- so a target-only refinement that blanked it for that one frame would
+   *       be inventing a turn, and the sentence it withheld is about to be true.
+   */
+  const informationMessage = noRecordsFound
+    ? null
+    : CARD_LIST_STATUS_MESSAGES.WS_INFORM_REC_ACTIONS.text;
 
   useShellSlot({
     screen: { transactionId: CARD_LIST_TRANSACTION_ID, programName: CARD_LIST_PROGRAM_NAME },
     now: paintedAt,
-    message: { text: bandMessage, severity: bandSeverity },
+    message: { text: bandMessage, information: { text: informationMessage } },
     pfKeys: {
       keys: bindings,
       onInvoke: invoke,
@@ -1941,6 +2475,28 @@ export function CardListScreen(): ReactElement {
 
   return (
     <Flex vertical gap="large">
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the outstanding read is now ANNOUNCED, and it was announced
+       *       nowhere. The design system's own table spinner is a VISUAL signal only, and the paging
+       *       keys' busy affordance is likewise a glyph, so a screen-reader operator pressing `F8` was
+       *       told nothing at all between the press and the arriving page -- on a browse where a page
+       *       turn changes every row, that is the one transition worth saying out loud.
+       * WHY : ⚠️ Assumptions: the region is mounted on EVERY turn and is empty while nothing is
+       *       outstanding, which is what makes the announcement work at all: `ui/src/layout/fieldHelp.tsx`
+       *       records that a live region has to be in the accessibility tree BEFORE its content changes
+       *       for the change to be announced, so a region rendered only while busy would arrive with its
+       *       sentence already in place and be read by nothing. This screen has no early return, so the
+       *       node is stable for the component's whole life.
+       * WHY : Assumptions: `resolving` counts as outstanding as well as `isLoading`, because a typed card
+       *       number is exchanged for a selector through its own lookup before the screen navigates --
+       *       that is a request the operator started and is waiting on, and it is why the two keys and the
+       *       Filter control are declined during it too.
+       * WHY : Assumptions: the sentence is imported rather than composed. It is AUTHORED, and that is
+       *       admissible because the reference has nothing to transcribe: a 3270 terminal inhibits input
+       *       for the duration of a turn through the keyboard itself, so `app/cbl/COCRDLIC.cbl` never
+       *       writes a working message -- there was no moment at which an operator could have read one.
+       */}
+      {busyAnnouncement(browse.isLoading || resolving ? REQUEST_IN_PROGRESS : undefined)}
       {/*
        * Assumptions: the header band is composed here because both of its values belong to this
        * screen -- the transaction identifier and the program name rows 1 and 2 of the 3270 screen
@@ -1994,13 +2550,65 @@ export function CardListScreen(): ReactElement {
        *       group, because the two fields are separate rows on the terminal and a compact group renders
        *       its members as one joined control. Joining an eleven-digit and a sixteen-digit field would
        *       read as one entry with two parts.
+       * WHY : ⚠️ Refactoring Rationale: NEITHER filter carries a clear affordance any more, and the
+       *       removal is a source-fidelity call rather than a sizing tweak. The mapset gives a field no
+       *       in-field clear control -- `ACCTSID` and `CARDSID` are plain `UNPROT` entry fields with
+       *       nothing beside them (`app/bms/COCRDLI.bms` L89 to L93 and L101 to L105) -- and the only
+       *       affordances the screen paints at all are the three on its legend field,
+       *       `  F3=Exit F7=Backward  F8=Forward` (L335 to L339). The program's own `EVALUATE` reaches an
+       *       arm for exactly `CCARD-AID-ENTER`, `-PFK03`, `-PFK07` and `-PFK08`
+       *       (`app/cbl/COCRDLIC.cbl` L439 to L562) and its `WHEN OTHER` at L572 to L582 re-reads the
+       *       current page and re-sends the map, so no key clears a field either. `CSSTRPFY.cpy` L36 to
+       *       L37 does normalise `DFHPF4` into an attention identifier, but this program has no arm for
+       *       it -- so an operator clears one of these fields by clearing its text, and the affordance
+       *       had no source to be faithful to.
+       * WHY : ⚠️ Assumptions: what it DID add was measured, on two counts, which is why removing it fixes
+       *       two findings at once rather than one. First, `allowClear` renders a real
+       *       `<button type="button">` for the clear glyph
+       *       (`@rc-component/input/lib/BaseInput.js` L66 to L76) and leaves it in the document while the
+       *       entry is empty: a browser measured two such controls on this screen at 12 by 12 pixels,
+       *       `visibility: hidden`, `tabIndex 0` and with no `aria-hidden`, so a keyboard operator hit
+       *       two tab stops that could not be seen and fell below the 24-pixel pointer floor
+       *       `TARGET_SIZE_AA_MINIMUM` records from success criterion 2.5.8. Second, the same prop
+       *       CHANGES the control's shape: `hasPrefixSuffix` becomes true, the input is wrapped in an
+       *       `-affix-wrapper`, and the variant class that carries the border, the padding and the
+       *       control height moves from the `<input>` to that wrapper (L50 to L53 and L87 of the same
+       *       file). The screen therefore rendered two different kinds of element both matching
+       *       `.ant-input` -- a bare outlined control and the unstyled inner element of a wrapper -- and
+       *       a browser measured them at 40 and 28 pixels. With the prop gone every `.ant-input` on this
+       *       screen is the same kind of box, so their height is the theme's single `controlHeight` and
+       *       no per-control override is needed to make them agree.
+       *       Alternatives Considered: keeping the affordance and inflating the glyph to the pointer
+       *       floor. Rejected because it would keep a control the source does not have and would leave
+       *       the two heights disagreeing, so it addresses the measurement and not the cause.
+       * WHY : Assumptions: both fields are sized from the widths their own PICTURE clauses declare --
+       *       `ACCT-ID PIC 9(11)` and `CARD-NUM PIC X(16)`, transcribed as
+       *       {@link CARD_LIST_ACCOUNT_FILTER_WIDTH} and {@link CARD_LIST_CARD_FILTER_WIDTH} and already
+       *       each field's `maxLength` -- so the entry and its rendering state one width instead of two.
        */}
-      <Space.Compact>
-        <Typography.Text id={ACCOUNT_NUMBER_LABEL_ID}>
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the label and its entry field are laid out with a `Flex` and no
+       *       longer with a `Space.Compact`. A compact group exists to render its members as ONE joined
+       *       control -- it collapses the gap between them to zero and joins their borders -- and a
+       *       label is not a control, so the grouping made a claim about these two elements that is not
+       *       true. It also made the pair a single non-wrapping row: at a 375-pixel width a browser
+       *       measured the `Credit Card Number:` label fragmented into stacked one- and two-character
+       *       pieces beside an entry field 166 pixels wide, because both members were being shrunk to
+       *       fit a line that could not hold them.
+       * WHY : Assumptions: the same three ingredients the actions row below already uses -- the legend's
+       *       own `SPACING_TOKENS.sectionGapCompact` gap, `wrap`, and `align="center"` -- so the two
+       *       rows of this screen agree by construction rather than by two literals. The mapset's own
+       *       gap between a label and its field is three character columns (the label ends at column 40
+       *       and `ACCTSID` starts at column 44, `app/bms/COCRDLI.bms` L84 to L93), which is the same
+       *       small step that token names.
+       * WHY : Assumptions: the label carries {@link FILTER_LABEL_LAYOUT}, so the wrapping falls on the
+       *       ENTRY and never on the label's text.
+       */}
+      <Flex gap={cssVar[SPACING_TOKENS.sectionGapCompact]} wrap align="center">
+        <Typography.Text id={ACCOUNT_NUMBER_LABEL_ID} style={FILTER_LABEL_LAYOUT}>
           {CARD_LIST_LABELS.accountNumberFilter}
         </Typography.Text>
         <Input
-          allowClear
           aria-labelledby={ACCOUNT_NUMBER_LABEL_ID}
           {...fieldAriaProps(ACCOUNT_NUMBER_INPUT_ID, {
             invalid: isFilterRefused('accountNumber'),
@@ -2012,6 +2620,7 @@ export function CardListScreen(): ReactElement {
           inputMode="numeric"
           maxLength={CARD_LIST_ACCOUNT_FILTER_WIDTH}
           status={isFilterRefused('accountNumber') ? 'error' : ''}
+          style={copybookFieldWidthStyle(CARD_LIST_ACCOUNT_FILTER_WIDTH, cssVar)}
           onChange={
             /**
              * Records the entered account number.
@@ -2026,7 +2635,7 @@ export function CardListScreen(): ReactElement {
           }
           value={accountFilter}
         />
-      </Space.Compact>
+      </Flex>
       {/*
        * WHY : Assumptions: the refusal sentence is repeated here VISUALLY HIDDEN rather than rendered
        *       beside the field. The shared band already shows it to a sighted operator, and the row-23
@@ -2041,12 +2650,16 @@ export function CardListScreen(): ReactElement {
           {filterRefusals.accountNumber}
         </span>
       )}
-      <Space.Compact>
-        <Typography.Text id={CARD_NUMBER_LABEL_ID}>
+      {/*
+       * WHY : Assumptions: laid out exactly as the account row above and for the same reasons, which is
+       *       why the rationale is written once there and not twice. This is the field a browser
+       *       measured fragmenting.
+       */}
+      <Flex gap={cssVar[SPACING_TOKENS.sectionGapCompact]} wrap align="center">
+        <Typography.Text id={CARD_NUMBER_LABEL_ID} style={FILTER_LABEL_LAYOUT}>
           {CARD_LIST_LABELS.cardNumberFilter}
         </Typography.Text>
         <Input
-          allowClear
           aria-labelledby={CARD_NUMBER_LABEL_ID}
           {...fieldAriaProps(CARD_NUMBER_INPUT_ID, {
             invalid: isFilterRefused('cardNumber'),
@@ -2057,6 +2670,7 @@ export function CardListScreen(): ReactElement {
           inputMode="numeric"
           maxLength={CARD_LIST_CARD_FILTER_WIDTH}
           status={isFilterRefused('cardNumber') ? 'error' : ''}
+          style={copybookFieldWidthStyle(CARD_LIST_CARD_FILTER_WIDTH, cssVar)}
           onChange={
             /**
              * Records the entered card number.
@@ -2070,7 +2684,48 @@ export function CardListScreen(): ReactElement {
           }
           value={cardNumber}
         />
+      </Flex>
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the three controls are lifted OUT of the card number's compact
+       *       group, where they sat as its third, fourth and fifth members. A compact group exists to
+       *       render its members as one joined control, and a browser measured the result: the gaps
+       *       between `Filter`, `Open detail` and `Open update` were 0 pixels, so three independent
+       *       actions read as one segmented control whose segments looked like states of a single
+       *       choice -- while the key legend on the very same screen separated its own controls by
+       *       about 9 pixels. Two unrelated things were joined by that grouping as well: the entry
+       *       field and the actions taken on it, which is why the same note above says joining two
+       *       entry fields would read as one entry with two parts.
+       * WHY : Assumptions: the gap is the legend's OWN token, read through
+       *       `SPACING_TOKENS.sectionGapCompact` -- the same expression `ui/src/layout/PfKeyBar.tsx`
+       *       L449 uses for the gap between its keys. Reading the same name is what makes the two rows
+       *       of controls agree by construction rather than by two literals that happen to match, and
+       *       it keeps the zero-hardcoded-values rule true here.
+       * WHY : Assumptions: a `Flex` rather than a `Space`, because the row must WRAP at a phone width --
+       *       three controls whose labels are `Filter`, `Open detail` and `Open update` do not fit one
+       *       375-pixel line, and a non-wrapping row is how a control ends up clipped off the side of
+       *       the viewport.
+       */}
+      <Flex gap={cssVar[SPACING_TOKENS.sectionGapCompact]} wrap align="center">
+        {/*
+         * WHY : ⚠️ Refactoring Rationale: this control is the screen's PRIMARY one, and every control on
+         *       the screen previously carried the same neutral weight -- a browser found no
+         *       primary-solid button anywhere on it, so `Filter`, which performs the browse, was
+         *       pixel-indistinguishable from `F3=Exit`, which leaves it. This is the screen's Enter
+         *       action: the mapset paints no Enter on its legend (`app/bms/COCRDLI.bms` L339 names only
+         *       F3, F7 and F8), and the program's `CCARD-AID-ENTER` arms are the ones that edit the two
+         *       filters and read the browse (`app/cbl/COCRDLIC.cbl` L517 and L545). AAP section 0.3.2
+         *       maps that role to exactly this variant -- `type="primary"` for Enter and PF5, `default`
+         *       for PF3, PF4 and PF12 -- so the emphasis is the design system's own and no colour,
+         *       weight or border value is written here.
+         * WHY : Assumptions: emphasis matches RISK, which is what keeps one primary control on this
+         *       screen from contradicting the rule the mutating screens follow. This action reads a
+         *       page; it writes nothing, needs no confirmation, and is undone by clearing the field
+         *       and running it again. The two controls beside it navigate rather than submit, and the
+         *       delegated legend keys stay neutral, so the one solid control on the screen is the one
+         *       that acts on what the operator typed.
+         */}
         <Button
+          type="primary"
           onClick={
             /** Narrows the browse to the entered card number, or clears the narrowing. */
             () => {
@@ -2104,7 +2759,7 @@ export function CardListScreen(): ReactElement {
         >
           {CARD_LIST_ENTRY_CONTROL_LABELS.openUpdate}
         </Button>
-      </Space.Compact>
+      </Flex>
       {/*
        * WHY : Assumptions: the card filter gets the same visually-hidden description target as the
        *       account filter above, and for the same reason recorded there -- `aria-describedby` has
@@ -2122,6 +2777,42 @@ export function CardListScreen(): ReactElement {
         columns={columns}
         dataSource={browse.items}
         loading={browse.isLoading}
+        onRow={
+          /*
+           * WHY : ⚠️ Refactoring Rationale: the rows carried NO affordance of any kind, which a browser
+           *       measured rather than this inferring it -- `cursor: auto` at rest and hovered, no
+           *       `:hover` rule of their own (the tint is a class added on mouse enter), and no focus or
+           *       active treatment at all. Every row on this screen is actionable: it carries a
+           *       selection field and two immediate controls, and the reference directs an operator to a
+           *       row by putting the cursor in it. So a row is given the pointer cursor that says so and
+           *       a way to be reached without a pointer.
+           * WHY : ⚠️ Trade-offs: `tabIndex` 0 puts each row in the tab sequence, which is seven extra
+           *       stops on a full page, and that cost is accepted for what it buys: a keyboard operator
+           *       can move row to row and land in the row's own field, which is the reference's cursor
+           *       repositioning, instead of tabbing through three controls per row to get past one.
+           *       The alternative considered was `tabIndex` -1, which keeps the row programmatically
+           *       focusable and out of the tab order -- rejected because it is not reachable from the
+           *       keyboard at all, which is the half of the finding that a cursor cannot answer.
+           * WHY : Assumptions: no `role` is set. A `<tr>` inside a `<table>` already has the `row` role,
+           *       and naming a widget role here -- `button`, or `menuitem` -- would promise an
+           *       activation the row does not perform: it moves the cursor, and the turn is still the
+           *       operator's to submit.
+           * WHY : Assumptions: the focus ring is the user agent's. Nothing in this file or in the row's
+           *       own component styling clears `outline`, so a focused row shows the browser's
+           *       indicator; declaring one inline is not possible for a focus state in any case, since
+           *       an inline style has no `:focus-visible` selector to attach to.
+           */
+          /**
+           * Gives one browse row its pointer affordance and its keyboard reach.
+           * @returns {object} The row attributes antd spreads onto the `<tr>`.
+           */
+          () => ({
+            style: ROW_AFFORDANCE_STYLE,
+            tabIndex: 0,
+            onClick: focusRowSelectionOnPointer,
+            onKeyDown: focusRowSelectionOnKey,
+          })
+        }
         pagination={false}
         rowKey={
           /*
@@ -2145,6 +2836,28 @@ export function CardListScreen(): ReactElement {
            */
           (row: CardSummary): string => row.key
         }
+        /*
+         * WHY : ⚠️ Purpose: give the grid its OWN horizontal scrolling region, so a viewport narrower
+         *       than the mapset's row scrolls the grid rather than painting outside the shell's frame.
+         *       {@link CARD_LIST_COLUMN_CELLS} records the two measurements this answers -- an account
+         *       number wrapping as `000000` / `00100` with the masked card number broken across three
+         *       lines, and an 8.92-pixel remainder the shell's content region absorbed as a sideways
+         *       pan -- and why declaring the extent is what creates the region.
+         * WHY : ⚠️ Assumptions: `tableLayout` is stated EXPLICITLY and must be. The design system infers
+         *       `'fixed'` only for a pinned column, a pinned header, a sticky grid or an ellipsised
+         *       column (`@rc-component/table/lib/Table.js` L426-L442), and this grid has none of the
+         *       four -- so with the extent declared and the layout left to infer it would resolve to
+         *       `'auto'`, under which a declared column width is a MINIMUM the content may grow. That
+         *       is not a theoretical concern here: the selection column holds an `Input` and two
+         *       buttons, and an unconstrained `Input` reports a full-width intrinsic size, which is
+         *       exactly how the sibling user browse measured a one-character column at about 700
+         *       pixels. Fixing the layout is what keeps the four mapset-derived extents authoritative.
+         * WHY : Assumptions: no column is pinned, so nothing here can reproduce the overlay the
+         *       transaction browse had to unpin a column to avoid -- with four columns and no `fixed`,
+         *       the whole row scrolls as one and no cell is ever painted over another.
+         */
+        scroll={{ x: cardListTableMeasure(cssVar) }}
+        tableLayout="fixed"
       />
       {/*
        * Refactoring Rationale: the bespoke `Previous` and `Next` controls are gone, and the delegated

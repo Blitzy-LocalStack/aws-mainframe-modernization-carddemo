@@ -47,8 +47,24 @@
 import { useEffect, useState } from 'react';
 import type { CSSProperties, ReactElement } from 'react';
 
+import { CheckCircleFilled, CloseCircleFilled, InfoCircleFilled } from '@ant-design/icons';
 import { Alert, Flex, Tooltip, Typography, theme } from 'antd';
 
+/*
+ * WHY : ⚠️ Refactoring Rationale: this module now imports from `ui/src/api`, and the note beside
+ *       {@link MessageBandProps} used to state flatly that it never does. The statement is narrowed
+ *       rather than withdrawn: what that note refuses is the API's error OBJECT, because accepting one
+ *       would invite a caller to pour a field-error array into the single reserved line. This is a
+ *       TYPE-ONLY import of one string union, erased entirely at build, so it adds no runtime edge and
+ *       no dependency on the client's behaviour - it adds a shared vocabulary.
+ * WHY : Alternatives Considered: re-declaring the four members here as a band-local union, which keeps
+ *       the import out. Rejected because the two unions would then be independent declarations of one
+ *       contract with nothing to fail when the service adds a fifth member; a reader would find two
+ *       lists and no way to tell which is authoritative. Importing the type makes drift a compile error
+ *       in {@link API_SEVERITY_BAND_SEVERITIES}, whose `satisfies Record<Severity, …>` clause fails the
+ *       moment the source union gains a member this band has no mapping for.
+ */
+import type { Severity } from '../api/types';
 import {
   MESSAGE_BAND,
   isMessageBandEmpty,
@@ -277,6 +293,38 @@ const SEVERITY_ALERT_TYPES = {
 } as const satisfies Record<MessageBandSeverity, 'error' | 'success' | 'info'>;
 
 /*
+ * ⚠️ Refactoring Rationale: the severity icon is supplied HERE rather than left to `showIcon`, and
+ * the only difference in the rendered glyph is that this one is hidden from assistive technology. An
+ * accessibility pass found the component's own icon exposed under its machine name — announced as
+ * `image "close-circle"` on an error band and `image "info-circle"` on an informational one, and
+ * announced INSIDE the live region and BEFORE the sentence, so a screen-reader user heard the name of
+ * a drawing file before hearing what had happened. The icon is decorative by construction: severity
+ * already reaches assistive technology through the alert's role, which is `alert` for a rejection and
+ * `status` for everything else, so the glyph carries nothing for a listener and nothing is lost by
+ * hiding it.
+ *
+ * Alternatives Considered: dropping `showIcon`, which removes the announcement by removing the icon.
+ * Rejected because the icon is the second visual channel severity travels on: the sentence itself is
+ * painted in the base text grade for contrast reasons recorded at {@link SEVERITY_COLOR_TOKENS}, so
+ * without the glyph a reader who cannot separate the alert tints has only the tint to go on.
+ *
+ * Alternatives Considered: hiding the component's own icon instead of replacing it. Rejected because
+ * there is no seam to do it through - antd renders the icon internally when `showIcon` is set and
+ * exposes no props for it, so `aria-hidden` cannot be reached onto that element from here at all.
+ *
+ * Assumptions: the four glyphs are the FILLED variants, which is what the component itself renders
+ * for an alert with no description, so replacing the node changes no pixel. The mapping follows
+ * {@link SEVERITY_ALERT_TYPES} exactly - `neutral` takes the informational glyph because it takes the
+ * informational variant - so the icon and the chrome cannot disagree about which severity is showing.
+ */
+const SEVERITY_ALERT_ICONS = {
+  error: <CloseCircleFilled aria-hidden="true" />,
+  success: <CheckCircleFilled aria-hidden="true" />,
+  info: <InfoCircleFilled aria-hidden="true" />,
+  neutral: <InfoCircleFilled aria-hidden="true" />,
+} as const satisfies Record<MessageBandSeverity, ReactElement>;
+
+/*
  * Assumptions: these three token names come from the measured BMS colour
  * bridge and not from this file. The mapping from BMS colour to design-system
  * token stays in `ui/src/theme/tokens.ts`, where its rationale and measured
@@ -338,6 +386,145 @@ const SEVERITY_COLOR_TOKENS = {
  */
 const DEFAULT_SEVERITY: MessageBandSeverity = 'error';
 
+/**
+ * What one of the two message lines is, stated in the reference's own terms.
+ *
+ * Assumptions: three structural members and no prose. The row and the field name are what a reader
+ * checks a screen against in `app/bms/**`, and the default severity is what the field's own `COLOR=`
+ * operand declares — so every member is a measurement rather than a description, and the description
+ * belongs in the documentation on {@link MESSAGE_BAND_CHANNELS} where it cannot be mistaken for
+ * displayable content.
+ */
+export interface MessageBandChannelContract {
+  /** Terminal row the field occupies: 22 for the advisory line, 23 for the outcome line. */
+  readonly row: 22 | 23;
+  /** Name of the BMS field this channel stands in for, as the mapsets declare it. */
+  readonly sourceField: 'INFOMSG' | 'ERRMSG';
+  /** Severity the channel renders with when the caller names none, from the field's `COLOR=`. */
+  readonly defaultSeverity: MessageBandSeverity;
+}
+
+/**
+ * The two message channels this application has, and what belongs on each.
+ *
+ * Purpose: publish ONE authority for a routing decision every screen makes and several got wrong. A
+ * rendering review found advisory text painted into the row-23 outcome band on 4 of 17 routes, and
+ * found two screens rendering their advisory line as a second alert inside `<main>` roughly 200 pixels
+ * above a shell band that stood empty at its reserved height — two message zones where the terminal
+ * showed two adjacent rows. The rule is short enough to state exhaustively, so it is stated here
+ * rather than re-derived per screen:
+ *
+ * - `information` is row 22's `INFOMSG`. It carries STANDING GUIDANCE — what the operator may do on
+ *   this screen, which is true before the turn and still true after it. `Enter or update id of account
+ *   to display` is its value on every turn of the account-view screen. Five mapsets declare it.
+ * - `error` is row 23's `ERRMSG`. It carries the OUTCOME OF THE TURN JUST TAKEN — a rejection, a
+ *   confirmation, an unsupported key, the sign-off acknowledgement. All 21 mapsets declare it, which is
+ *   why it is what a caller naming no channel gets.
+ *
+ * Assumptions: the test is TENSE, not tone. A sentence that would still be true if the operator had
+ * pressed nothing belongs on row 22 however urgent it sounds; a sentence that answers what just
+ * happened belongs on row 23 however mild it is. Deciding by tone is what produced the measured
+ * mis-routings, because an advisory prompt reads mild and lands in the channel whose colour looks
+ * mild — which is the informational-looking alert this review found in the ERROR band.
+ *
+ * Assumptions: the two channels are never collapsed and never substituted for one another. A screen
+ * whose mapset declares both renders both, because collapsing them drops whichever sentence the other
+ * overwrote — the guidance and the outcome are simultaneously true on every turn of the five two-line
+ * mapsets.
+ */
+export const MESSAGE_BAND_CHANNELS = {
+  information: { row: 22, sourceField: 'INFOMSG', defaultSeverity: 'neutral' },
+  error: { row: 23, sourceField: 'ERRMSG', defaultSeverity: DEFAULT_SEVERITY },
+} as const satisfies Record<MessageBandChannel, MessageBandChannelContract>;
+
+/**
+ * Reports the severity a channel renders with when its caller names none.
+ *
+ * Purpose: keep an advisory line out of the error appearance by default. The band's single default was
+ * `error` for both channels — the measured `COLOR=RED` of row 23 — so a screen that delegated its
+ * row-22 line without restating a severity painted standing guidance in the rejection colour, with
+ * the assertive live-region role that goes with it. Row 22 is `COLOR=NEUTRAL` on every mapset that
+ * declares it, so the correct default differs per channel and can be read from the channel.
+ *
+ * Assumptions: the answer comes from {@link MESSAGE_BAND_CHANNELS} rather than from a second table
+ * here, so the value a reader finds documented is the value the component renders.
+ * @param {MessageBandChannel} channel - The message line the band is standing in for.
+ * @returns {MessageBandSeverity} The severity that channel's BMS field declares.
+ */
+export function defaultMessageBandSeverity(channel: MessageBandChannel): MessageBandSeverity {
+  return MESSAGE_BAND_CHANNELS[channel].defaultSeverity;
+}
+
+/**
+ * Translates the legacy `line` vocabulary onto the channel vocabulary.
+ *
+ * Purpose: one concept reached this component under two names — `line`, which distinguishes the
+ * reference's row-22 information line from its row-23 message line, and `channel`, which distinguishes
+ * the same two bands by what each carries. Both have call sites, so both are accepted; this is the one
+ * place the older name is mapped onto the newer, so a caller holding either vocabulary resolves to the
+ * same band.
+ * @param {MessageBandLine | undefined} line - The line a caller named, or `undefined` for none.
+ * @returns {MessageBandChannel} The channel that line denotes, defaulting to the row-23 outcome line.
+ */
+export function messageBandChannelForLine(line: MessageBandLine | undefined): MessageBandChannel {
+  if (line === undefined) {
+    return DEFAULT_CHANNEL;
+  }
+
+  return line === 'information' ? 'information' : 'error';
+}
+
+/*
+ * Refactoring Rationale: the mapping is a table rather than a `switch`, for the same reason the three
+ * tables above it are: `satisfies Record<Severity, MessageBandSeverity>` makes an unmapped member of
+ * the source union a compile error, where a `switch` with a `default` arm would silently absorb a
+ * fifth severity into whichever appearance the fallback named.
+ *
+ * ⚠️ Trade-offs: WARNING and CRITICAL both resolve to `error`, so the band renders them identically -
+ * which is the very observation that prompted this helper. A rendering review reported the two as
+ * byte-identical and called the severity inert. The collapse is nonetheless the faithful answer and
+ * not a shortcut: the row-23 field is `COLOR=RED` on 21 of 21 mapsets unconditionally, so the source
+ * has ONE appearance for every unsuccessful turn, and the band's severity union deliberately omits a
+ * warning member for that reason - a fourth appearance would be an invention rather than a
+ * translation. What the helper fixes is the other half of the same finding: LOG and INFO no longer
+ * render as rejections, so the severity is no longer inert across the range.
+ *
+ * Assumptions: the WARNING-versus-CRITICAL distinction is preserved where it is actionable rather than
+ * discarded - it stays on the problem document, whose `status`, `code` and `abend` members are what a
+ * screen reasons about when deciding whether an operation may be retried. It was never a colour.
+ */
+const API_SEVERITY_BAND_SEVERITIES = {
+  /*
+   * Assumptions: LOG is the quietest tier the services publish and maps onto the quietest appearance
+   * the band has. Its documented use is a condition worth recording rather than acting on, which is
+   * the row-22 advisory tone - de-emphasised text announced politely - not a red interruption.
+   */
+  LOG: 'neutral',
+  INFO: 'info',
+  WARNING: 'error',
+  CRITICAL: 'error',
+} as const satisfies Record<Severity, MessageBandSeverity>;
+
+/**
+ * Translates a service severity into the appearance the band renders it with.
+ *
+ * Purpose: the two vocabularies are different by design and nothing joined them, so every screen
+ * holding a problem document had to invent the correspondence or ignore it — and a rendering review
+ * found that they ignored it, rendering every fault in the default rejection appearance whatever the
+ * document said. This is the single documented correspondence for the whole application: the API
+ * publishes `LOG | INFO | WARNING | CRITICAL`, the band renders `error | success | info | neutral`, and
+ * the mapping between them belongs beside the appearances rather than beside the transport.
+ *
+ * Assumptions: `success` is unreachable from this helper, and that is correct rather than an omission.
+ * A problem document describes a failure, so no severity it can carry means "the turn succeeded"; a
+ * screen names `success` itself when a write completes.
+ * @param {Severity} severity - The `severity` member of the problem document the request produced.
+ * @returns {MessageBandSeverity} The band severity to render that document's message with.
+ */
+export function messageBandSeverityForApiSeverity(severity: Severity): MessageBandSeverity {
+  return API_SEVERITY_BAND_SEVERITIES[severity];
+}
+
 /*
  * Trade-offs: `minInlineSize: 0` is what lets the `Alert` shrink below its own
  * content width — without it a flex item refuses to go under its min-content size,
@@ -377,8 +564,10 @@ export interface MessageBandProps {
    * blur the split the design-system mapping draws — per-field validation errors
    * belong to `Form.Item validateStatus="error"`, only a screen-level message
    * belongs here — and would invite callers to pour a field-error array into the
-   * one reserved line. Callers map an error to text, and this module never imports
-   * from `ui/src/api`.
+   * one reserved line. Callers map an error to text; this module imports nothing from
+   * `ui/src/api` at RUNTIME, and the one type-only exception is argued at the import
+   * itself, where {@link messageBandSeverityForApiSeverity} needs the service severity
+   * union to be mappable rather than re-declared.
    *
    * Assumptions: the `undefined` arm is written out rather than left to the
    * optional marker because `exactOptionalPropertyTypes` is enabled, under which an
@@ -393,8 +582,13 @@ export interface MessageBandProps {
   readonly message?: string | null | undefined;
 
   /**
-   * Severity governing the alert variant, the message colour and the ARIA
-   * role. Defaults to `"error"`, the appearance the source field always had.
+   * Severity governing the alert variant, the message colour, the severity icon and the ARIA role.
+   *
+   * Omit it to take the appearance the resolved channel's own BMS field declares — `error` for row 23,
+   * which is `COLOR=RED` on 21 of 21 mapsets, and `neutral` for row 22, which is `COLOR=NEUTRAL` on
+   * every mapset that declares it. {@link defaultMessageBandSeverity} is that resolution, and
+   * {@link messageBandSeverityForApiSeverity} is how a screen holding a problem document arrives at a
+   * value to pass here.
    */
   readonly severity?: MessageBandSeverity | undefined;
 
@@ -406,6 +600,10 @@ export interface MessageBandProps {
    * collapsed into one prop. The row-23 field carries a rejection on one turn and the
    * sign-off acknowledgement on another, so its severity varies while its channel does
    * not; conversely the row-22 field is `COLOR=NEUTRAL` on every turn.
+   *
+   * Assumptions: this prop OUTRANKS {@link MessageBandProps.line} when both are given, because it is
+   * the current name for the concept and a caller stating it is stating what it means.
+   * {@link MESSAGE_BAND_CHANNELS} records what belongs on each channel.
    */
   readonly channel?: MessageBandChannel | undefined;
 
@@ -447,20 +645,24 @@ export interface MessageBandProps {
  *   is empty, all blanks, or the `LOW-VALUES` sentinel is treated as no
  *   message.
  * @param {MessageBandSeverity | undefined} props.severity - Severity to render
- *   with; optional, defaulting to `"error"` when omitted.
+ *   with; optional, and when omitted the band takes the severity its resolved channel's own BMS field
+ *   declares — `"error"` for the row-23 line and `"neutral"` for the row-22 line.
  * @param {MapsetName | undefined} props.mapset - Mapset the band stands in,
  *   selecting the display width it is sized to; optional, and when omitted the
  *   band renders at the 78-character width nineteen of the twenty-one mapsets
  *   use.
  * @param {MessageBandChannel | undefined} props.channel - BMS message line this
- *   band stands in for, selecting its `data-testid`; optional, defaulting to the
- *   row-23 error line every mapset declares.
+ *   band stands in for, selecting its `data-testid` and its default severity; optional, and it
+ *   outranks `props.line` when both are given.
+ * @param {MessageBandLine | undefined} props.line - The same choice of message line in the older
+ *   `information`/`message` vocabulary; optional, consulted only when `props.channel` is absent, and
+ *   resolved through {@link messageBandChannelForLine}.
  * @returns {ReactElement} The band element: reserved space alone when there is
  *   no message, otherwise reserved space containing the alert.
  */
 export function MessageBand({
   message,
-  severity = DEFAULT_SEVERITY,
+  severity,
   mapset,
   /*
    * WHY : Refactoring Rationale: BOTH `line` and `channel` are accepted, and `channel` is the one the
@@ -472,16 +674,29 @@ export function MessageBand({
    *       test-identifier map is keyed by channel alone, so there is still ONE identifier per band.
    */
   line,
-  channel = DEFAULT_CHANNEL,
+  channel,
 }: MessageBandProps): ReactElement {
   /*
-   * WHY : Assumptions: an explicitly supplied `line` WINS over the channel default, and only over the
-   *       default -- a caller that passes `channel` is passing the newer name and is taken at its word.
-   *       'message' is the error/refusal band the reference paints on row 23 and 'information' is the
-   *       row-22 prompt, so the mapping is 'message' -> 'error' and 'information' -> 'information'.
+   * ⚠️ Refactoring Rationale: NEITHER prop is defaulted in the destructuring any more, and both
+   * defaults are resolved below instead. The reason is that a default assigned there is
+   * indistinguishable from a value the caller passed, which made two decisions unstateable.
+   *
+   * The first is precedence. `channel` used to carry `DEFAULT_CHANNEL` at the parameter, so by the time
+   * the resolution ran, "the caller named the outcome channel" and "the caller named nothing" were the
+   * same value - and the note that stood here claimed an explicit `line` wins "over the default, and
+   * only over the default", which the code could not honour and did not: `line` won over an explicit
+   * `channel` too. Taking both raw makes the documented rule enforceable, and `??` states it: an
+   * explicit `channel` is taken at its word, `line` answers only when `channel` is absent.
+   *
+   * The second is the severity default, which is now CHANNEL-DEPENDENT for the reason recorded at
+   * {@link defaultMessageBandSeverity} - row 23 is `COLOR=RED` and row 22 is `COLOR=NEUTRAL`, so one
+   * default cannot serve both. That resolution needs the channel, so it cannot happen at the parameter
+   * list at all.
    */
-  const resolvedChannel: MessageBandChannel =
-    line === undefined ? channel : line === 'information' ? 'information' : 'error';
+  const resolvedChannel: MessageBandChannel = channel ?? messageBandChannelForLine(line);
+
+  const resolvedSeverity: MessageBandSeverity =
+    severity ?? defaultMessageBandSeverity(resolvedChannel);
   /*
    * Assumptions: the identifier is resolved once here and used by BOTH returns below, because the
    * reserved-space contract this component exists to guarantee is that the SAME element is present
@@ -676,7 +891,7 @@ export function MessageBand({
    * is not visible at a glance, which the reveal below mitigates.
    */
   const messageTextStyle: CSSProperties = {
-    color: cssVar[SEVERITY_COLOR_TOKENS[severity]],
+    color: cssVar[SEVERITY_COLOR_TOKENS[resolvedSeverity]],
     fontWeight: cssVar[TYPOGRAPHY_TOKENS.brightEmphasis],
   };
 
@@ -688,10 +903,21 @@ export function MessageBand({
    * have begun to clip. Measuring the rendered element makes the trigger condition
    * the condition itself rather than a proxy for it.
    *
-   * Trade-offs: the reveal is a design-system tooltip triggered by hover AND focus,
-   * with a tab stop so focus can reach it. A native `title` needs no tab stop but is
-   * offered to a pointer only, and the 3270 original was operated entirely from the
-   * keyboard, so a message whose tail only a mouse can read is a fidelity loss.
+   * ⚠️ Refactoring Rationale: the design-system tooltip now answers FOCUS ONLY, and the pointer is
+   * answered by the native `title` below. It answered both, and the note here argued that a native
+   * `title` is "offered to a pointer only" and therefore a fidelity loss for a keyboard-operated
+   * terminal. That argument is sound and is why the tooltip is kept for focus; what it does not
+   * establish is that the tooltip should also own hover. A rendering review measured an over-length
+   * sentence clipped at `scrollWidth 747 > clientWidth 566` and reported the tail as unrecoverable,
+   * having inspected the element and found no `title` — a reveal that exists only while a script has
+   * mounted, measured and re-rendered is invisible to inspection and absent whenever any of those
+   * three has not happened yet.
+   *
+   * Alternatives Considered: adding `title` and leaving the tooltip on hover as well, which is the
+   * smaller edit. Rejected because the browser renders a native tooltip from `title` on the same hover
+   * that opens the design-system one, so the same sentence would appear twice, in two boxes, offset
+   * from each other. Splitting the triggers gives one reveal per input device.
+   *
    * Alternatives Considered: the paragraph component, whose ellipsis configuration
    * also offers an expandable affordance. Rejected on the band's shape — expanding
    * puts the text on further lines, and the fixed reserved height with
@@ -704,7 +930,7 @@ export function MessageBand({
    * tuple is rejected, so naming the members is the only form that compiles without
    * a type assertion.
    */
-  const messageRevealTriggers: ('hover' | 'focus')[] = ['hover', 'focus'];
+  const messageRevealTriggers: 'focus'[] = ['focus'];
 
   /*
    * Alternatives Considered: wrapping the text in the tooltip only while it is
@@ -739,6 +965,27 @@ export function MessageBand({
    */
   const messageFocusProps: { tabIndex?: 0 } = isMessageTruncated ? { tabIndex: 0 } : {};
 
+  /*
+   * Refactoring Rationale: the clipped sentence is ALSO carried in a native `title`, which is what a
+   * pointer reveals and what an inspection of the element finds. The full string has always been the
+   * element's own text — nothing is sliced, so a screen reader announces the whole sentence and always
+   * did — but a sighted pointer user had only a scripted tooltip, and an accessibility review that read
+   * the element reported no recoverable tail at all because there was no attribute to read.
+   *
+   * Assumptions: the attribute is set only while the text is MEASURED as clipped, not whenever a
+   * message is present. A `title` duplicating a fully visible sentence is noise that appears on every
+   * hover over every band on every screen, and browsers give it the same dwell delay whether it says
+   * anything new or not.
+   *
+   * Alternatives Considered: `aria-label` carrying the same string, which is the other attribute the
+   * review named. Rejected as an ARIA violation rather than a preference: the element is a `span` with
+   * no role, so it maps to `generic`, and `aria-label` is prohibited on a generic element - axe reports
+   * it under `aria-prohibited-attr` and several screen readers ignore it outright. It would also be
+   * redundant even where permitted, because the accessible name it would supply is the text it already
+   * has.
+   */
+  const messageTitleProps: { title?: string } = isMessageTruncated ? { title: text } : {};
+
   return (
     <Flex align="center" data-testid={MESSAGE_BAND_TEST_IDS[resolvedChannel]} style={bandStyle}>
       {/*
@@ -754,10 +1001,13 @@ export function MessageBand({
        * on every render while resolving to the same slot. `showIcon` is enabled so
        * severity is not carried by colour alone: the icon is additive, the terminal
        * had none, and it is what keeps a red, a green and a turquoise message
-       * distinguishable to a reader who cannot separate those hues.
+       * distinguishable to a reader who cannot separate those hues. The `icon` is
+       * supplied rather than left to the component so it can be hidden from assistive
+       * technology, for the reason recorded at {@link SEVERITY_ALERT_ICONS}.
        */}
       <Alert
-        role={SEVERITY_ALERT_ROLES[severity]}
+        icon={SEVERITY_ALERT_ICONS[resolvedSeverity]}
+        role={SEVERITY_ALERT_ROLES[resolvedSeverity]}
         showIcon
         style={ALERT_STYLE}
         title={
@@ -774,12 +1024,13 @@ export function MessageBand({
               ref={setMessageTextElement}
               style={messageTextStyle}
               {...messageFocusProps}
+              {...messageTitleProps}
             >
               {text}
             </Typography.Text>
           </Tooltip>
         }
-        type={SEVERITY_ALERT_TYPES[severity]}
+        type={SEVERITY_ALERT_TYPES[resolvedSeverity]}
       />
     </Flex>
   );

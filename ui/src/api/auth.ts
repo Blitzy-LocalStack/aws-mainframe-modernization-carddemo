@@ -74,7 +74,14 @@
  * half succeeding, which is the failure mode that division exists to prevent.
  */
 
-import { WITHOUT_STORED_SESSION, getApiClient, keysetPagingMembers, requestPath } from './client';
+import {
+  WITHOUT_STORED_SESSION,
+  getApiClient,
+  keysetPagingMembers,
+  requestPath,
+  requireWithinPublishedWidths,
+  withoutConcurrentDuplicate,
+} from './client';
 import type { AxiosRequestConfig } from 'axios';
 import type {
   ContractOperation,
@@ -297,6 +304,8 @@ export const PASSWORD_MAX_LENGTH = 256;
  *   the request to run to completion, which a caller holding no session generation should do.
  * @returns {Promise<SignOnResult>} The token set when the provider authenticated the caller, or the
  *   challenge it requires to be answered first. Discriminate on `outcome`.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `SignOnRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError`, whose `problem` carries the service's own
  *   sentence: 400 with `fieldErrors` keyed `userId` or `password` for a value outside its domain, and
  *   401 for a credential the provider refused. This is the one operation here that cannot answer 403,
@@ -314,7 +323,10 @@ export async function signOn(
   //   credential the operator is in the middle of replacing.
   const response = await getApiClient().post<SignOnResult>(
     requestPath(SIGN_ON),
-    request,
+    // Assumptions: the credential is bound-checked BEFORE dispatch, and this is the operation where
+    //   that matters most: a 10,000-character password would otherwise be transmitted, logged as a
+    //   request size, and only then refused. The guard names the member and never the value.
+    requireWithinPublishedWidths('SignOnRequest', request),
     sessionExchangeConfig(signal),
   );
 
@@ -347,6 +359,8 @@ export async function signOn(
  *   rotation its `refreshToken` carries the successor that replaces the token just presented, so a
  *   caller must store it; the member stays nullable for a pool configured without rotation, and a null
  *   means the held one remains current and must not be overwritten with the null.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `TokenRefreshRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError`: 401 when the refresh token has been revoked or
  *   has expired, which a caller treats as a completed sign-out rather than as a retryable failure.
  */
@@ -363,7 +377,7 @@ export async function refreshTokens(
   //   The credential this operation actually presents is the refresh token, in the body.
   const response = await getApiClient().post<SignOnTokens>(
     requestPath(REFRESH_TOKENS),
-    request,
+    requireWithinPublishedWidths('TokenRefreshRequest', request),
     sessionExchangeConfig(signal),
   );
   return response.data;
@@ -378,6 +392,8 @@ export async function refreshTokens(
  * @param {AbortSignal} [signal] - Signal that abandons the exchange when the session it completes has
  *   been superseded.
  * @returns {Promise<SignOnTokens>} The token set issued once the replacement credential was accepted.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `SignOnChallengeRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError`: 400 for a credential the provider's policy
  *   rejects, and 401 for a session that has expired, which obliges a fresh sign-on.
  */
@@ -394,7 +410,7 @@ export async function answerSignOnChallenge(
   //   The credential here is the continuation handle and the replacement password, both in the body.
   const response = await getApiClient().post<SignOnTokens>(
     requestPath(ANSWER_SIGN_ON_CHALLENGE),
-    request,
+    requireWithinPublishedWidths('SignOnChallengeRequest', request),
     sessionExchangeConfig(signal),
   );
   return response.data;
@@ -424,6 +440,8 @@ export async function answerSignOnChallenge(
  *   answers `204` both for a token it revoked and for one it declines to accept -- already revoked,
  *   expired, or not a revocable type -- because each of those states describes a token that can no longer
  *   mint anything, and distinguishing them would tell an unauthenticated caller whether a token was live.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `SignOutRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError`: 400 with a `refreshToken` field error for an absent
  *   or over-long token, and 500 when the provider could not be reached, in which case nothing was
  *   revoked. It cannot answer 401 or 403, because it requires no authority to call.
@@ -441,7 +459,11 @@ export async function signOut(refreshToken: string): Promise<void> {
   //   nothing left to accomplish and abandoning it is free. This one ENDS a session: the event that
   //   would supersede it is the sign-out itself, and abandoning it would leave the very token the call
   //   exists to revoke alive at the provider. It must be allowed to finish.
-  await getApiClient().post<void>(requestPath(SIGN_OUT), request, WITHOUT_STORED_SESSION);
+  await getApiClient().post<void>(
+    requestPath(SIGN_OUT),
+    requireWithinPublishedWidths('SignOutRequest', request),
+    WITHOUT_STORED_SESSION,
+  );
 }
 
 // WHY : Alternatives Considered: positioning the browse by a page number, a row offset or a page
@@ -563,6 +585,8 @@ export async function listUsers(query: UserListQuery = {}): Promise<PageResponse
  *   screen validates them. No credential is among them, because the provider mints the initial one.
  * @returns {Promise<CreatedUserResponse>} The created user on 201, carrying the subject the provider
  *   minted and the name of the managed-secret entry holding its one-time credential.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `CreateUserRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError`: 400 with `fieldErrors` keyed `firstName`,
  *   `lastName`, `userId` or `userType` in that cascade order, 401, 403 for a caller outside the
  *   administrative group, and 409 when the identifier is already taken -- the branch the baseline
@@ -573,7 +597,11 @@ export async function listUsers(query: UserListQuery = {}): Promise<PageResponse
 export async function createUser(request: CreateUserRequest): Promise<CreatedUserResponse> {
   const response = await getApiClient().post<CreatedUserResponse>(
     requestPath(CREATE_USER),
-    request,
+    // Assumptions: this is the measured case. `POST /auth/users` answered 201 for a body whose
+    //   `firstName` held 10,000 characters against a copybook width of 20, because the create screen's
+    //   `maxLength` attribute constrains typing and not sending. The guard closes the gap for every
+    //   member of the schema rather than for the one the sweep happened to drive.
+    requireWithinPublishedWidths('CreateUserRequest', request),
   );
   return response.data;
 }
@@ -597,6 +625,8 @@ export async function getUser(userId: string): Promise<UserResponse> {
  * @param {UpdateUserRequest} request - The three values an update accepts, in the order the update
  *   screen validates them. The identifier is not among them and neither is a credential.
  * @returns {Promise<UserResponse>} The user as stored after the change.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `UpdateUserRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} The normalised `ApiRequestError`: 400 with `fieldErrors` keyed `firstName`,
  *   `lastName` or `userType` in that cascade order, 401, 403 for a caller outside the administrative
  *   group, and 404 when no row carries the identifier.
@@ -607,7 +637,7 @@ export async function updateUser(
 ): Promise<UserResponse> {
   const response = await getApiClient().put<UserResponse>(
     requestPath(UPDATE_USER, { userId }),
-    request,
+    requireWithinPublishedWidths('UpdateUserRequest', request),
   );
 
   return response.data;
@@ -640,7 +670,19 @@ export async function updateUser(
  *   across as it stands for the same message-fidelity reason as the 409 above.
  */
 export async function deleteUser(userId: string, confirmed: true): Promise<void> {
-  await getApiClient().delete<void>(requestPath(DELETE_USER, { userId }), {
-    params: { confirmed },
-  });
+  const target = requestPath(DELETE_USER, { userId });
+  // Assumptions: a second deletion of the SAME row while the first is still running joins it rather
+  //   than issuing another request, which is the duplicate protection this operation had none of --
+  //   measured against the report submission, which carries an idempotency key while this carried
+  //   nothing. Two deletions of two different rows are unaffected, because the row is part of the key.
+  await withoutConcurrentDuplicate(
+    `DELETE ${target}`,
+    /**
+     * Issues the deletion.
+     * @returns {Promise<void>} Nothing; the operation answers 204 with no body.
+     */
+    async (): Promise<void> => {
+      await getApiClient().delete<void>(target, { params: { confirmed } });
+    },
+  );
 }

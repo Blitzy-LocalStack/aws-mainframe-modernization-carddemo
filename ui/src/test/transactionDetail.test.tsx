@@ -82,12 +82,16 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type * as TransactionsModule from '../api/transactions';
 import type { ApiError, TransactionDetail } from '../api/types';
-import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
-import { PRIMARY_ACTION_AIDS, UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
+// Assumptions: the busy region is located by the identifier its own helper publishes, so a case here
+//   cannot drift from the one place that decides the region's shape.
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
+import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
+import { UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
 import {
   COMMON_MESSAGES,
   PROGRAM_MESSAGES,
   PROGRAM_MESSAGE_SOURCES,
+  REQUEST_IN_PROGRESS,
   SCREEN_TITLES,
   SHARED_MESSAGES,
   SHARED_MESSAGE_SOURCES,
@@ -783,15 +787,23 @@ function recordTextFor(field: keyof typeof TRANSACTION_DETAIL_FIELD_LABELS): str
  * @returns {RegExp} A pattern matching that token's CSS-variable reference and nothing else.
  */
 function cssVariableReferenceFor(tokenName: string): RegExp {
-  const kebab = tokenName.replace(
-    /[A-Z]/gu,
-    /**
-     * Lowercases one capital and prefixes it with a hyphen.
-     * @param {string} capital - The matched capital letter.
-     * @returns {string} The hyphenated, lowercased replacement.
-     */
-    (capital: string): string => `-${capital.toLowerCase()}`,
-  );
+  const kebab = tokenName
+    .replace(
+      /[A-Z]/gu,
+      /**
+       * Lowercases one capital and prefixes it with a hyphen.
+       * @param {string} capital - The matched capital letter.
+       * @returns {string} The hyphenated, lowercased replacement.
+       */
+      (capital: string): string => `-${capital.toLowerCase()}`,
+    )
+    // WHY : Assumptions: antd's variable naming hyphenates a DIGIT run as well as a capital, so the
+    //       ramp token `red7` is published as `--ant-red-7` and not `--ant-red7`. The rule was
+    //       capital-only while every token this helper was given happened to be a camel-case alias;
+    //       the error-ramp entry in `ui/src/theme/tokens.ts` is the first ramp member to reach it, and
+    //       without this clause the helper builds a variable name antd never emits and the assertion
+    //       fails for a reason that has nothing to do with the property under test.
+    .replace(/([a-z])(\d)/gu, '$1-$2');
   return new RegExp(`^var\\(--[a-z0-9]+-${kebab}\\)$`, 'u');
 }
 
@@ -1448,21 +1460,24 @@ async function paintsExactlyTheFourKeysTheMapsetDoes(): Promise<void> {
 }
 
 /**
- * Asserts that Enter and PF5 carry the primary emphasis and PF3 and PF4 the default.
+ * Asserts that no control on this legend carries the primary emphasis.
  *
- * Assumptions: the split is AAP section 0.3.2's design-system mapping and
- * `ui/src/layout/PfKeyBar.tsx` publishes it as `PRIMARY_ACTION_AIDS`, so the expectation is derived
- * from that constant rather than written out -- a change to the mapping moves this assertion with it
- * instead of leaving a literal here disagreeing with the component.
+ * ⚠️ Refactoring Rationale: this case previously required Enter and PF5 to be emphasised, deriving
+ * that from `PRIMARY_ACTION_AIDS`, and both halves of that are now wrong for this screen. The
+ * `PfKeyBar` fallback emphasises those two identifiers on every screen that binds them, which is a
+ * reading taken from the mapsets where Enter submits and PF5 saves. On THIS mapset
+ * `app/bms/COTRN01.bms` L267 paints `F5=Browse Tran.` and `app/cbl/COTRN01C.cbl` L112-L132 answers it
+ * by transferring to the browse, so the key navigates; the screen therefore declares
+ * `risk: 'read-only'` on all four bindings and the shared `pfKeyEmphasisFor` resolves every one of
+ * them to the default variant. The note this replaces argued the emphasis "says 'this is the key an
+ * operator reaches for'"; under the risk taxonomy it says what the key DOES, so a screen with no write
+ * paints nothing solid.
  *
- * ⚠️ Assumptions: PF5 keeps the primary treatment even though on THIS screen it is navigation rather
- * than a save. `ui/src/layout/PfKeyBar.tsx` decides emphasis from the AID and not from the semantic
- * action, which is why the screen's override of PF5's action to `screen-defined` leaves the
- * appearance alone -- the emphasis says "this is the key an operator reaches for", and on a read-only
- * screen that is the fetch and the browse.
+ * ⚠️ Assumptions: the negative is asserted on all four identifiers rather than on Enter alone,
+ * because a claim about one control would pass against a legend that had emphasised a different one.
  * @returns {Promise<void>} Completion of the case; the assertions are its effect.
  */
-async function emphasisesTheTwoPrimaryKeysAndNoOthers(): Promise<void> {
+async function emphasisesNoKeyOnAReadOnlyScreen(): Promise<void> {
   await openWithRecord(aTransaction(A_TRANSACTION_ID));
   const emphasisByShortcut = new Map(
     legendControls().map(
@@ -1478,14 +1493,34 @@ async function emphasisesTheTwoPrimaryKeysAndNoOthers(): Promise<void> {
     ),
   );
 
-  expect(PRIMARY_ACTION_AIDS).toStrictEqual(['ENTER', 'PFK05']);
-  expect(emphasisByShortcut.get('Enter')).toBe(true);
-  expect(emphasisByShortcut.get('F5')).toBe(true);
-  expect(emphasisByShortcut.get('F3')).toBe(false);
-  expect(emphasisByShortcut.get('F4')).toBe(false);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the expectation is now a flat `false` for every identifier, and it
+   *       used to be `PRIMARY_ACTION_AIDS.includes(aid)`. Deriving it from that constant made this case
+   *       an obstacle rather than a guard, exactly as the note it replaces conceded: the constant
+   *       emphasises Enter and PF5 on every screen, so a case reading it could never report that a
+   *       read-only screen was painting two primary controls. The screen now declares its own risk, so
+   *       the expectation is stated from the mapset instead -- four read-only labels, four default
+   *       controls.
+   * WHY : Assumptions: the mapping from an identifier to the browser key the control advertises is
+   *       taken from the screen's own legend rather than from a table written here, so the case reads
+   *       the same four identifiers the reference's `EVALUATE` at `app/cbl/COTRN01C.cbl` L112-L132
+   *       admits.
+   */
+  const shortcutByAid: Record<string, string> = {
+    ENTER: 'Enter',
+    PFK03: 'F3',
+    PFK04: 'F4',
+    PFK05: 'F5',
+  };
+
+  for (const shortcut of Object.values(shortcutByAid)) {
+    expect({ shortcut, emphasised: emphasisByShortcut.get(shortcut) }).toEqual({
+      shortcut,
+      emphasised: false,
+    });
+  }
   for (const control of legendControls()) {
-    const primary = control.classList.contains('ant-btn-primary');
-    expect(control).toHaveClass(primary ? 'ant-btn-primary' : 'ant-btn-default');
+    expect(control).toHaveClass('ant-btn-default');
   }
 }
 
@@ -1558,6 +1593,36 @@ async function clearsOnThePfFourKeyAndOnTheClearControlAlike(): Promise<void> {
 
   await rendered.user.click(legendControlFor('F4'));
   expectTheClearedScreen();
+}
+
+/**
+ * Asserts that an outstanding read is ANNOUNCED and not only spun.
+ *
+ * ⚠️ Purpose: this screen states an in-flight read with an antd `Spin` in the record region, which is
+ * a purely visual statement -- the component carries no accessible name and announces nothing -- so an
+ * operator using a screen reader was told the record had disappeared and nothing about why. The
+ * announcement is the same fact stated in the one channel that reaches them.
+ *
+ * ⚠️ Assumptions: the region is asserted PRESENT AND EMPTY before the read is answered as well as
+ * after, not merely absent-then-present. A live region has to be in the accessibility tree before its
+ * content changes for the change to be announced at all, so a screen rendering it only while loading
+ * would lose the transition into the busy state -- which is the transition that matters. Asserting
+ * presence in both states is what distinguishes a correct implementation from that one.
+ *
+ * Assumptions: the sentence is read from the catalog rather than typed here. `REQUEST_IN_PROGRESS` is
+ * authored -- the reference locks the keyboard and says nothing, so there is no verbatim wording to
+ * carry across -- and reading it from the catalog is what keeps this case from pinning a second copy.
+ * @returns {Promise<void>} Completion of the case; the assertions are its effect.
+ */
+async function announcesAnOutstandingRead(): Promise<void> {
+  const held = armHeldRead();
+  await openTheDetailScreen(`${TRANSACTION_LIST_PATH}/${A_TRANSACTION_ID}`);
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  await held.answerWith(aTransaction(A_TRANSACTION_ID));
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
 }
 
 /**
@@ -1745,6 +1810,193 @@ async function establishesIdentityOnlyThroughTheSanctionedSignOn(): Promise<void
 }
 
 /**
+ * Reads the antd alert variant the row-23 band currently renders, or `null` when it renders none.
+ *
+ * Assumptions: the variant is read from the CLASS antd emits rather than from a prop, because what
+ * the review measured was a rendered class -- an `ant-alert-info` standing inside the outcome band --
+ * and a prop assertion would pass for a band that resolved the prop and then rendered something else.
+ *
+ * Assumptions: the alert is looked for INSIDE the band element rather than across the document,
+ * because `ui/src/layout/MessageBand.tsx` renders the alert as a child of the element carrying the
+ * band identifier. Querying the document would also match an alert a screen had composed for itself,
+ * which is a different defect and is asserted separately below.
+ * @returns {string | null} The variant suffix antd emitted -- `error`, `success` or `info` -- or
+ *   `null` when the band is in its reserved-space state and holds no alert at all.
+ * @throws {Error} If the band element is absent, which Testing Library raises.
+ */
+function bandAlertVariant(): string | null {
+  const band = screen.getByTestId(MESSAGE_BAND_TEST_ID);
+  for (const variant of ['error', 'success', 'info']) {
+    if (band.querySelector(`.ant-alert-${variant}`) !== null) {
+      return variant;
+    }
+  }
+  return null;
+}
+
+/**
+ * A sentence to stand in for one the service sends on a successful read.
+ *
+ * ⚠️ Assumptions: its WORDING is not under test and is deliberately not chosen for meaning. It is
+ * taken from the catalog rather than written here because transformation rule T8 admits only operator
+ * strings a program actually produces, and `PROGRAM_MESSAGES.COTRN01C` carries exactly ONE entry --
+ * which is itself the oracle this case rests on. `app/cbl/COTRN01C.cbl` L91 blanks `WS-MESSAGE` on
+ * every entry and no arm of a successful read sets it, so the program authors no success sentence and
+ * there is no semantically right one to reach for. What is under test is the CHANNEL and the VARIANT
+ * the band renders whatever the sentence says.
+ */
+const A_SERVICE_AUTHORED_SENTENCE = PROGRAM_MESSAGES.COTRN01C.TRAN_ID_CAN_NOT_BE_EMPTY;
+
+/**
+ * Asserts that a sentence arriving with a retrieved record is painted in the channel's own severity.
+ *
+ * ⚠️ Purpose: this is the case that catches the measured defect. The successful arm named the `info`
+ * severity, so a reply the service sent alongside a record was rendered as an `ant-alert-info` INSIDE
+ * the row-23 outcome band -- informational-looking content in the error channel, which a rendering
+ * review found on four of seventeen routes and which is the same defect as the same screen drawing a
+ * severity no other screen draws for the same class of event.
+ *
+ * ⚠️ Assumptions: the expected variant is `error` because this mapset declares exactly one message
+ * field and declares it red: `app/bms/COTRN01.bms` L259-L262 is `ERRMSG ATTRB=(ASKIP,BRT,FSET)
+ * COLOR=RED LENGTH=78 POS=(23,1)`, and `app/cbl/COTRN01C.cbl` L217 is the single
+ * `MOVE WS-MESSAGE TO ERRMSGO` every arm of the program reaches. There is therefore no arm-dependent
+ * colour to reproduce, which is why the screen names no severity at all and the band resolves it from
+ * `MESSAGE_BAND_CHANNELS`.
+ *
+ * ⚠️ Assumptions: the absence of a row-22 band is asserted as well, and it is the other half of the
+ * finding. Moving the sentence to the information channel would have removed the alert from the error
+ * band -- but this mapset has no row-22 field to move it to. `INFOMSG` is declared by five of the
+ * twenty-one mapsets (`COACTUP`, `COACTVW`, `COCRDLI`, `COCRDSL`, `COCRDUP`) and not by this one, and
+ * `ShellMessageSlot.information` in `ui/src/layout/AppShell.tsx` states that the member's absence
+ * means precisely that. So a row-22 band appearing here would be a terminal row the screen never had.
+ *
+ * Assumptions: the band count is asserted at one, because the other measured shape of this defect is
+ * a screen composing a second band of its own inside `<main>` while the shell's stands empty. One
+ * element carrying the row-23 identifier is what proves the screen delegated rather than composed.
+ * @returns {Promise<void>} Completion of the case; the assertions are its effect.
+ */
+async function paintsAServiceSentenceInTheChannelsOwnSeverity(): Promise<void> {
+  await openWithRecord({
+    ...aTransaction(A_TRANSACTION_ID),
+    returnMessage: A_SERVICE_AUTHORED_SENTENCE,
+  });
+
+  expectBandSentence(A_SERVICE_AUTHORED_SENTENCE);
+  expect(bandAlertVariant()).toBe('error');
+  expect(screen.queryAllByTestId(MESSAGE_BAND_TEST_ID)).toHaveLength(1);
+  expect(screen.queryByTestId(INFORMATION_BAND_TEST_ID)).toBeNull();
+  // WHY : Assumptions: the record is asserted present as well, so the case cannot pass by having
+  //       failed the read -- a refusal would also band a sentence in the error variant.
+  expect(recordTextFor('transactionId')).toBe(A_TRANSACTION_ID);
+}
+
+/**
+ * Asserts that an ordinary successful read leaves the outcome band holding nothing at all.
+ *
+ * Assumptions: this is the reference's own rendering and is asserted separately from the case above
+ * because it exercises the other value the contract admits.
+ * `services/transaction-service/src/main/resources/openapi/transaction-api.yaml` L2473-L2479 records
+ * that \"a successful read sets no message, so null is the ordinary value here\", and
+ * `app/cbl/COTRN01C.cbl` L91 is why: `WS-MESSAGE` is blanked on entry and no successful arm writes it,
+ * so `ERRMSGO` is blank on the map the operator receives.
+ *
+ * Assumptions: the ABSENCE of an alert is asserted rather than an empty string alone, because
+ * `ui/src/layout/MessageBand.tsx` renders a reserved-height element with no alert in it when the
+ * message is empty -- so a band holding an empty alert would read as blank text while still occupying
+ * the accessibility tree with a severity.
+ * @returns {Promise<void>} Completion of the case; the assertions are its effect.
+ */
+async function leavesTheOutcomeBandBlankOnAnOrdinaryRead(): Promise<void> {
+  const record = aTransaction(A_TRANSACTION_ID);
+  await openWithRecord(record);
+
+  expect(record.returnMessage).toBeNull();
+  expect(bandText()).toBe('');
+  expect(bandAlertVariant()).toBeNull();
+  expect(screen.queryByTestId(INFORMATION_BAND_TEST_ID)).toBeNull();
+}
+
+/**
+ * Asserts that the merchant's city and postal code render in one typeface, and money still in the code face.
+ *
+ * ⚠️ Purpose: a browser review measured these two values side by side in one row holding identical
+ * text in two typefaces -- the city proportional and the postal code fixed-pitch. At the two-column
+ * width they ARE one row: `buildRecordItems` emits them twelfth and thirteenth and closes three
+ * earlier rows with `span: 'filled'`, so the pairing is deterministic rather than incidental.
+ *
+ * ⚠️ Assumptions: the mapset draws no distinction between them, which is what makes the split a
+ * defect rather than a transcription. `app/bms/COTRN01.bms` L240-L243 declares `MCITY` and L252-L255
+ * declares `MZIP` with the same `ATTRB=(ASKIP,NORM)` and the same `COLOR=BLUE`, differing only in
+ * `LENGTH` and `POS`; `TRAN-MERCHANT-CITY PIC X(50)` and `TRAN-MERCHANT-ZIP PIC X(10)` at
+ * `app/cpy/CVTRA05Y.cpy` L13-L14 are both alphanumeric. `ui/src/screens/accountView/index.tsx`
+ * L992-L995 reaches the same answer independently, rendering its own postal code with
+ * `monetary: false`.
+ *
+ * ⚠️ Assumptions: the amount is asserted STILL in the code face in the same case, so the fix cannot
+ * be over-applied. Withdrawing the code face from every value would also remove this split and would
+ * be wrong: money and timestamps are columnar and their positions have to line up, which is the
+ * distinction the screen's own policy comment records.
+ *
+ * Assumptions: the two faces are compared for EQUALITY rather than each asserted against a literal
+ * family, so no design value is written in this file -- the design system's zero-hardcoded-values rule
+ * applies to a test as much as to a screen, and the code token is referenced through
+ * `cssVariableReferenceFor` for the one assertion that needs to name it.
+ * @returns {Promise<void>} Completion of the case; the assertions are its effect.
+ */
+async function rendersTheMerchantAddressInOneTypeface(): Promise<void> {
+  await openWithRecord(aTransaction(A_TRANSACTION_ID));
+
+  const city = recordValueFor('merchantCity');
+  const zip = recordValueFor('merchantZip');
+  const codeFace = cssVariableReferenceFor(TYPOGRAPHY_TOKENS.fixedPitchData);
+
+  expect(zip.style.fontFamily).toBe(city.style.fontFamily);
+  expect(codeFace.test(zip.style.fontFamily)).toBe(false);
+  expect(recordValueFor('amount').style.fontFamily).toMatch(codeFace);
+}
+
+/**
+ * Asserts that the record grid emits exactly one cell per field and no empty cell beside them.
+ *
+ * ⚠️ Purpose: the dead-markup half of the finding this screen is cited under. A rendering review
+ * found a sibling record screen emitting a trailing grid row of three empty columns, so the same
+ * question has to be answered here rather than assumed -- and the answer is a census, not a claim.
+ *
+ * ⚠️ Assumptions: the census is the right instrument because the defect is a cell with no field
+ * behind it, which no assertion about a named field can see. Thirteen labels and thirteen contents
+ * with nothing left over proves that every cell the grid emits is one the record asked for.
+ *
+ * ⚠️ Assumptions: the count is thirteen because that is what the mapset paints -- `app/bms/COTRN01.bms`
+ * declares thirteen data-field pairs across its rows 10 to 20 -- and the census is taken on the FULL
+ * record rather than on a cleared screen, since a cleared screen blanks the thirteen values while the
+ * thirteen labels stand (`INITIALIZE-ALL-FIELDS` at `app/cbl/COTRN01C.cbl` L309-L326) and would give
+ * the same counts for a different reason.
+ *
+ * ⚠️ Assumptions: the emptiness half is scoped to the grid and NOT to every column in the screen,
+ * which would look like the stronger assertion and is in fact a false one: the lookup control's own
+ * column holds an `<input>`, whose value is a property rather than text, so a text-emptiness census
+ * across the form would report that column empty on a screen that was rendering correctly.
+ * @returns {Promise<void>} Completion of the case; the assertions are its effect.
+ */
+async function emitsOneGridCellPerFieldAndNoOther(): Promise<void> {
+  await openWithRecord(aTransaction(A_TRANSACTION_ID));
+
+  const grid = screen.getByText(TRANSACTION_DETAIL_FIELD_LABELS.transactionId).closest('table');
+  expect(grid).not.toBeNull();
+
+  const labels = grid?.querySelectorAll('.ant-descriptions-item-label') ?? [];
+  const contents = grid?.querySelectorAll('.ant-descriptions-item-content') ?? [];
+  const declaredFields = Object.keys(TRANSACTION_DETAIL_FIELD_LABELS).length;
+
+  expect(declaredFields).toBe(13);
+  expect(labels).toHaveLength(declaredFields);
+  expect(contents).toHaveLength(declaredFields);
+  for (const label of labels) {
+    expect((label.textContent ?? '').length).toBeGreaterThan(0);
+  }
+}
+
+/**
  * Registers every transaction-detail case with the runner.
  *
  * Assumptions: each case is a hoisted NAMED function passed to `it` by name rather than an inline
@@ -1805,8 +2057,19 @@ function transactionDetailCases(): void {
     'reports an unbound key with the fifty-character sentence',
     reportsAnUnboundKeyWithTheFiftyCharacterSentence,
   );
+  it(
+    "paints a service sentence in the channel's own severity",
+    paintsAServiceSentenceInTheChannelsOwnSeverity,
+  );
+  it(
+    'leaves the outcome band blank on an ordinary read',
+    leavesTheOutcomeBandBlankOnAnOrdinaryRead,
+  );
+  it('renders the merchant address in one typeface', rendersTheMerchantAddressInOneTypeface);
+  it('emits one grid cell per field and no other', emitsOneGridCellPerFieldAndNoOther);
   it('paints exactly the four keys the mapset does', paintsExactlyTheFourKeysTheMapsetDoes);
-  it('emphasises the two primary keys and no others', emphasisesTheTwoPrimaryKeysAndNoOthers);
+  it('emphasises no key on a read-only screen', emphasisesNoKeyOnAReadOnlyScreen);
+  it('announces an outstanding read', announcesAnOutstandingRead);
   it(
     'fetches on the Enter key and on the Enter control alike',
     fetchesOnTheEnterKeyAndOnTheEnterControlAlike,

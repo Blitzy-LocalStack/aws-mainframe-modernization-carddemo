@@ -134,7 +134,60 @@ export const DEFAULT_PF_KEY_ACTIONS: Readonly<Partial<Record<CicsAid, PfKeyActio
   });
 
 /**
- * Reason that a recognized CICS AID could not be dispatched.
+ * How much a registered PF key's action RISKS, which is what its emphasis must report.
+ *
+ * The three members are ordered by consequence and are mutually exclusive:
+ *
+ * - `'read-only'` — the action reads or navigates and writes nothing. `ENTER=Fetch` on
+ *   `app/bms/COUSR03.bms:L148`, `F5=Browse Tran.` on `app/bms/COTRN01.bms:L267`, every paging key,
+ *   `F3=Exit`, `F4=Clear` and `F12=Cancel`. Pressing it twice by accident costs a round trip.
+ * - `'mutating'` — the action writes a record the operator can come back and edit. `F5=Save` on
+ *   `app/bms/COACTUP.bms`, `ENTER=Add User` on `app/bms/COUSR01.bms:L159`, and `F3=Save&&Exit` on
+ *   `app/bms/COUSR02.bms:L163`. Pressing it twice writes twice.
+ * - `'destructive'` — the action destroys a record, so it cannot be undone from the screen that
+ *   offered it. `F5=Delete` on `app/bms/COUSR03.bms:L148`, `F4=Delete` on the transaction-type
+ *   extension's edit map, and marking an authorization as fraud.
+ *
+ * ⚠️ Refactoring Rationale: a bill payment was listed under `'destructive'` here and is not one.
+ * `app/cbl/COBIL00C.cbl` L173-L191 writes a transaction record and reduces the account balance,
+ * which is a record the operator can come back to - the transaction is listed on
+ * `app/bms/COTRN00.bms` and viewable on `app/bms/COTRN01.bms` - so it is `'mutating'`, and that is
+ * what the screen declares. Assumptions: the wording "or moves money" is withdrawn with it, because
+ * moving money is not the test. The test is whether the record survives the action: a payment adds
+ * one, a delete removes one. Leaving the entry would have told the next screen to paint its paying
+ * Enter as a danger control, which overstates a posting the ledger keeps a full record of and
+ * devalues the emphasis on the deletes that genuinely cannot be walked back.
+ *
+ * Assumptions: the distinction is what the action DOES to stored state, never how alarming its
+ * label reads and never which key carries it. That is the whole point of the member existing:
+ * `PFK05` is `F5=Delete` on `app/bms/COUSR03.bms:L148` and `F5=Save` on `app/bms/COACTUP.bms`, and
+ * `PFK03` is `F3=Back` on nine mapsets and `F3=Save&&Exit` on `app/bms/COUSR02.bms:L163`, so no
+ * mapping from AID to risk can be right on more than a subset of screens. A screen states its own.
+ *
+ * Assumptions: `'mutating'` and `'destructive'` are two members rather than one boolean because
+ * `ui/src/layout/PfKeyBar.tsx` resolves them to two DIFFERENT emphases — a save must read as the
+ * screen's primary action while a delete must read as the dangerous one — and a boolean could only
+ * express one of those two distinctions. Collapsing them would put a delete and a save in the same
+ * paint, which is the defect the member was added to fix.
+ *
+ * Trade-offs: the member is OPTIONAL wherever it appears, so a screen that states nothing keeps the
+ * emphasis it has today. Making it required would have been the stronger contract and would have
+ * forced every one of the 21 screens to answer at once; the cost accepted is that an un-stated key
+ * falls back to the AID-keyed default, which is documented at
+ * `ui/src/layout/PfKeyBar.tsx`'s `PRIMARY_ACTION_AIDS` and is right for the majority case and
+ * wrong for exactly the minority this union exists to describe.
+ */
+export type PfKeyRisk = 'read-only' | 'mutating' | 'destructive';
+
+/**
+ * Reason that a recognized CICS AID could not be dispatched and WAS reported.
+ *
+ * Assumptions: the union stays at two members even though {@link usePfKeys}' dispatch chain now
+ * declines an AID three ways. A key whose own turn is still in flight — see
+ * {@link PfKeyHandlerEntry.busy} — is declined silently and never appears here, because it is a
+ * VALID key that arrived early: reporting the baseline's invalid-key text for it would tell the
+ * operator the key does not work, which is a different and false statement. Adding a third member
+ * would also route that case into `onInvalidKey`, and every screen wires that to its error band.
  */
 export type PfKeyRejectionReason = 'unmapped' | 'disabled';
 
@@ -177,6 +230,43 @@ export interface PfKeyHandlerEntry {
    * application error boundary.
    */
   readonly disabled?: boolean | (() => boolean);
+  /**
+   * What this key's action risks, which fixes the emphasis `PfKeyBar` paints it with.
+   *
+   * Assumptions: omitting it is a statement that the screen has not classified the key, not a
+   * statement that the key is safe. `PfKeyBar` then falls back to its AID-keyed default, so a
+   * screen that says nothing renders exactly as it does today. See {@link PfKeyRisk} for the three
+   * members and for why no default can be derived from the AID.
+   */
+  readonly risk?: PfKeyRisk;
+  /**
+   * Evaluates whether THIS key's own turn is still in flight.
+   *
+   * Purpose: give a screen a way to say "the turn you started with this key has not come back
+   * yet". A measured double-submit found the pressed control left indistinguishable from idle on
+   * three read actions — two clicks 400 ms apart produced two identical requests and a list that
+   * displayed page 2 while reporting page 3 — because the only busy affordance in the frame was the
+   * table's own spinner, which is nowhere near the control that was pressed.
+   *
+   * Assumptions: the flag is PER KEY and not per screen, so a long-running read on one key leaves
+   * every other key live. That matches the reference, where a transaction in flight inhibited the
+   * whole terminal but the operator's next attention key was queued against the SAME turn, and it
+   * matters here because a screen must stay escapable: `F3=Exit` has to work while a fetch is
+   * outstanding.
+   *
+   * Assumptions: the predicate form exists for the same reason `disabled`'s does — a screen holding
+   * its in-flight state in a ref rather than in state can answer from the ref, which is the pattern
+   * three screens in this tree already use to make their guard effective on the same task as the
+   * click rather than one render later.
+   *
+   * Trade-offs: a screen that sets this and never clears it leaves the key permanently announced as
+   * busy and, per {@link usePfKeys}, permanently undispatchable. That is the same hazard `disabled`
+   * already carries, and it is accepted for the same reason: the alternative is a timeout in this
+   * module, which would have to guess a duration the screen knows and this module does not.
+   * @returns {boolean} `true` while this key's turn is outstanding.
+   * @throws {unknown} Screen-owned predicate failures propagate to the application error boundary.
+   */
+  readonly busy?: boolean | (() => boolean);
 }
 
 /**
@@ -196,6 +286,27 @@ export interface PfKeyBinding {
   readonly label: string;
   /** Whether the binding can be invoked in the current render. */
   readonly enabled: boolean;
+  /**
+   * What the key's action risks, when the screen classified it; absent when it did not.
+   *
+   * Assumptions: absence is carried through as an ABSENT MEMBER rather than as a default value,
+   * because the renderer has to be able to tell "this screen says the key is read-only" from "this
+   * screen has not said", and those two resolve to different emphases —
+   * `ui/src/layout/PfKeyBar.tsx` de-emphasises the first and applies its AID-keyed fallback to the
+   * second. Substituting a default here would erase that distinction before the renderer sees it.
+   */
+  readonly risk?: PfKeyRisk;
+  /**
+   * Whether this key's own turn is in flight, when the screen reports it; absent when it does not.
+   *
+   * Assumptions: absence is again an absent member rather than `false`, and the difference is
+   * visible. `ui/src/layout/PfKeyBar.tsx` reserves the busy affordance's own box on a control that
+   * participates in this channel — including while the value is `false` — so that the affordance
+   * appearing cannot change the control's width; a control that never participates reserves nothing
+   * and renders exactly as it does today. So `false` means "not busy now, and this key can become
+   * busy", and absence means "this key never reports busy".
+   */
+  readonly busy?: boolean;
 }
 
 /**
@@ -449,6 +560,35 @@ function isHandlerDisabled(entry: PfKeyHandlerEntry): boolean {
 }
 
 /**
+ * Evaluates a handler's static or live-state in-flight report.
+ *
+ * Assumptions: an omitted `busy` answers `undefined` rather than `false`, and the two are not
+ * interchangeable here. {@link PfKeyBinding.busy} carries the distinction to the renderer, which
+ * reserves the affordance's box for a key that reports `false` and reserves nothing for a key that
+ * reports nothing — so collapsing them in this function would take a rendering decision away from
+ * the component that owns it.
+ *
+ * Assumptions: a predicate is evaluated on every call, exactly as {@link isHandlerDisabled}
+ * evaluates its own. Both are consulted from `createBindings` during render and from `invoke` at
+ * dispatch, so a screen answering from a ref sees the ref's value at the moment of the question
+ * rather than the value it held when the map was built.
+ *
+ * @param {PfKeyHandlerEntry} entry - Registered handler entry to inspect.
+ * @returns {boolean | undefined} `true` or `false` when the screen reports on this key, and
+ * `undefined` when it does not report at all.
+ * @throws {unknown} Propagates an exception raised by a screen-owned predicate.
+ */
+function resolveHandlerBusy(entry: PfKeyHandlerEntry): boolean | undefined {
+  const { busy } = entry;
+
+  if (busy === undefined) {
+    return undefined;
+  }
+
+  return typeof busy === 'function' ? busy() : busy;
+}
+
+/**
  * Selects presentation semantics for one registered handler.
  *
  * @param {CicsAid} aid - Canonical AID represented by the handler.
@@ -500,7 +640,7 @@ function reportRejectedAid(
  * @param {UsePfKeysOptions} options - Current global enabled state.
  * @returns {readonly PfKeyBinding[]} Ordered render metadata for registered
  * handlers only.
- * @throws {unknown} Propagates an exception raised by a disabled predicate.
+ * @throws {unknown} Propagates an exception raised by a disabled or busy predicate.
  */
 function createBindings(
   handlers: PfKeyHandlerMap,
@@ -516,11 +656,20 @@ function createBindings(
       continue;
     }
 
+    // Assumptions: the two optional members are spread conditionally rather than assigned a
+    // possibly-`undefined` value, because `exactOptionalPropertyTypes` in `ui/tsconfig.json`
+    // distinguishes an omitted property from one explicitly set to `undefined` — and that
+    // distinction is exactly what `PfKeyBinding.busy` and `PfKeyBinding.risk` carry, so writing
+    // `{ busy: undefined }` would both fail to compile and, if it did compile, defeat the contract.
+    const busy = resolveHandlerBusy(entry);
+
     bindings.push({
       action: resolveAction(aid, entry),
       aid,
       enabled: screenEnabled && !isHandlerDisabled(entry),
       label: entry.label ?? '',
+      ...(busy === undefined ? {} : { busy }),
+      ...(entry.risk === undefined ? {} : { risk: entry.risk }),
     });
   }
 
@@ -534,6 +683,13 @@ function createBindings(
  * for `PfKeyBar` button clicks. Both input paths read the latest handler map,
  * evaluate live disabled predicates, report invalid AIDs through the imported
  * COBOL message, and optionally restore focus.
+ *
+ * Assumptions: dispatch declines an AID THREE ways and only two of them are reported. An unmapped
+ * AID and a disabled one raise {@link PfKeyRejection} carrying the baseline's own invalid-key text;
+ * an AID whose own turn is still in flight — {@link PfKeyHandlerEntry.busy} — is declined with no
+ * message at all, because the reference inhibited the keyboard for the duration of a task and
+ * discarded what was typed into it rather than answering it. The rationale is written out at the
+ * gate itself, inside `invoke`.
  *
  * Alternatives Considered: A synthetic event bus was rejected because it could
  * diverge from the browser path used by the keyboard-first application.
@@ -625,6 +781,26 @@ export function usePfKeys(
 
       if (isHandlerDisabled(entry)) {
         reportRejectedAid(aid, 'disabled', state.options);
+        return false;
+      }
+
+      // Assumptions: a key whose own turn is still in flight is declined SILENTLY, with no
+      // rejection reported and no focus moved. The reference behaves the same way and for the same
+      // reason: a 3270 inhibits the keyboard for the duration of a task, so an attention key
+      // pressed while the transaction was running never reached a program and no message was ever
+      // painted for it. Reporting `INVALID_KEY_PRESSED` here would put a sentence on the error band
+      // saying the key does not work, when the key works and the operator was early.
+      // Refactoring Rationale: this gate is in `invoke` rather than only in the rendered control,
+      // even though the design system's own button already swallows a click while it is loading
+      // (`ui/node_modules/antd/lib/button/Button.js` L195-L202 returns before `onClick`). Leaving
+      // it there alone would have protected the pointer and left the keyboard unprotected, and the
+      // keyboard is the fidelity-bearing path — a measured double-submit produced two identical
+      // reads 400 ms apart and desynchronised a list, and the same two presses on F8 would do it.
+      // Trade-offs: a screen that reports busy and forgets to clear it makes the key inert. The
+      // alternative, queueing the press and replaying it when the turn returns, was rejected: the
+      // terminal discarded inhibited input rather than buffering it, and replaying a delete after
+      // its own turn came back is the last behaviour a destructive key should have.
+      if (resolveHandlerBusy(entry) === true) {
         return false;
       }
 

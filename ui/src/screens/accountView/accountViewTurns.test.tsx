@@ -397,7 +397,15 @@ async function rendersMoneyThroughTheEditMask(): Promise<void> {
   await user.click(filterControl());
   await user.keyboard('{Enter}');
 
-  expect(await screen.findByText(CUSTOMER.lastName)).toBeInTheDocument();
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the awaited element is NOT the one asserted on. The record blocks
+   *       are painted twice -- `Descriptions` regroups its items when the responsive `column` resolves
+   *       in an effect after the first paint -- so the node `findByText` resolves with is detached by
+   *       the commit that follows, and `toBeInTheDocument` failed on it while the record itself
+   *       rendered correctly. Awaiting the presence and then re-querying reads the DOM as it stands.
+   */
+  await screen.findAllByRole('table');
+  expect(screen.getByText(CUSTOMER.lastName)).toBeInTheDocument();
 
   const main = screen.getByRole('main');
   expect(within(main).getByText('-      1,234.56', EXACT_TEXT)).toBeInTheDocument();

@@ -480,6 +480,75 @@ async function savesAValidatedChangeWithTheIssuedVersion(): Promise<void> {
 }
 
 /**
+ * Asserts a refused save withdraws the save key and that the next Enter restarts at key entry.
+ *
+ * ⚠ WHY : Purpose: this case exists to PIN behaviour a review read as a defect, because the reference
+ *       prescribes all three parts of it and a well-meant repair would diverge from the baseline.
+ *
+ *       The review's reading was that a refused save on this screen "removes `F5=Save`, disables the
+ *       input, and pressing `ENTER=Process` to recover silently wipes the staged edit". Each part is
+ *       transcribed:
+ *
+ *       - The save key goes because `0001-CHECK-PFKEYS` at
+ *         `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L588-L593 accepts `CCARD-AID-PFK05` for
+ *         `TTUP-CHANGES-OK-NOT-CONFIRMED`, `TTUP-DETAILS-NOT-FOUND` and `TTUP-DELETE-IN-PROGRESS` and
+ *         for nothing else, and `3391-SETUP-PFKEY-ATTRS` L1411-L1414 brightens its legend for the first
+ *         two. A refused write is `TTUP-CHANGES-OKAYED-BUT-FAILED`, which is none of them.
+ *       - The staged edit goes because L405-L419 evaluates `WHEN TTUP-CHANGES-FAILED` -- the `88` over
+ *         `'L'` and `'F'` -- and sets `CDEMO-PGM-ENTER` and `TTUP-DETAILS-NOT-FETCHED`, which makes the
+ *         NEXT `EVALUATE`'s arm at L469-L470 match and run `INITIALIZE WS-THIS-PROGCOMMAREA
+ *         WS-MISC-STORAGE CDEMO-ACCT-ID` at L471-L473. `WS-THIS-PROGCOMMAREA` is where
+ *         `TTUP-OLD-DETAILS` and `TTUP-NEW-DETAILS` live, so the before-image and the operator's typed
+ *         replacement are both blanked before the map is re-sent.
+ *       - It is not "silent" in any sense the terminal was: that same `INITIALIZE` blanks
+ *         `WS-RETURN-MSG` too, and `3000-SEND-MAP` then paints the search-key prompt -- exactly what
+ *         this screen paints.
+ *
+ *       Assumptions: the refusal reported before the reset is the SERVICE's own sentence, so the case
+ *       asserts it as well. A repair that swallowed it would satisfy the reset half alone.
+ *
+ *       Trade-offs: the operator does lose a typed description to a refused save and has to retype it.
+ *       That is the baseline's cost and it is preserved deliberately under rule T9: keeping the staged
+ *       value would put this screen in a state the reference has no mode for, and the mode byte is what
+ *       every key decision on the screen reads.
+ * @returns {Promise<void>} Resolves once the refusal and the following reset have been asserted.
+ */
+async function restartsAtKeyEntryAfterARefusedSave(): Promise<void> {
+  serveStoredRow();
+  /*
+   * Assumptions: the sentence asserted is the CATALOGUED one for a refused replace, not the service's
+   * own text. `writeFailureMessage` answers a non-conflict, non-lock refusal with
+   * `TABLE_UPDATE_FAILED`, which is the reference's `'Update of Transaction type failed'` at
+   * `app/app-transaction-type-db2/cbl/COTRTUPC.cbl` L1583-L1584, and the service's diagnostic is
+   * deliberately withheld -- so the case asserts the sentence the screen is contracted to paint rather
+   * than the one the transport happened to carry.
+   */
+  vi.mocked(replaceTransactionType).mockRejectedValue(failureWith(500, 'db diagnostic withheld'));
+  const refusal = EDIT_STATUS.TABLE_UPDATE_FAILED.text;
+  render(renderScreen(STORED.typeCd));
+  await awaitStoredRow();
+
+  const changed = 'PAYMENT REVERSAL 2';
+  const description = screen.getByLabelText(collapse(REF_TYPE_EDIT_FIELD_LABELS.description));
+  await userEvent.clear(description);
+  await userEvent.type(description, changed);
+  await userEvent.keyboard('{Enter}');
+  expect(await screen.findByText(EDIT_STATUS.PROMPT_FOR_CONFIRMATION.text)).toBeInTheDocument();
+
+  await userEvent.keyboard('{F5}');
+
+  expect(await screen.findByText(refusal)).toBeInTheDocument();
+  expect(await screen.findByText(EDIT_STATUS.INFORM_FAILURE.text)).toBeInTheDocument();
+  expect(stageKeyAvailability('changesOkayedButFailed').save).toBe(false);
+
+  await userEvent.keyboard('{Enter}');
+
+  expect(await screen.findByText(EDIT_STATUS.PROMPT_FOR_SEARCH_KEYS.text)).toBeInTheDocument();
+  expect(screen.queryByDisplayValue(changed)).toBeNull();
+  expect(vi.mocked(replaceTransactionType)).toHaveBeenCalledTimes(1);
+}
+
+/**
  * Asserts a key naming no row reaches the add path and creates the row.
  * @returns {Promise<void>} Resolves once the success sentence is on the glass.
  */
@@ -524,7 +593,12 @@ async function deletesOnlyOnTheSecondConfirmation(): Promise<void> {
   await awaitStoredRow();
 
   await userEvent.keyboard('{F4}');
-  expect(await screen.findByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toBeInTheDocument();
+  // WHY : Assumptions: the prompt is COUNTED rather than located, because while a delete is armed the
+  //       catalogued sentence is on the glass TWICE -- on the mapset's row-22 band, where
+  //       `COTRTUPC.cbl` L151-L152 puts it, and as the title of the confirmation, which stays open for
+  //       as long as the request is armed. Two is therefore the assertion: it proves the dialogue is up
+  //       and that it reuses the reference's own wording rather than inventing a second one.
+  expect(await screen.findAllByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toHaveLength(2);
   expect(vi.mocked(deleteTransactionType)).not.toHaveBeenCalled();
 
   await userEvent.keyboard('{F4}');
@@ -605,7 +679,12 @@ async function cancelsAPendingDelete(): Promise<void> {
   await awaitStoredRow();
 
   await userEvent.keyboard('{F4}');
-  expect(await screen.findByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toBeInTheDocument();
+  // WHY : Assumptions: the prompt is COUNTED rather than located, because while a delete is armed the
+  //       catalogued sentence is on the glass TWICE -- on the mapset's row-22 band, where
+  //       `COTRTUPC.cbl` L151-L152 puts it, and as the title of the confirmation, which stays open for
+  //       as long as the request is armed. Two is therefore the assertion: it proves the dialogue is up
+  //       and that it reuses the reference's own wording rather than inventing a second one.
+  expect(await screen.findAllByText(EDIT_STATUS.PROMPT_DELETE_CONFIRM.text)).toHaveLength(2);
   await userEvent.keyboard('{F12}');
 
   expect(await screen.findByText(EDIT_STATUS.WS_DELETE_WAS_CANCELLED.text)).toBeInTheDocument();
@@ -767,6 +846,7 @@ function refTypeEditCases(): void {
   it('reports a found row', reportsAFoundRow);
   it('refuses an unchanged description', refusesAnUnchangedDescription);
   it('saves a validated change with the issued version', savesAValidatedChangeWithTheIssuedVersion);
+  it('restarts at key entry after a refused save', restartsAtKeyEntryAfterARefusedSave);
   it('adds a row through the not-found stage', addsARowThroughTheNotFoundStage);
   it('deletes only on the second confirmation', deletesOnlyOnTheSecondConfirmation);
   it(

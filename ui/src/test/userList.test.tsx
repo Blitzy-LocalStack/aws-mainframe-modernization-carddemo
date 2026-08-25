@@ -68,24 +68,30 @@
 
 import { screen, waitFor, within } from '@testing-library/react';
 import type { UserEvent } from '@testing-library/user-event';
+import { theme } from 'antd';
 import type { ReactElement } from 'react';
 import { Route, Routes, useParams } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 
 import { USER_ID_MAX_LENGTH, listUsers } from '../api/auth';
+import { retainOutcomeAcrossNavigation } from '../api/client';
 import type { FieldError, PageResponse, UserSummary } from '../api/types';
 import { CARDDEMO_ADMIN_GROUP, CARDDEMO_USER_GROUP } from '../hooks/useAuth';
 import { MESSAGE_BAND_CONTENT_WIDTH, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import { PRIMARY_ACTION_AIDS, UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
 import {
   ACCESS_DENIED_ADMIN_ONLY,
   COMMON_MESSAGES,
   INVALID_KEY_PRESSED,
+  MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
   PROGRAM_MESSAGE_SOURCES,
   PROGRAM_SOURCE_FILES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   SHARED_MESSAGE_SOURCES,
+  formatMessageTemplate,
   messageBandWidthForMapset,
 } from '../messages/messages';
 /*
@@ -98,9 +104,11 @@ import {
  *       for a test.
  */
 import { RequireAdmin } from '../routes/guards';
+import { USER_UPDATE_ROUTE_TEMPLATE } from '../routes/navigation';
 import { ROUTE_TABLE, USER_DELETE_PATH, USER_LIST_PATH, USER_UPDATE_PATH } from '../router';
 import UserListScreen, {
   USER_LIST_ACTION_CELL_LENGTH,
+  USER_LIST_ACTION_CELL_RESERVED_COLUMNS,
   USER_LIST_KEY_LABELS,
   USER_LIST_LABELS,
   USER_LIST_MAPSET,
@@ -112,8 +120,9 @@ import UserListScreen, {
   toUserListRowActionCode,
   userDeletePath,
   userEditPath,
+  userListTableMeasure,
 } from '../screens/userList';
-import { FIELD_ERROR_TOKENS } from '../theme/tokens';
+import { FIELD_ERROR_TOKENS, TARGET_SIZE_AA_MINIMUM } from '../theme/tokens';
 import {
   LEADING_CURSOR,
   TRAILING_CURSOR,
@@ -264,18 +273,74 @@ async function renderBrowse(): Promise<UserEvent> {
 }
 
 /**
- * Waits until one row's identifier has been painted.
+ * Reports whether an element or any ancestor of it refuses pointer input.
+ *
+ * Purpose: answer the one question that decides whether a control can be typed into or clicked, which
+ * is not a property of the control alone -- an overlay applied several levels above it suppresses
+ * pointer input for everything inside.
+ *
+ * Assumptions: the tree is WALKED rather than the property read once on the element, and the reason is
+ * that this mirrors exactly what `@testing-library/user-event` does before every pointer interaction
+ * (`assertPointerEvents` consults the nearest `pointer-events` declaration by walking ancestors). CSS
+ * inheritance would make a single read sufficient in a browser; jsdom resolves inherited properties
+ * only partially, which is why the library walks and why this walks with it.
+ * @param {HTMLElement} element - The control whose interactivity is in question.
+ * @returns {boolean} True when this element or an ancestor declares `pointer-events: none`.
+ */
+function pointerInputRefused(element: HTMLElement): boolean {
+  for (let node: Element | null = element; node !== null; node = node.parentElement) {
+    if (window.getComputedStyle(node).pointerEvents === 'none') {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: this now waits for the row to be INTERACTIVE and not merely present,
+ *       because presence alone turned out not to imply interactivity on this browse. A five-file run
+ *       under load failed `leaves unmarked rows without an error` with `Unable to perform pointer
+ *       interaction as the element has pointer-events: none` on `INPUT#user-list-action-USER0001`,
+ *       while the same case passed in isolation -- the signature of a real window being observed only
+ *       when the machine is slow enough to land inside it.
+ * WHY : ⚠️ Assumptions: the window is genuine and belongs to the SUBJECT, not to the harness, so it is
+ *       waited out rather than papered over. `ui/src/hooks/usePagedQuery.ts` `browse-started` keeps the
+ *       rows on display and raises `isLoading`, which the screen hands to `Table loading` -- so during
+ *       any read after the first the ten rows are painted AND antd's `Spin` has applied its blur, whose
+ *       rule sets `pointer-events: none` over the table body. A row is therefore readable before it is
+ *       clickable, exactly as it is in a browser, and a case that typed in between was asserting
+ *       against a frame the operator would also have been unable to type into.
+ * WHY : Alternatives Considered: waiting on the read COUNT instead, through {@link waitForReadCount}.
+ *       Rejected because the count says a request was issued, not that its settlement has been painted,
+ *       so it would answer a different question and leave the same gap. Also considered: querying
+ *       antd's spinner element directly; rejected because it would tie every case in this file to a
+ *       library class name, where the computed property is the thing that actually blocks the
+ *       interaction and is what the interaction library itself consults.
+ * WHY : Trade-offs: folding this into the shared wait strengthens all of this file's cases rather than
+ *       the one that failed, at the cost of a second expectation per poll. That is the right side of
+ *       the trade here: every case that types into or clicks a row goes through this helper, so fixing
+ *       the one observed instance and leaving the other thirty-odd to fail later would be repairing a
+ *       symptom. No case in this file holds a read open deliberately, so nothing depends on observing
+ *       the browse mid-read.
+ */
+
+/**
+ * Waits until one row's identifier has been painted and its row will accept pointer input.
  * @param {string} userId - The identifier to wait for.
- * @returns {Promise<void>} Resolves once the row is in the document.
+ * @returns {Promise<void>} Resolves once the row is in the document and interactive.
  */
 async function waitForRow(userId: string): Promise<void> {
   await waitFor(
     /**
-     * Asserts the row has landed.
-     * @returns {void} Nothing; the expectation throws until it holds.
+     * Asserts the row has landed and is no longer covered by a loading treatment.
+     * @returns {void} Nothing; the expectations throw until they hold.
      */
     (): void => {
       expect(screen.getByText(userId)).toBeInTheDocument();
+      expect(
+        pointerInputRefused(actionCell(userId)),
+        'a row is only ready to be acted on once the read covering it has settled',
+      ).toBe(false);
     },
   );
 }
@@ -502,6 +567,406 @@ describe('the user browse reproduces its copybook field constraints', fieldConst
 
 /*
  * ---------------------------------------------------------------------------
+ * ⚠️ Row and cell affordances, all three measured in a browser
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * Locates the table row a given identifier is listed on.
+ *
+ * Assumptions: the row is reached from a CELL rather than queried directly, because a row carries no
+ * accessible name of its own -- which is itself the reason no `tabIndex` is put on it. The cell holding
+ * the identifier is unique on the page, since the identifier is the record's own key.
+ * @param {string} userId - Identifier of the row wanted.
+ * @returns {HTMLElement} That row's `<tr>`.
+ * @throws {Error} When the identifier is painted outside a table row, which means the browse is no
+ *   longer rendering a grid at all -- a failure worth naming rather than reporting as a null match.
+ */
+function tableRow(userId: string): HTMLElement {
+  const cell = screen.getByText(userId).closest('tr');
+
+  if (cell === null) {
+    throw new Error(`No table row carries the identifier ${userId}.`);
+  }
+
+  return cell;
+}
+
+/**
+ * Proves the one-character action cell reserves room for its character and its caret.
+ *
+ * ⚠️ Purpose: regress the measured invisibility. On the delivered screen at a 375-pixel viewport this
+ * control was 24 pixels wide with a 22-pixel client width and the design system's 11-pixel padding on
+ * each side, leaving a content box of 0.00 pixels against a 9.078-pixel advance for the `U` an operator
+ * is told to type: a pixel scan of the whole control returned zero ink while the value was genuinely
+ * stored. The proportional column share is a percentage and the padding is a fixed length, so the two
+ * cross over at a narrow viewport and the character is the thing that disappears.
+ *
+ * ⚠️ Assumptions: the measure is asserted as a DECLARATION and not as a rendered pixel width, because
+ * the test DOM performs no layout -- every rendered box in it is zero by zero, so a width assertion
+ * would pass on any value including the broken one. What can be asserted here is that the control
+ * carries a minimum, that the minimum reserves more columns than the field admits characters, and that
+ * it names the AA target-size floor. The pixel outcome was measured in a browser, and this case exists
+ * to stop the declaration being removed.
+ *
+ * Assumptions: the reservation is asserted to EXCEED the accepted width, which is what distinguishes
+ * room for a caret from room for a glyph alone -- a browser draws its caret between character
+ * positions, where the terminal's cursor occupied the character cell itself.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function reservesRoomForTheCharacterAndItsCaret(): Promise<void> {
+  listing.mockResolvedValue(fullPageWithMore());
+  await renderBrowse();
+  await waitForRow(FIRST_ROW_USER_ID);
+
+  const measure = actionCell(FIRST_ROW_USER_ID).style.minInlineSize;
+
+  expect(measure, 'the action cell must declare a minimum measure of its own').not.toBe('');
+  expect(
+    measure,
+    'the reserved columns must appear in the expression, in character units',
+  ).toContain(`${String(USER_LIST_ACTION_CELL_RESERVED_COLUMNS)}ch`);
+  expect(
+    USER_LIST_ACTION_CELL_RESERVED_COLUMNS,
+    'a caret needs a column beyond the one the field admits',
+  ).toBeGreaterThan(USER_LIST_ACTION_CELL_LENGTH);
+  expect(measure, 'the AA target-size floor must survive an unresolved padding token').toContain(
+    `${String(TARGET_SIZE_AA_MINIMUM)}px`,
+  );
+}
+
+/**
+ * Proves a row says under the pointer that it can be acted on, and places the cursor when clicked.
+ *
+ * ⚠️ Purpose: regress a measured absence. A browser pass found `cursor: auto` on these rows both at rest
+ * and hovered, on a browse whose whole purpose is choosing rows to act on, so nothing about a row
+ * indicated it was actionable and the only clue was the leading control -- which the case above records
+ * was itself invisible at a narrow viewport.
+ *
+ * ⚠️ Assumptions: a row click places the CURSOR and writes nothing. `app/cbl/COUSR00C.cbl` separates
+ * choosing a row from acting on it -- `PROCESS-ENTER-KEY` reads the action characters and only then
+ * transfers control -- so a click that typed `'U'` would leave the operator one Enter away from an
+ * update they never asked for, and one that typed `'D'` one Enter from a deletion. The cell's value is
+ * asserted still empty for exactly that reason.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function makesARowActionableUnderThePointer(): Promise<void> {
+  listing.mockResolvedValue(fullPageWithMore());
+  const user = await renderBrowse();
+  await waitForRow(FIRST_ROW_USER_ID);
+
+  const targetRow = tableRow(FIRST_ROW_USER_ID);
+
+  expect(targetRow.style.cursor, 'a row that can be acted on must say so under the pointer').toBe(
+    'pointer',
+  );
+
+  await user.click(targetRow);
+
+  expect(
+    actionCell(FIRST_ROW_USER_ID),
+    'a row click puts the cursor where the row is acted on',
+  ).toHaveFocus();
+  expect(
+    actionCell(FIRST_ROW_USER_ID),
+    'and types nothing, because choosing a row is not acting on it',
+  ).toHaveValue('');
+}
+
+/**
+ * Proves no row is given a tab stop of its own, so the keyboard traversal is not doubled.
+ *
+ * ⚠️ Assumptions: this asserts an ABSENCE deliberately, because the obvious way to make a row
+ * keyboard-reachable is to make the row focusable and that would be wrong here. Every row already
+ * carries a focusable control named `Sel` with the row's own identifier, so the traversal exists -- ten
+ * stops, each announcing which row it belongs to -- and a focusable row would double each of those with
+ * an element that has no accessible name at all. The authorization browse records the same treatment for
+ * the same measurement.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function addsNoSecondTabStopPerRow(): Promise<void> {
+  listing.mockResolvedValue(fullPageWithMore());
+  await renderBrowse();
+  await waitForRow(LAST_ROW_USER_ID);
+
+  for (const userId of FULL_PAGE_USER_IDS) {
+    expect(
+      tableRow(userId),
+      'the row must not be focusable, because its action cell already is',
+    ).not.toHaveAttribute('tabindex');
+    expect(
+      actionCell(userId),
+      'and the cell that is focusable must carry the name the row is identified by',
+    ).toHaveAccessibleName(`${USER_LIST_LABELS.selColumn.trim()} ${userId}`);
+  }
+}
+
+/**
+ * Proves the browse takes the design system's default cell density rather than the compact one.
+ *
+ * ⚠️ Purpose: a rendering comparison across the four browse screens found this one alone rendering the
+ * compact table scale with 8-pixel cell padding, while the card, transaction and reference-type browses
+ * all took the default 16. Nothing in `app/bms/COUSR00.bms` asks for a tighter scale -- its ten row
+ * families occupy one display row each, exactly as every other browse mapset's rows do -- so the
+ * override was density chosen for one screen, and three screens against one settles the idiom.
+ *
+ * Assumptions: the class is asserted rather than a padding value, because the class is what the design
+ * system publishes for the scale and a padding figure would be a design value this file may not hold.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function takesTheDefaultTableDensity(): Promise<void> {
+  listing.mockResolvedValue(fullPageWithMore());
+  const { container } = await renderInAppShell(<UserListScreen />, {
+    initialEntries: [USER_LIST_PATH],
+    routePath: USER_LIST_PATH,
+  });
+  await waitForRow(FIRST_ROW_USER_ID);
+
+  expect(
+    container.querySelectorAll('.ant-table-small'),
+    'the compact scale is this screen alone among the four browses, so it is not taken',
+  ).toHaveLength(0);
+}
+
+/** Registers the row and cell affordance cases. */
+function rowAffordanceCases(): void {
+  it('reserves room for the character and its caret', reservesRoomForTheCharacterAndItsCaret);
+  it('makes a row actionable under the pointer', makesARowActionableUnderThePointer);
+  it('adds no second tab stop per row', addsNoSecondTabStopPerRow);
+  it('takes the default table density', takesTheDefaultTableDensity);
+}
+
+describe('the user browse makes its rows and its action cells reachable', rowAffordanceCases);
+
+/*
+ * ---------------------------------------------------------------------------
+ * The grid's own horizontal scrolling region, and the page overflow it removes
+ * ---------------------------------------------------------------------------
+ */
+
+/** Test identifier of the probe reporting the spacing token the theme in scope resolves to. */
+const RESOLVED_PADDING_TEST_ID = 'probe-resolved-padding';
+
+/**
+ * A probe reporting the spacing token the theme in scope resolves the grid's measure from.
+ *
+ * Purpose: the grid's declared extent is computed from a design token, so the expected string can only
+ * be built from the token that actually reached the grid. This probe reports that token, which makes
+ * the assertion an equality against the screen's own derivation rather than against a value this file
+ * would otherwise have to restate.
+ *
+ * Alternatives Considered: asserting only that the declared width contains the character-cell count,
+ * which needs no probe. Rejected because it would pass for any padding term at all -- including none
+ * -- and the padding term is half of what keeps the five columns off their collapse. The probe idiom
+ * is the one `ui/src/test/appShell.test.tsx` already uses to observe a resolved token.
+ * @returns {ReactElement} An element whose text is the resolved `padding` reference.
+ */
+function ResolvedPaddingProbe(): ReactElement {
+  const { cssVar } = theme.useToken();
+
+  return <span data-testid={RESOLVED_PADDING_TEST_ID}>{cssVar.padding}</span>;
+}
+
+/**
+ * Proves the derivation of the grid's floor is the mapset's row over its five columns.
+ *
+ * ⚠️ Assumptions: the two numbers in the expected string are the two measurements the floor rests on,
+ * and both are checkable against the source. `app/bms/COUSR00.bms` heads row 8 at `POS=(8,5)` through
+ * `POS=(8,72)` with `'Type'` at `LENGTH=4`, so the five columns span columns 5 to 75 -- 71 character
+ * cells; and the design system adds its cell padding on BOTH sides of each of the five columns, which
+ * is the ten padding terms. A regression that dropped the padding term, or counted three columns
+ * because it was copied from the transaction-type browse, changes this string and fails here.
+ *
+ * Assumptions: the token is supplied as a literal rather than read from a theme, because this case
+ * asserts the ARITHMETIC and a stub makes the expected string legible. The rendered case below asserts
+ * the same function against the token the application actually resolves.
+ *
+ * ⚠️ Assumptions: the literal is passed with NO cast, which it can be because
+ * {@link userListTableMeasure} declares the one token member it reads rather than the whole theme.
+ * A cast was what the first form of this case used, and it does not survive
+ * `exactOptionalPropertyTypes`: converting `{ padding: string }` to `GlobalToken` is a conversion
+ * between types that do not sufficiently overlap, and the only way to keep it would have been a double
+ * cast through `unknown` -- which suppresses the check instead of satisfying it.
+ * @returns {void} Nothing; the expectation is the observable result.
+ */
+function derivesTheGridFloorFromTheMapsetRow(): void {
+  expect(
+    userListTableMeasure({ padding: '8px' }),
+    'seventy-one character cells plus the design system padding on both sides of five columns',
+  ).toBe('calc(71ch + 10 * 8px)');
+}
+
+/**
+ * ⚠️ Proves the grid carries its own horizontal scrolling region, so the PAGE never has to pan.
+ *
+ * ⚠️ Purpose: close a measured page-level overflow. At a 375-pixel viewport
+ * `document.documentElement.scrollWidth` was **398** against a `clientWidth` of **375**, and
+ * `window.scrollTo(50, 0)` moved the document to `window.scrollX` **23** -- the `Type` heading clipped
+ * to `Typ` with its values half outside the viewport. The same pass established the cause: the grid
+ * measured 374.25 pixels inside a 327-pixel `.ant-table-content` whose computed `overflow-x` was
+ * `visible`, and every ancestor up to `BODY` reported the same 398 against 375. With no scrolling
+ * region declared anywhere, the page paid for the overflow.
+ *
+ * ⚠️ Assumptions: this is asserted STRUCTURALLY and not in pixels, because jsdom performs no layout --
+ * every `offsetWidth` here is 0, so a width comparison would pass whatever the grid declared. What the
+ * declared properties prove is exactly the mechanism the finding names: in the pinned package
+ * `@rc-component/table/lib/Table.js` L259-L272 turns a declared horizontal extent into
+ * `overflow-x: auto` on the `-content` element and `width: <extent>; min-width: 100%` on the inner
+ * grid, and L556-L575 applies both. So `overflow-x: auto` on that element IS the container property
+ * the clean sibling screen has and this one did not.
+ *
+ * ⚠️ Assumptions: `min-width: 100%` is asserted alongside the extent because it is what keeps every
+ * wider viewport unchanged -- the grid still fills its container above the floor -- so its absence
+ * would turn a fix for narrow widths into a regression at every other width.
+ *
+ * Assumptions: the fixed layout is asserted as well, because the extent alone does not imply it. That
+ * module's L426-L442 infers `'fixed'` only for a pinned column, a pinned header, a sticky grid or an
+ * ellipsised column, and this grid has none of the four; under the automatic layout a declared column
+ * width becomes a minimum the content may grow, which is how the one-character action column came to
+ * measure about 700 pixels.
+ * @returns {Promise<void>} Resolves once the declared properties have been asserted.
+ */
+async function scrollsItsOwnGridRatherThanThePage(): Promise<void> {
+  listing.mockResolvedValue(fullPageWithMore());
+  const { container } = await renderInAppShell(
+    <>
+      <UserListScreen />
+      <ResolvedPaddingProbe />
+    </>,
+    { initialEntries: [USER_LIST_PATH], routePath: USER_LIST_PATH },
+  );
+  await waitForRow(FIRST_ROW_USER_ID);
+
+  const resolvedPadding = screen.getByTestId(RESOLVED_PADDING_TEST_ID).textContent ?? '';
+  const scroller = container.querySelector<HTMLElement>('.ant-table-content');
+  const grid = container.querySelector<HTMLTableElement>('.ant-table-content > table');
+
+  expect(
+    resolvedPadding,
+    'the probe must report a spacing token for the measure to be built from',
+  ).not.toBe('');
+  expect(scroller, 'the grid must sit inside the element the design system scrolls').not.toBeNull();
+  expect(
+    scroller?.style.overflowX,
+    'the grid scrolls INSIDE its container, so the page never pans -- this is the property the clean sibling browse has',
+  ).toBe('auto');
+  expect(
+    grid?.style.width,
+    'the declared extent is the mapset row, resolved through the token the application supplied',
+  ).toBe(userListTableMeasure({ padding: resolvedPadding }));
+  expect(
+    grid?.style.minWidth,
+    'and it still fills its container at every viewport above the floor',
+  ).toBe('100%');
+  expect(
+    grid?.style.tableLayout,
+    'the five mapset-derived column shares are only binding under a fixed layout',
+  ).toBe('fixed');
+}
+
+/**
+ * ⚠️ Proves each column reserves the design system's padding on top of its OWN characters, so the
+ * narrowest column is not starved of the space its heading needs.
+ *
+ * ⚠️ Purpose: close a second measured defect on the same grid. The five widths were first expressed as
+ * PROPORTIONAL shares -- a column's cells divided by the row's -- and applied to a total that already
+ * included the padding, so each column received a slice of the padding in proportion to its characters
+ * rather than the two edges it actually has. A browser pass measured what that costs the narrowest
+ * column: `userType` spans 4 of 71 cells, so it drew 5.63% of a 718.63-pixel grid -- 40.48 pixels --
+ * and 16 pixels of padding on each edge left a content box of roughly 8. Its own four-character
+ * heading then laid out ONE CHARACTER PER LINE, standing the header row 120 pixels tall, at every
+ * width from 375 to 1920. The counts were never wrong; the way they were applied was.
+ *
+ * ⚠️ Assumptions: the SUM is what this asserts, because the sum is the property that makes the columns
+ * and {@link userListTableMeasure} agree by construction rather than by someone keeping two numbers in
+ * step. Summing `cells * ch + 2 * padding` over the row gives `71ch + 10 * padding`, which is exactly
+ * the floor the case above asserts. So a change to either side that is not made to both fails here.
+ *
+ * ⚠️ Assumptions: the cell counts are spelled as literals read from `app/bms/COUSR00.bms` -- `'Sel'`
+ * at `POS=(8,5)` through `'Type'` at `POS=(8,72)` with `LENGTH=4`, giving 7, 12, 24, 24 and 4 -- rather
+ * than imported from the screen's own constant. Importing it would compare the screen against itself
+ * and pass however the mapset was mis-read; stating the measurement is what makes this falsifiable.
+ *
+ * Assumptions: the absence of a percentage is asserted explicitly. A proportional share is still a
+ * valid CSS width that the design system applies without complaint, so the defect this closes leaves
+ * no error behind -- only a tall header no assertion was watching. Naming the shape rules out a
+ * silent return to it.
+ * @returns {Promise<void>} Resolves once every declared column width has been asserted.
+ */
+async function reservesCellPaddingPerColumnRatherThanSharingIt(): Promise<void> {
+  /** Character cells each column spans in `app/bms/COUSR00.bms`, in the mapset's own order. */
+  const mapsetCells = [7, 12, 24, 24, 4];
+
+  listing.mockResolvedValue(fullPageWithMore());
+  const { container } = await renderInAppShell(
+    <>
+      <UserListScreen />
+      <ResolvedPaddingProbe />
+    </>,
+    { initialEntries: [USER_LIST_PATH], routePath: USER_LIST_PATH },
+  );
+  await waitForRow(FIRST_ROW_USER_ID);
+
+  const resolvedPadding = screen.getByTestId(RESOLVED_PADDING_TEST_ID).textContent ?? '';
+
+  /*
+   * WHY : Assumptions: the four traversals below are plain loops rather than `map`, `filter` and
+   *       `reduce` calls. `ui/eslint.config.js` selects a function expression in every position, so an
+   *       inline callback owes its own JSDoc block, and four documented one-line arrows would be longer
+   *       and harder to read than the loops they replace. The file header records the same reasoning for
+   *       the callbacks it does keep.
+   */
+  const declaredWidths: string[] = [];
+  const proportional: string[] = [];
+
+  for (const column of container.querySelectorAll<HTMLElement>('.ant-table-content col')) {
+    declaredWidths.push(column.style.width);
+
+    if (column.style.width.includes('%')) {
+      proportional.push(column.style.width);
+    }
+  }
+
+  const expectedWidths: string[] = [];
+  let spannedCells = 0;
+
+  for (const cells of mapsetCells) {
+    expectedWidths.push(`calc(${String(cells)}ch + 2 * ${resolvedPadding})`);
+    spannedCells += cells;
+  }
+
+  expect(
+    declaredWidths,
+    'the grid declares one width per mapset column, in the mapset order',
+  ).toHaveLength(mapsetCells.length);
+  expect(
+    proportional,
+    'no column may take a PROPORTIONAL share, which is what starved the narrowest one',
+  ).toEqual([]);
+  expect(
+    declaredWidths,
+    'each column claims its own characters plus the padding on both of its edges',
+  ).toEqual(expectedWidths);
+  expect(
+    spannedCells,
+    'and the five spans still sum to the row the grid floor is derived from',
+  ).toBe(71);
+}
+
+/** Registers the cases covering the grid's own scrolling region. */
+function gridScrollRegionCases(): void {
+  it('derives the grid floor from the mapset row', derivesTheGridFloorFromTheMapsetRow);
+  it('scrolls its own grid rather than the page', scrollsItsOwnGridRatherThanThePage);
+  it(
+    'reserves cell padding per column rather than sharing it',
+    reservesCellPaddingPerColumnRatherThanSharingIt,
+  );
+}
+
+describe('the user browse scrolls its own grid rather than the page', gridScrollRegionCases);
+
+/*
+ * ---------------------------------------------------------------------------
  * Page arity, and the deliberate absence of offset pagination
  * ---------------------------------------------------------------------------
  */
@@ -716,42 +1181,63 @@ async function pagesBackwardFromTheLeadingCursor(): Promise<void> {
 }
 
 /**
- * Proves the two paging keys are greyed from the envelope's availability, never from a page number.
+ * Proves both paging keys stay OFFERED at a dead end, where they used to be greyed out.
  *
- * ⚠️ Assumptions: the forward key follows `hasNext`, which the service settles by reading one row
- * beyond the page -- the same mechanism by which the reference settles `NEXT-PAGE-FLG` and then
- * refuses on the flag alone at L270 to L273. The backward key follows the DERIVED backward
- * availability, which is the client's page ordinal, because the envelope carries no such member.
- * Neither key is bound to a displayed page number, which is presentation only.
+ * ⚠️ Purpose: pin the property that a boundary answers instead of withdrawing. The screen greyed these
+ * two keys from the envelope's availability, which reads as the mapping a page-navigation pair is
+ * usually given, and it cost a verbatim sentence: `app/cbl/COUSR00C.cbl` refuses no paging key --
+ * `PROCESS-PF7-KEY` at L248 to L254 and `PROCESS-PF8-KEY` at L271 to L277 each dispatch the key, move
+ * their own sentence into `WS-MESSAGE` and re-send the map -- and `ui/src/layout/usePfKeys.ts` answers a
+ * greyed binding through its unmapped-key path, so a greyed backward key put "Invalid key pressed" where
+ * the reference puts "You are already at the top of the page...".
+ *
+ * ⚠️ Assumptions: the page under test reports NO further page and is the opening page, so both
+ * directions are exhausted at once and one render exercises both keys. That is the browse hook's `ONLY`
+ * position, and it is the state the previous form of this case asserted BOTH keys disabled in.
+ *
+ * Assumptions: the assertion is on the CONTROLS and not on the sentences, because the two sentences are
+ * asserted where the two conditions are known, by `refusesBackwardOnTheOpeningPage` and
+ * `refusesForwardOnTheLastPage`. This case exists to stop the greying returning, which would leave those
+ * two passing through the wrong path or not at all.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
-async function greysThePagingKeysFromTheEnvelope(): Promise<void> {
+async function offersBothPagingKeysAtADeadEnd(): Promise<void> {
   listing.mockResolvedValue(fullPageAtTheEnd());
   await renderBrowse();
   await waitForRow(FIRST_ROW_USER_ID);
 
   expect(
     keyControl(USER_LIST_KEY_LABELS.PFK07),
-    'the opening page has nothing before it, so backward is unavailable',
-  ).toBeDisabled();
+    'the reference answers a backward key on the opening page rather than refusing it',
+  ).toBeEnabled();
   expect(
     keyControl(USER_LIST_KEY_LABELS.PFK08),
-    'a page reporting hasNext false has nothing after it',
-  ).toBeDisabled();
+    'the reference answers a forward key at the end of the file rather than refusing it',
+  ).toBeEnabled();
 }
 
 /**
- * Proves the forward key becomes available exactly when the envelope reports a further page.
+ * Proves the forward key TAKES the step when a further page exists, rather than merely being offered.
+ *
+ * ⚠️ Refactoring Rationale: this case used to assert only that the control was enabled, which was worth
+ * asserting while the screen greyed it and is worth nothing now that no binding carries a `disabled`
+ * predicate -- an always-enabled control passes an enablement assertion without the screen deciding
+ * anything. What distinguishes an available step from an exhausted one is now whether a READ is issued,
+ * so that is what is asserted: the same press that leaves the read count at one on the last page
+ * (`refusesForwardOnTheLastPage`) raises it to two here.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
-async function offersForwardOnlyWhileAFurtherPageExists(): Promise<void> {
-  listing.mockResolvedValue(fullPageWithMore());
-  await renderBrowse();
+async function takesTheForwardStepWhileAFurtherPageExists(): Promise<void> {
+  listing.mockResolvedValueOnce(fullPageWithMore()).mockResolvedValueOnce(fullPageAtTheEnd());
+  const user = await renderBrowse();
   await waitForRow(FIRST_ROW_USER_ID);
 
+  await pressPfKey(user, 'PFK08');
+
+  await waitForReadCount(2);
   expect(
     keyControl(USER_LIST_KEY_LABELS.PFK08),
-    'hasNext true is the whole condition for offering the forward step',
+    'the key remains offered on the page it arrived at, whichever end that is',
   ).toBeEnabled();
 }
 
@@ -761,8 +1247,11 @@ function keysetPagingCases(): void {
   it('opens with neither cursor nor position', opensWithNeitherCursorNorPosition);
   it('pages forward from the trailing cursor', pagesForwardFromTheTrailingCursor);
   it('pages backward from the leading cursor', pagesBackwardFromTheLeadingCursor);
-  it('greys the paging keys from the envelope', greysThePagingKeysFromTheEnvelope);
-  it('offers forward only while a further page exists', offersForwardOnlyWhileAFurtherPageExists);
+  it('offers both paging keys at a dead end', offersBothPagingKeysAtADeadEnd);
+  it(
+    'takes the forward step while a further page exists',
+    takesTheForwardStepWhileAFurtherPageExists,
+  );
 }
 
 describe('the user browse pages by sealed cursor in both directions', keysetPagingCases);
@@ -930,10 +1419,11 @@ function keepsTheFiveSentencesDistinct(): void {
  * page, which the reference decides on `CDEMO-CU00-PAGE-NUM > 1` alone at L250 without reading
  * anything; L671 answers a backward READ that ran off the front of the file.
  *
- * Assumptions: the key is pressed rather than the control clicked, because the control is greyed at
- * this boundary and `ui/src/layout/PfKeyBar.tsx` records that a disabled control cannot fire a click
- * at all. The keyboard path does reach dispatch and is refused there, which is the path that carries
- * the sentence -- and the terminal had no pointer, so it is also the only path the reference has.
+ * ⚠️ Assumptions: the key is PRESSED rather than the control clicked, and the reason changed with the
+ * screen. It used to be that the control was greyed at this boundary and a disabled control cannot fire
+ * a click at all; no binding is greyed now, so both paths reach the same handler and either would carry
+ * the sentence. The keystroke is kept because the terminal had no pointer, so it is the only path the
+ * reference itself has -- `offersBothPagingKeysAtADeadEnd` covers the control's own availability.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function refusesBackwardOnTheOpeningPage(): Promise<void> {
@@ -1467,12 +1957,20 @@ async function offersNoKeyBeyondTheMeasuredFour(): Promise<void> {
 }
 
 /**
- * Proves the two emphases follow the design-system mapping rather than the legend colour.
+ * ⚠️ Proves this browse emphasises NOTHING, because none of its four keys changes stored state.
  *
- * Assumptions: the primary emphasis belongs to the ENTER key and the default to PF3, which is fixed
- * by AAP section 0.3.2 mapping the action keys to a button with `type="primary"` for Enter and PF5
- * and the default for PF3, PF4 and PF12. The mapset colours the whole legend one colour, so the
- * emphasis distinction carries information the source colour cannot.
+ * ⚠️ Refactoring Rationale: this case previously asserted the opposite and therefore pinned a defect.
+ * It required `ENTER` to render primary on the ground that the design system's emphasis mapping is keyed
+ * by the ATTENTION IDENTIFIER, which lists `ENTER` and `PFK05`. That table cannot be right per-screen:
+ * the same `PFK05` it emphasises is `F5=Save` on one mapset and `F5=Delete` on another, and a measured
+ * pass found the delete painted in benign primary blue because of it. The screens now declare what each
+ * key DOES and the bar paints from that, so this browse -- whose four keys transfer, return and reposition
+ * and whose `app/cbl/COUSR00C.cbl` L121-L133 dispatch writes nothing at all -- correctly carries no
+ * emphasised control. An emphasis that appears on every screen distinguishes nothing.
+ *
+ * ⚠️ Assumptions: all FOUR controls are asserted, not just the two the old case named. The property is
+ * that the bar has no primary member, and a case that checked Enter and PF3 alone would pass while a
+ * paging key was emphasised.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function emphasisesTheCommitKeyOnly(): Promise<void> {
@@ -1480,10 +1978,28 @@ async function emphasisesTheCommitKeyOnly(): Promise<void> {
   await renderBrowse();
   await waitForRow(FIRST_ROW_USER_ID);
 
-  expect(PRIMARY_ACTION_AIDS, 'ENTER takes the primary emphasis').toContain('ENTER');
-  expect(PRIMARY_ACTION_AIDS, 'PF3 takes the default emphasis').not.toContain('PFK03');
-  expect(keyControl(USER_LIST_KEY_LABELS.ENTER).className).toContain('ant-btn-primary');
-  expect(keyControl(USER_LIST_KEY_LABELS.PFK03).className).toContain('ant-btn-default');
+  /*
+   * WHY : ⚠️ Assumptions: the AID fallback is asserted to STILL LIST `ENTER`, which is what makes the
+   *       assertions below evidence that this screen's declaration OVERRODE it rather than that the
+   *       fallback changed. `ui/src/layout/PfKeyBar.tsx` keeps the list deliberately unchanged so every
+   *       screen that has not classified its keys renders exactly as it did; if a future change removed
+   *       it, this case would stop being evidence of anything and this line is what fails.
+   */
+  expect(PRIMARY_ACTION_AIDS, 'the AID fallback still lists ENTER').toContain('ENTER');
+  expect(PRIMARY_ACTION_AIDS, 'and still omits PF3').not.toContain('PFK03');
+
+  for (const label of Object.values(USER_LIST_KEY_LABELS)) {
+    expect(keyControl(label).className, label).toContain('ant-btn-default');
+    expect(keyControl(label).className, label).not.toContain('ant-btn-primary');
+
+    /*
+     * WHY : Assumptions: the absence of the dangerous variant is asserted too. A browse offers no
+     *       irreversible action, so a key here painted as one would misdescribe the screen as strongly
+     *       as an emphasised read key does -- and `'read-only'`, `'mutating'` and `'destructive'` all
+     *       resolve to different paints, so the classification is only proven by pinning which one.
+     */
+    expect(keyControl(label).className, label).not.toContain('ant-btn-dangerous');
+  }
 }
 
 /**
@@ -1555,13 +2071,88 @@ async function answersAnUnmappedKeyWithTheSharedSentence(): Promise<void> {
   ]);
 }
 
+/**
+ * ⚠️ The browse ANNOUNCES an outstanding page turn, not only paints a spinner over the rows.
+ *
+ * ⚠️ Purpose: a review found no live region anywhere naming a wait and `aria-busy` on no control, so a
+ * page turn was reported by a visual treatment alone. This browse replaces its whole row set on every
+ * turn, which is the change an operator most needs told about, and an operator who cannot see the
+ * spinner was told nothing.
+ *
+ * ⚠️ Assumptions: the announcement is asserted from INSIDE the held turn and its emptiness after it,
+ * because the region is always mounted -- a live region has to be in the accessibility tree before its
+ * content changes for the first change to be announced, so an absent region would be the defect and an
+ * empty one is the resting state.
+ *
+ * Assumptions: the read is held with a promise this case resolves itself rather than with a timer, so
+ * the in-flight window is bounded by the assertions inside it rather than by a duration.
+ * @returns {Promise<void>} Resolves once the held turn has been released and its page has landed.
+ */
+async function announcesAnOutstandingPageTurn(): Promise<void> {
+  listing.mockResolvedValueOnce(fullPageWithMore());
+  const user = await renderBrowse();
+  await waitForRow(FIRST_ROW_USER_ID);
+
+  expect(
+    screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID),
+    'nothing is outstanding once the first page has landed',
+  ).toHaveTextContent('');
+
+  /**
+   * Placeholder resolver, replaced the moment the held promise hands over its own.
+   *
+   * Assumptions: an initialiser is supplied rather than declaring the binding possibly-undefined,
+   * because the promise executor runs synchronously inside the constructor below and therefore always
+   * replaces it before any code can call it.
+   * @returns {void} Nothing; it is never the resolver that runs.
+   */
+  function releaseNothing(): void {
+    // Assumptions: an empty body is the whole implementation; see the doc block above.
+  }
+
+  let releasePage: (page: PageResponse<UserSummary>) => void = releaseNothing;
+
+  listing.mockReturnValueOnce(
+    new Promise<PageResponse<UserSummary>>(
+      /**
+       * Captures the resolver so the case controls when the next page lands.
+       * @param {(page: PageResponse<UserSummary>) => void} resolve - The promise's own resolver.
+       * @returns {void} Nothing; the resolver is retained for later.
+       */
+      (resolve: (page: PageResponse<UserSummary>) => void): void => {
+        releasePage = resolve;
+      },
+    ),
+  );
+
+  await pressPfKey(user, 'PFK08');
+  await waitForReadCount(2);
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  releasePage(fullPageAtTheEnd());
+  await waitFor(
+    /**
+     * Waits until the held turn has settled, so no state escapes the case.
+     * @returns {void} Nothing; the expectation throws until the region has fallen silent.
+     */
+    (): void => {
+      expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
+    },
+  );
+}
+
 /** Registers the function-key cases. */
 function functionKeyCases(): void {
   it('paints the four measured key labels', paintsTheFourMeasuredKeyLabels);
   it('offers no key beyond the measured four', offersNoKeyBeyondTheMeasuredFour);
-  it('emphasises the commit key only', emphasisesTheCommitKeyOnly);
+  it(
+    'emphasises no key, because none of the four changes stored state',
+    emphasisesTheCommitKeyOnly,
+  );
   it('pages forward by both key and control', pagesForwardByBothKeyAndControl);
   it('answers an unmapped key with the shared sentence', answersAnUnmappedKeyWithTheSharedSentence);
+  it('announces an outstanding page turn', announcesAnOutstandingPageTurn);
 }
 
 describe('the user browse binds exactly the four keys its mapset paints', functionKeyCases);
@@ -2115,3 +2706,149 @@ describe(
   'the user browse transfers by route and discloses no credential',
   navigationAndDisclosureCases,
 );
+
+/**
+ * Name the update screen leaves its save outcome under, composed the way both screens compose it.
+ *
+ * Assumptions: the route half is imported and only the suffix is written out, which is exactly what
+ * `ui/src/screens/userList/index.tsx` and `ui/src/screens/userUpdate/index.tsx` each do. The two agree
+ * on this name without importing each other, so the agreement is the property a case must be able to
+ * fail on -- and the same constant is composed identically in `ui/src/test/userUpdate.test.tsx`, which
+ * is what makes the pair fail together if either side's suffix moves.
+ */
+const USER_UPDATE_SAVE_CLAIM = `${USER_UPDATE_ROUTE_TEMPLATE}#saved`;
+
+/**
+ * The sentence a committed save hands over, composed the way the reference composes it.
+ *
+ * Assumptions: it is COMPOSED from the catalog template rather than retyped, because the reference
+ * composes it -- the `STRING` at `app/cbl/COUSR02C.cbl` L372-L374 concatenates `'User '`, the key
+ * `DELIMITED BY SPACE` and `' has been updated ...'`. A retyped literal here would let a lost space in
+ * the template pass unnoticed in both this file and the screen.
+ */
+const HANDED_SAVE_SENTENCE = formatMessageTemplate(MESSAGE_TEMPLATES.USER_HAS_BEEN_UPDATED, {
+  'SEC-USR-ID': FIRST_ROW_USER_ID,
+});
+
+/**
+ * Confirms the browse paints the sentence a save on the update screen left for it.
+ * @returns {Promise<void>} Resolves once the handed sentence is on the band.
+ */
+async function paintsTheHandedSaveSentence(): Promise<void> {
+  listing.mockResolvedValue(fullPageWithMore());
+  /*
+   * WHY : Assumptions: the outcome is retained BEFORE the render, because that is the real ordering.
+   *       `ui/src/screens/userUpdate/index.tsx` retains and then navigates inside one synchronous
+   *       handler, so the outcome exists before this screen is mounted -- which is why the collector is
+   *       a mount effect with no subscription. Retaining afterwards would exercise a path the
+   *       application does not have.
+   */
+  retainOutcomeAcrossNavigation(USER_UPDATE_SAVE_CLAIM, {
+    settled: 'COMPLETED',
+    value: { message: HANDED_SAVE_SENTENCE, severity: 'success' },
+  });
+
+  await renderBrowse();
+
+  await waitFor(
+    /**
+     * Waits until the handed sentence reaches the row-23 band.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(messageBand()).toHaveTextContent(HANDED_SAVE_SENTENCE);
+    },
+  );
+}
+
+/**
+ * Confirms the handed sentence obeys a turn's lifetime and is cleared by the operator's next key.
+ * @returns {Promise<void>} Resolves once the band has been emptied by a later turn.
+ */
+async function clearsTheHandedSentenceOnTheNextTurn(): Promise<void> {
+  listing.mockResolvedValue(fullPageWithMore());
+  retainOutcomeAcrossNavigation(USER_UPDATE_SAVE_CLAIM, {
+    settled: 'COMPLETED',
+    value: { message: HANDED_SAVE_SENTENCE, severity: 'success' },
+  });
+
+  const user = await renderBrowse();
+  await waitForRow(FIRST_ROW_USER_ID);
+  await waitFor(
+    /**
+     * Waits until the handed sentence has been painted, so its removal is observable.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(messageBand()).toHaveTextContent(HANDED_SAVE_SENTENCE);
+    },
+  );
+
+  await pressPfKey(user, 'ENTER');
+
+  // WHY : Assumptions: the handed sentence is given NO more life than a locally raised one. Every turn
+  //       of the reference begins `MOVE SPACES TO WS-MESSAGE`, which is what `beginTurn` reproduces, so
+  //       an outcome of the previous screen must not still be on the glass after the operator has acted
+  //       on this one -- they would read it as a report of what they just did.
+  await waitFor(
+    /**
+     * Waits until the band no longer carries the handed sentence.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(messageBand()).not.toHaveTextContent(HANDED_SAVE_SENTENCE);
+    },
+  );
+}
+
+/**
+ * Confirms an outcome is delivered ONCE, so a later arrival is not told about it again.
+ * @returns {Promise<void>} Resolves once the second mount has been shown to paint nothing.
+ */
+async function deliversTheHandedSentenceOnlyOnce(): Promise<void> {
+  listing.mockResolvedValue(fullPageWithMore());
+  retainOutcomeAcrossNavigation(USER_UPDATE_SAVE_CLAIM, {
+    settled: 'COMPLETED',
+    value: { message: HANDED_SAVE_SENTENCE, severity: 'success' },
+  });
+
+  const first = await renderInAppShell(<UserListScreen />, {
+    initialEntries: [USER_LIST_PATH],
+    routePath: USER_LIST_PATH,
+  });
+  await waitFor(
+    /**
+     * Waits until the first mount has collected and painted the outcome.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(messageBand()).toHaveTextContent(HANDED_SAVE_SENTENCE);
+    },
+  );
+  first.unmount();
+
+  await renderBrowse();
+  await waitForRow(FIRST_ROW_USER_ID);
+
+  // WHY : Assumptions: collection REMOVES the outcome, and this is the case that holds it to that. An
+  //       operator returning to the browse a second time and being shown the same acknowledgement
+  //       cannot tell it from a second write, which on an administrative record is worse than silence.
+  expect(messageBand()).not.toHaveTextContent(HANDED_SAVE_SENTENCE);
+}
+
+/**
+ * Groups the cases holding the browse to painting a save handed to it by the update screen.
+ *
+ * ⚠️ Purpose: the reading end of the defect measured on `F3=Save&&Exit`. That key writes and transfers
+ * in one turn, so the band it publishes dies with its own unmount -- `PUT` returning `200` followed by
+ * an arrival whose band was empty. The reference sends the same sentence and loses it the same way, to
+ * the `EXEC CICS XCTL` at `app/cbl/COUSR02C.cbl` L258-L261 overwriting the terminal.
+ * @returns {void} Nothing; registering the cases is the whole of its effect.
+ */
+function handedSaveOutcomeCases(): void {
+  it('paints a save the update screen handed over', paintsTheHandedSaveSentence);
+  it('clears the handed sentence on the next turn', clearsTheHandedSentenceOnTheNextTurn);
+  it('paints a handed sentence once only', deliversTheHandedSentenceOnlyOnce);
+}
+
+describe('the user browse paints an outcome handed to it', handedSaveOutcomeCases);

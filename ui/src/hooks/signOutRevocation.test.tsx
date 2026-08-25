@@ -36,7 +36,7 @@ import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useAuth } from './useAuth';
-import { getApiClient } from '../api/client';
+import { claimRetainedOutcome, getApiClient, retainOutcomeAcrossNavigation } from '../api/client';
 import {
   HTTP_NO_CONTENT,
   answerWith,
@@ -237,6 +237,38 @@ async function revokesTheHeldTokenAndEmptiesTheTab(): Promise<void> {
 }
 
 /**
+ * Asserts a sign-out discards an outcome retained for a screen that never collected it.
+ *
+ * Purpose: an outcome held across a route change describes work done under THIS session, and the
+ * measured case is the sharpest one available -- the `201` on `POST /auth/users` that minted a one-time
+ * credential. Retaining it is what stops that credential being lost; discarding it at sign-out is what
+ * stops the next operator at the same terminal from collecting a credential provisioned for the
+ * previous one.
+ *
+ * Assumptions: the retention is asserted present BEFORE the sign-out as well as absent after it, so the
+ * case cannot pass against a mechanism that never held anything -- which is how a clear-everything
+ * assertion quietly stops testing the clear.
+ * @returns {Promise<void>} Resolves once the assertions hold.
+ */
+async function discardsAnOutcomeRetainedForAScreenThatNeverCollectedIt(): Promise<void> {
+  await establishASessionHolding(HELD_REFRESH_TOKEN);
+  answerWith(undefined, HTTP_NO_CONTENT);
+  retainOutcomeAcrossNavigation('users.new.created', {
+    settled: 'COMPLETED',
+    value: { credentialSecretName: 'carddemo/dev/user/ADMIN001' },
+  });
+  render(<SessionProbe />);
+
+  await userEvent.click(screen.getByRole('button', { name: 'Sign off' }));
+  await expectTheSessionEnded();
+
+  expect(
+    claimRetainedOutcome('users.new.created'),
+    'a credential minted under the ended session must not survive it',
+  ).toBeUndefined();
+}
+
+/**
  * Asserts the token is read BEFORE the local clear, which is the ordering the request depends on.
  *
  * Assumptions: this is a distinct case from the one above even though both inspect the request body,
@@ -376,6 +408,10 @@ function signOutRevocation(): void {
     endsTheSessionEvenWhenTheRevocationIsRefused,
   );
   it('dispatches nothing when no token is held', dispatchesNothingWhenNoTokenIsHeld);
+  it(
+    'discards an outcome retained for a screen that never collected it',
+    discardsAnOutcomeRetainedForAScreenThatNeverCollectedIt,
+  );
 }
 
 describe('sign-out revocation', signOutRevocation);

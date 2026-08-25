@@ -53,7 +53,7 @@
  * `config/rule1/rule1_gate.py` decide the mechanical half of that at `--max-warnings=0`.
  */
 
-import { Button, Divider, Flex, Form, Input, Popconfirm, Space, Typography, theme } from 'antd';
+import { Divider, Flex, Form, Input, Typography, theme } from 'antd';
 import type { InputRef } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
@@ -64,18 +64,26 @@ import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
 // `no-restricted-imports`, so the choice fails the build rather than resting on convention.
 import { useLocation, useNavigate } from 'react-router';
 
-import { isApiRequestError } from '../../api/client';
-import { payAccountBalanceInFull } from '../../api/transactions';
+import { CONFIRMATION_ANSWERS, isApiRequestError, isConfirmingAnswer } from '../../api/client';
+import { inquireAccountPayableBalance, payAccountBalanceConfirmed } from '../../api/transactions';
 import type { BillPaymentPreview } from '../../api/transactions';
 import type { ApiError, FieldValidationState } from '../../api/types';
+import { MONEY_PICTURES, renderMoney } from '../../format/money';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import {
+  busyAnnouncement,
+  busyProps,
+  fieldAriaProps,
+  fieldErrorHelp,
+  fieldHintId,
+} from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
+import { copybookFieldWidthStyle } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
-import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
+import type { PfKeyHandlerMap, PfKeyRejection, PfKeyRisk } from '../../layout/usePfKeys';
 import {
   BILL_PAY_CONFIRM_DOMAIN_HINT,
   BILL_PAY_FIELD_LABELS,
@@ -84,6 +92,7 @@ import {
   INVALID_KEY_PRESSED,
   MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   formatMessageTemplate,
 } from '../../messages/messages';
@@ -93,7 +102,12 @@ import {
   navigateSafely,
   screenTransitionState,
 } from '../../routes/navigation';
-import { BMS_TEXT_COLOR_TOKENS, SPACING_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import {
+  BMS_TEXT_COLOR_TOKENS,
+  HINT_TEXT_TOKENS,
+  SPACING_TOKENS,
+  TYPOGRAPHY_TOKENS,
+} from '../../theme/tokens';
 
 /*
  * WHY : Assumptions: every user-visible sentence this screen can paint is read from
@@ -141,7 +155,7 @@ export const BILL_PAY_MAPSET = 'COBIL00';
  */
 
 /**
- * Declared widths of the two data fields this screen renders, from the mapset and its symbolic map.
+ * Declared widths of the three data fields this screen renders, from the mapset and its symbolic map.
  *
  * Assumptions: these are per-mapset contracts and they must never be unified with the same amounts'
  * widths on other screens. The balance is FOURTEEN here because `app/cbl/COBIL00C.cbl` L56 declares
@@ -150,22 +164,43 @@ export const BILL_PAY_MAPSET = 'COBIL00';
  * screens declare fifteen for the same amounts because their picture is `+ZZZ,ZZZ,ZZZ.99`, which
  * `ui/src/format/money.ts` implements and documents as `MONEY_MASK_WIDTH`, and the transaction screens
  * declare twelve. Three pictures, three widths, one underlying record field.
+ *
+ * Refactoring Rationale: `confirmation` is published here again, and the reason is a measured defect
+ * rather than tidiness. The single-position field it names was replaced by a confirmation dialogue
+ * whose primary control was focused programmatically on open; measured in a browser, an operator who
+ * typed only the account digits and then pressed Enter three times paid the whole balance without
+ * typing a character, because each of those two consecutive turns had "commit" as its default action.
+ * `app/bms/COBIL00.bms` L115-L119 declares `CONFIRM LENGTH=1 ATTRB=(FSET,NORM,UNPROT)` with NO `IC`,
+ * and `app/cbl/COBIL00C.cbl` L173-L191 reads what was typed into it -- so the gate the reference
+ * relies on is a keystroke the operator supplies, not a control an Enter can fall onto.
  */
 export const BILL_PAY_FIELD_WIDTHS = {
   /** `ACTIDIN LENGTH=11` at `app/bms/COBIL00.bms` L85-L89; `ACTIDINI PIC X(11)`. */
   accountId: 11,
   /** `CURBAL LENGTH=14` at `app/bms/COBIL00.bms` L103-L106; `CURBALI PIC X(14)`. */
   currentBalance: 14,
+  /** `CONFIRM LENGTH=1` at `app/bms/COBIL00.bms` L115-L119; `CONFIRMI PIC X(1)`. */
+  confirmation: 1,
 } as const;
 
 /**
- * Integer digit positions in this screen's balance picture, `+9999999999.99`.
+ * The measured edit mask this screen's balance is painted through.
  *
- * Assumptions: the picture uses `9` and not `Z`, so these positions are NOT zero-suppressed -- a `9`
- * prints its digit whatever that digit is. That single character is the whole difference between this
- * screen's presentation and the account screens', and it is why their mask cannot be reused here.
+ * Refactoring Rationale: this screen used to carry its own four-operation mask, on the ground that
+ * `ui/src/format/money.ts` implemented only the account screens' `+ZZZ,ZZZ,ZZZ.99`. That module now
+ * publishes all three measured pictures and renders any of them through one entry point, so the local
+ * copy is withdrawn: the module records this picture's own provenance -- `app/cbl/COBIL00C.cbl` L56 --
+ * derives the fourteen-character width from the picture's own positions rather than from a number
+ * written beside it, and returns the sign semantics and the `white-space` mode with the text.
+ *
+ * Trade-offs: adopting the shared renderer also adopts its SIGN colouring, which supersedes this
+ * mapset's single `COLOR=BLUE` on `CURBAL` at `app/bms/COBIL00.bms` L103-L106. That is the shared
+ * module's own recorded decision and it is taken deliberately here rather than opted out of: the
+ * baseline paints a credit, a debit and a settled balance in one hue, and the AAP requires the three
+ * to be distinguishable. Colour is redundant either way, because every measured picture is signed and
+ * the leading `+` or `-` is in the rendered text.
  */
-const BALANCE_INTEGER_POSITIONS = 10;
+const BALANCE_PICTURE = MONEY_PICTURES.billPayBalance;
 
 /**
  * This screen's row-24 legend, assembled from the two sources that own its three captions.
@@ -191,23 +226,68 @@ const BILL_PAY_LEGEND_LABELS = {
 } as const;
 
 /**
- * The answer the confirmation dialogue sends when its primary control is used.
+ * Reports whether a typed answer DECLINES, on the domain `app/cbl/COBIL00C.cbl` L178-L179 evaluates.
  *
- * Assumptions: a single `'Y'`, because the field it replaces is `CONFIRM LENGTH=1` at
- * `app/bms/COBIL00.bms` L115-L119 and `app/cbl/COBIL00C.cbl` L174-L176 accepts `'Y'` or `'y'` there.
- * Sending the upper-case form keeps the request inside the set the service's own confirmation
- * validator admits.
+ * Alternatives Considered: importing this alongside {@link isConfirmingAnswer} from
+ * `ui/src/api/client.ts`, which is where the answer letters themselves come from. That module
+ * publishes only the CONFIRMING test, and deliberately -- its own note records that the confirming
+ * direction is the one whose misclassification moves money, so that is the test every caller shares.
+ * The declining test is needed only by a screen that owns the field and has to tell `'N'` apart from a
+ * character the reference refuses, which is this screen alone; the letter is still read from the shared
+ * constant so the two spellings cannot drift.
+ *
+ * Assumptions: both cases are accepted, exactly as the reference accepts both -- `WHEN 'N'` and
+ * `WHEN 'n'` are two arms of one branch at L178-L179. Accepting only the upper case would send a
+ * lower-case `'n'` down the refusal path and paint "Invalid value. Valid values are (Y/N)..." for an
+ * answer the terminal honoured.
+ * @param {string} answer - The single character the operator typed into the confirmation field.
+ * @returns {boolean} `true` only for a declining answer; `false` for a confirming one, for the empty
+ *   never-answered state, and for every character the reference refuses.
  */
-const CONFIRMING_ANSWER = 'Y';
+function isDecliningAnswer(answer: string): boolean {
+  return answer === CONFIRMATION_ANSWERS.DECLINE || answer === 'n';
+}
+
+/*
+ * WHY : Refactoring Rationale: the confirmation is a FOUR-state machine and not a boolean, because the
+ *       reference's is. `app/cbl/COBIL00C.cbl` L173-L191 is one `EVALUATE CONFIRMI` with four arms --
+ *       pay, decline, preview, refuse -- and the dialogue that replaced the field could express only
+ *       two of them, which is how the refusal arm at L185-L190 became unreachable and how the
+ *       never-answered arm at L182-L184 got merged into "the operator pressed Enter, so pay".
+ *       Enumerating the four as a type is what makes the missing arms a compile-time concern.
+ */
+type BillPayConfirmationIntent = 'PAY' | 'DECLINE' | 'PREVIEW' | 'REFUSE';
 
 /**
- * The answer the confirmation dialogue sends when its secondary control is used.
+ * Classifies a typed confirmation answer into the four states the reference evaluates it as.
  *
- * Assumptions: a single `'N'`, matching the declining arm at `app/cbl/COBIL00C.cbl` L178-L179, which
- * accepts `'N'` or `'n'`. It is used as the control's caption rather than as a request member, because
- * the declining turn is answered without a request at all -- see the dialogue's cancel handler.
+ * Assumptions: the arms are tested in the reference's OWN order -- confirming, declining, blank, then
+ * everything else -- so a value that could satisfy two tests resolves the way the terminal resolved
+ * it. No value can, at one character, but the order is preserved rather than reasoned about because
+ * the cost of preserving it is nil and the cost of getting it wrong is a payment.
+ *
+ * Assumptions: the blank state is the EMPTY string and not a space. The reference tests
+ * `WHEN SPACES` and `WHEN LOW-VALUES` because a 3270 field is space-filled to its declared width and
+ * an unsent field arrives as low-values; a browser control that was never typed into holds the empty
+ * string, and `maxLength` of one means a space typed into it is one character rather than padding.
+ * A typed space is therefore correctly a refusal -- it is a character the operator supplied that is
+ * neither answer -- which is the same outcome the terminal reached by a different route.
+ * @param {string} answer - The confirmation field's current value, at most one character wide.
+ * @returns {BillPayConfirmationIntent} `PAY` for a confirming answer, `DECLINE` for a declining one,
+ *   `PREVIEW` for the never-answered state, and `REFUSE` for any other character.
  */
-const DECLINING_ANSWER = 'N';
+export function classifyConfirmationAnswer(answer: string): BillPayConfirmationIntent {
+  if (isConfirmingAnswer(answer)) {
+    return 'PAY';
+  }
+  if (isDecliningAnswer(answer)) {
+    return 'DECLINE';
+  }
+  if (answer === '') {
+    return 'PREVIEW';
+  }
+  return 'REFUSE';
+}
 
 /**
  * Control identifier for the account field, used to bind its error text to it for assistive software.
@@ -228,21 +308,69 @@ const ACCOUNT_ID_CONTROL_ID = 'billpay-account-id';
 const ACCOUNT_ID_FIELD = 'accountId';
 
 /**
- * Matches every character an account entry may not contain, for the paste filter below.
+ * Control identifier for the confirmation field, used to bind its refusal text and hint to it.
  *
- * Assumptions: the complement of the decimal digits, because the entry feeds `ACCT-ID PIC 9(11)` and
- * COBOL's `IS NUMERIC` on the receiving field admits digits and nothing else -- no sign, no separator and
- * no space.
+ * Assumptions: a constant for the same reason the account entry's is -- `ui/src/layout/fieldHelp.tsx`
+ * derives both the refusal element's identifier and the hint element's from it, and this screen renders
+ * exactly one such field.
  */
-const NON_DIGIT_PATTERN = /[^0-9]/gu;
+const CONFIRMATION_CONTROL_ID = 'billpay-confirmation';
 
 /**
- * Shape the wire guarantees for this screen's balance: optional sign, digits, point, two decimals.
+ * Stable handle on the confirmation control, kept at the name the withdrawn trigger carried.
  *
- * Assumptions: the service publishes money through `Money.toPlainString()`, so the decimal point and
- * both decimal positions are always present and no grouping separator ever is.
+ * Refactoring Rationale: the value is UNCHANGED from the one the confirmation trigger published, and
+ * keeping it is deliberate rather than incidental. `ui/src/screens/mutationTurnLock.test.tsx` -- a
+ * cross-screen suite that drives this screen's in-flight lock -- locates the confirmation control by
+ * this handle and asserts its enabled state on both sides of a deferred turn. The control changed from
+ * a button to the field the reference declares, but "the control that answers the confirmation" is the
+ * same role, so re-using the handle keeps that suite pointed at the right element instead of at
+ * nothing.
  */
-const WIRE_BALANCE_PATTERN = /^(-?)([0-9]+)\.([0-9]{2})$/u;
+const CONFIRMATION_CONTROL_TEST_ID = 'billpay-confirm';
+
+/**
+ * Contract field name the service attributes a confirmation refusal to.
+ *
+ * Assumptions: `'confirmation'`, which is the member name `BillPaymentRequest` publishes and the name
+ * the service's own `^[YyNn]?$` pattern is declared on. Matching it is what lets a refusal the service
+ * attributed and one this screen raised locally mark the same control through one code path.
+ */
+const CONFIRMATION_FIELD = 'confirmation';
+
+/**
+ * Shape an account entry must have before this screen will look it up.
+ *
+ * Assumptions: exactly eleven decimal digits, because that is what `ACCT-ID PIC 9(11)` at
+ * `app/cpy/CVACT01Y.cpy` L5 can receive. A `PIC 9(11)` field cannot hold a shorter value -- a
+ * three-digit entry does not fill it -- so a wrong width is refused by the same edit that refuses a
+ * non-digit, which is how `app/cbl/COACTVWC.cbl` L666-L680 expresses the same rule with one
+ * `NOT NUMERIC` test.
+ */
+const ACCOUNT_ID_PATTERN = /^[0-9]{11}$/u;
+
+/**
+ * The refusal sentence for an account entry that is present but not a non-zero eleven-digit number.
+ *
+ * Refactoring Rationale: this screen previously had no such edit at all, and the consequence was
+ * measured twice. A paste of `{{7*7}} and ${7*7}` had its digits EXTRACTED to `7777`, which reached the
+ * wire, returned a real balance for an account the operator never named, and armed the payment; and an
+ * entry of `0` was accepted by this money-moving screen while the read-only account-view screen refuses
+ * it locally with zero requests. A mutating screen laxer than its read-only sibling is the wrong way
+ * round, so the sibling's edit is adopted here.
+ *
+ * Assumptions: the sentence is `COACTVWC`'s and is READ from the catalog, not retyped. It carries a
+ * DOUBLE SPACE after "must" -- `app/cbl/COACTVWC.cbl` L672 -- and any whitespace-collapsing edit
+ * destroys it silently because the result still reads as correct English.
+ *
+ * Alternatives Considered: composing a new sentence in this program's own voice, since the refusal is
+ * new to this screen. Rejected under transformation rule T8: `app/cbl/COBIL00C.cbl` declares no such
+ * literal, so a sentence written here would be text no line of the baseline holds. Borrowing the one
+ * the baseline already emits for precisely this condition on precisely this field is transcription;
+ * inventing one is not.
+ */
+const ACCOUNT_FILTER_REFUSAL =
+  PROGRAM_MESSAGES.COACTVWC.ACCOUNT_FILTER_MUST_BE_A_NON_ZERO_11_DIGIT_NUMBER;
 
 /**
  * HTTP status the services answer for a record that does not exist.
@@ -288,77 +416,55 @@ export interface BillPayTurn {
 }
 
 /**
- * Renders a wire balance through this screen's own `+9999999999.99` edit mask.
+ * Applies the account-entry edits this screen refuses a lookup on, before any request is composed.
  *
- * Assumptions: the mask is reproduced here rather than imported, and the reason is that
- * `ui/src/format/money.ts` implements a DIFFERENT picture. Its `applyMoneyEditMask` renders
- * `+ZZZ,ZZZ,ZZZ.99` -- nine zero-suppressed positions with group separators, fifteen characters wide --
- * because that is what the account mapsets declare. This screen's picture is `WS-CURR-BAL
- * PIC +9999999999.99` at `app/cbl/COBIL00C.cbl` L56: ten positions, `9` rather than `Z` so nothing is
- * suppressed, no separators, fourteen characters wide. Calling the shared helper would paint a
- * comma-grouped, zero-suppressed, fifteen-character value where the terminal painted a zero-padded
- * fourteen-character one, which is precisely the unification the per-mapset widths exist to prevent.
+ * Purpose: answer a malformed, mistyped or zero account entry LOCALLY, so a value the reference field
+ * could not have held never reaches the wire and never returns a balance for an account the operator
+ * did not name.
  *
- * Alternatives Considered: widening the shared helper with a picture parameter so one function served
- * both screens. Rejected because the two pictures differ in three independent respects -- suppression,
- * grouping and position count -- so the parameter list would carry the whole picture and the shared
- * function would become a picture interpreter serving two callers. The transformation is four
- * operations on a captured string; keeping it beside the field it formats is smaller than the
- * abstraction that would hide it.
+ * Assumptions: the blank arm is this program's own and the malformed arm is borrowed, and the split is
+ * the reference's. `app/cbl/COBIL00C.cbl` L159-L164 tests the entry against spaces and low-values
+ * FIRST -- ahead of the confirmation evaluate at L173 -- and answers with its own
+ * `'Acct ID can NOT be empty...'`, so the blank case is transcribed. The reference has no second edit
+ * on this field, which is the gap this closes with the sentence `app/cbl/COACTVWC.cbl` L672 emits for
+ * the identical condition on the identical field.
  *
- * Trade-offs: the operation is purely lexical -- it reads captured digit groups and pads one of them --
- * so it parses nothing and cannot lose a digit to binary floating point. That is the whole reason the
- * balance is carried as text; a helper that formatted by converting to a number first would discard the
- * exactness on the one figure the operator is about to pay.
+ * Assumptions: the all-zeroes case is tested by comparing against a run of zeroes at the DECLARED
+ * WIDTH rather than by converting the entry to a number. `app/cpy/CVCRD01Y.cpy` L34-L36 declares
+ * `CC-ACCT-ID PIC X(11)` with a numeric `REDEFINES`, so the identifier is characters on the wire and a
+ * number only inside arithmetic; converting it here would discard the leading zeroes that belong to the
+ * declared width and would put an eleven-digit value through an IEEE-754 double on the way.
  *
- * Trade-offs: a value needing more than ten integer positions is rendered in full rather than
- * truncated, matching the registered divergence `D-MONEY-MASK-NO-TRUNCATION` that
- * `ui/src/format/money.ts` records for the same situation. A decimal-aligned COBOL `MOVE` would discard
- * the high-order digit and understate the balance with nothing on screen to say so, and a display
- * defect is not worth transcribing faithfully. The service bounds the value at `9999999999.99`, which
- * is exactly ten digits, so the widening path is unreachable in practice.
- * @param {string} wireBalance - Money as the service published it: optional sign, integer digits, a
- *   decimal point and exactly two decimal digits.
- * @returns {string} The balance rendered through the mask, or the input unchanged when it does not
- *   match the wire contract -- returning the text keeps the amount truthful in the one case where its
- *   presentation cannot be, which is the same discipline the shared money helper follows.
+ * Trade-offs: the entry is TRIMMED before it is judged, and only for the purpose of judging it. A
+ * pasted value with a trailing blank would otherwise be refused with a sentence about digits, which
+ * reports the wrong reason -- the 3270 field was space-filled to its declared width, so a trailing
+ * blank was not a character the operator supplied.
+ * @param {string} raw - The account entry exactly as the control currently holds it.
+ * @returns {BillPayFieldError | null} The refusal to render and mark, or `null` when the entry may be
+ *   looked up.
  */
-export function applyBalanceEditMask(wireBalance: string): string {
-  const parsed = WIRE_BALANCE_PATTERN.exec(wireBalance);
-  if (parsed === null) {
-    return wireBalance;
+export function refuseAccountIdEntry(raw: string): BillPayFieldError | null {
+  const entry = raw.trim();
+
+  if (entry === '') {
+    /*
+     * WHY : Assumptions: the entry is marked BLANK rather than merely wrong, because the contract
+     *       distinguishes the two states and the reference's own condition here is emptiness. The
+     *       sentence is the catalog's, so the field marker and the message line carry one wording
+     *       between them.
+     */
+    return {
+      field: ACCOUNT_ID_FIELD,
+      state: 'BLANK',
+      message: BILL_PAY_MESSAGES.ACCT_ID_CAN_NOT_BE_EMPTY,
+    };
   }
 
-  /*
-   * WHY : Assumptions: each group is destructured with an empty-string default that is unreachable
-   *       rather than meaningful. All three groups are mandatory in the pattern, so a successful match
-   *       populates every one; the defaults exist only because `ui/tsconfig.json` types a capture group
-   *       as possibly absent, and a default is preferred to a non-null assertion because it cannot
-   *       throw if the pattern is ever edited.
-   */
-  const [, sign = '', integerDigits = '', decimalDigits = ''] = parsed;
+  if (!ACCOUNT_ID_PATTERN.test(entry) || entry === '0'.repeat(BILL_PAY_FIELD_WIDTHS.accountId)) {
+    return { field: ACCOUNT_ID_FIELD, state: 'NOT_OK', message: ACCOUNT_FILTER_REFUSAL };
+  }
 
-  /*
-   * WHY : Assumptions: the sign position always emits a character, because the picture's leading `+` is
-   *       a FIXED position rather than a conditional one -- it prints `+` for a non-negative value and
-   *       `-` for a negative one. A negative zero cannot arrive, because the pattern captures the sign
-   *       separately from the digits and a scale-two zero is published as `0.00`.
-   */
-  const signCharacter = sign === '-' ? '-' : '+';
-
-  /*
-   * WHY : Assumptions: the integer field is zero-PADDED and never blanked, which is the one behaviour
-   *       that separates this mask from the account screens'. A `9` position prints its digit
-   *       unconditionally, so a balance of `1234.56` paints as `+0000001234.56` and a zero balance
-   *       paints as `+0000000000.00`. Padding with spaces here, as a `Z` picture would, would silently
-   *       adopt the other screens' presentation.
-   */
-  const integerField =
-    integerDigits.length >= BALANCE_INTEGER_POSITIONS
-      ? integerDigits
-      : integerDigits.padStart(BALANCE_INTEGER_POSITIONS, '0');
-
-  return `${signCharacter}${integerField}.${decimalDigits}`;
+  return null;
 }
 
 /**
@@ -599,21 +705,27 @@ export function billPayFailure(failure: unknown, paying: boolean): BillPayFailur
   return { message: fallback, fieldErrors };
 }
 
-/**
- * Reduces a proposed account entry to the characters the reference field could have received.
- *
- * Trade-offs: the value is filtered on the way in as well as being bounded by `maxLength` on the
- * control. The declared maximum is what a keyboard obeys, but it does not constrain a PASTE of mixed
- * characters, and the reference field could not receive one at all -- `ACTIDIN` is an eleven-position
- * field feeding `ACCT-ID PIC 9(11)`. Filtering is the browser equivalent of that field behaviour;
- * without it a pasted value would reach the refusal path and report a digit problem the operator did not
- * create.
- * @param {string} raw - The value the control is proposing, as typed or pasted.
- * @returns {string} The value reduced to at most eleven decimal digits.
+/*
+ * WHY : ⚠️ Refactoring Rationale: the paste filter that stood here is WITHDRAWN. It read
+ *       `raw.replace(NON_DIGIT_PATTERN, '').slice(0, 11)`, and its stated justification -- that
+ *       filtering is "the browser equivalent of that field behaviour" -- is false in the one respect
+ *       that matters. A 3270 numeric field DISCARDED a non-numeric keystroke; it did not compact the
+ *       digits it found in a longer string into a different, shorter, well-formed identifier. Measured
+ *       in a browser: a paste of `{{7*7}} and ${7*7}` became `7777`, `' OR 1=1 --` became `11` and
+ *       `1' UNION SELECT NULL--` became `1`, each of which then reached the wire, returned a real
+ *       balance for an account the operator never named, and armed the payment control -- with no
+ *       message anywhere on the screen saying the value had not been honoured.
+ * WHY : Alternatives Considered: keeping the filter and adding a message when it altered the value.
+ *       Rejected because the operator would then be told about an alteration they cannot undo -- the
+ *       original text is already gone from the control -- and because the alteration is the defect, not
+ *       the silence. What replaces it is {@link refuseAccountIdEntry}, which leaves the operator's own
+ *       characters in the field, refuses the turn locally with the sentence the baseline emits for that
+ *       condition, and sends nothing.
+ * WHY : Trade-offs: `maxLength` on the control is retained and is now the ONLY inbound constraint, so
+ *       an ordinary keystroke past the eleventh is still dropped the way the terminal dropped it. It
+ *       does not bound a paste, which is exactly why the refusal above tests the width as well as the
+ *       digits rather than trusting the attribute.
  */
-function acceptAccountIdKeystrokes(raw: string): string {
-  return raw.replace(NON_DIGIT_PATTERN, '').slice(0, BILL_PAY_FIELD_WIDTHS.accountId);
-}
 
 /**
  * Renders the bill payment screen: look an account up, then pay its balance in full on confirmation.
@@ -653,6 +765,17 @@ export function BillPayScreen(): ReactElement {
   const [fieldErrors, setFieldErrors] = useState<readonly BillPayFieldError[]>([]);
 
   /*
+   * WHY : Refactoring Rationale: the confirmation answer is STATE the operator types, where it used to
+   *       be a value two dialogue controls supplied. That is the whole of the CRITICAL defect's fix:
+   *       while the answer was carried by a control, "commit" was the default action of whichever
+   *       control held focus, and focus was moved onto it -- so an Enter that the row-24 legend itself
+   *       advertises as `ENTER=Continue` paid a balance. An answer held here can only become `'Y'`
+   *       because a `'Y'` was typed, which is precisely the property `EVALUATE CONFIRMI` at
+   *       `app/cbl/COBIL00C.cbl` L173-L191 relies on.
+   */
+  const [confirmation, setConfirmation] = useState('');
+
+  /*
    * WHY : Assumptions: this one flag is the WHOLE-TURN keyboard lock and not a spinner condition. It is
    *       set before the request leaves and cleared only when the turn settles, and every control and
    *       every attention identifier this screen offers is held shut for that entire window: the account
@@ -667,6 +790,25 @@ export function BillPayScreen(): ReactElement {
   const [busy, setBusy] = useState(false);
 
   /*
+   * WHY : Refactoring Rationale: WHICH control the outstanding turn belongs to is recorded, in addition
+   *       to the fact that one is outstanding. The in-progress indicator used to sit on the payment
+   *       control unconditionally, so pressing `ENTER=Continue` to READ a balance drew a spinner on the
+   *       money button -- measured, and the operator is then shown activity on the one control they did
+   *       not touch. The reading turn is answered from the account entry and the paying turn from the
+   *       confirmation field, so naming the turn's own control is what puts the indication where the
+   *       keystroke went.
+   * WHY : Alternatives Considered: putting the indicator on the row-24 legend control the operator
+   *       actually pressed, which is the most literal reading of "the pressed control". Not reachable
+   *       from here: `ui/src/layout/PfKeyBar.tsx` renders those from a descriptor carrying `label`,
+   *       `enabled` and an invocation, with no per-binding busy member, and that module is not this
+   *       screen's. The field the turn reads its answer from is the nearest control this screen owns,
+   *       and it is where the operator's attention already is because the cursor was placed in it.
+   * WHY : Trade-offs: `null` while idle rather than a boolean pair, so the two indicators cannot both
+   *       be drawn and neither can be drawn without a turn in flight.
+   */
+  const [busyControl, setBusyControl] = useState<BillPayCursorTarget | null>(null);
+
+  /*
    * WHY : Refactoring Rationale: the cursor is moved explicitly, in addition to marking the field with
    *       `validateStatus`, and for this mapset the movement is the more faithful of the two signals.
    *       `app/cbl/COBIL00C.cbl` does NOT `COPY CSSETATY` -- the templated copybook that recolours a
@@ -676,7 +818,15 @@ export function BillPayScreen(): ReactElement {
    *       only per-field indication this screen's source actually produces.
    */
   const accountInputRef = useRef<InputRef>(null);
-  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+  /*
+   * WHY : Refactoring Rationale: the confirmation cursor destination is the FIELD the reference
+   *       declares, not a button. It held an `HTMLButtonElement` -- the dialogue's trigger -- which is
+   *       how `MOVE -1 TO CONFIRML` at `app/cbl/COBIL00C.cbl` L239 came to place the cursor on a control
+   *       whose activation moved money. `CONFIRM` at `app/bms/COBIL00.bms` L115-L119 is
+   *       `ATTRB=(FSET,NORM,UNPROT) LENGTH=1`: an unprotected one-position input, so the cursor landing
+   *       in it arms nothing at all until a character is typed.
+   */
+  const confirmInputRef = useRef<InputRef>(null);
 
   /**
    * Whether a turn is already in flight, held in a ref so two events in one batch cannot both pass.
@@ -718,7 +868,7 @@ export function BillPayScreen(): ReactElement {
      * Applies a recorded cursor move once the render that requested it has reached the DOM.
      *
      * Assumptions: the request is cleared whether or not a control was there to receive it, so a
-     * destination recorded for a control that has since been withdrawn -- the confirmation button on a
+     * destination recorded for a control that has since been withdrawn -- the confirmation field on a
      * turn that stopped offering payment -- cannot be replayed against a later render.
      * @returns {void} Nothing; completion is the focused control and the discharged request.
      */
@@ -728,7 +878,7 @@ export function BillPayScreen(): ReactElement {
       }
 
       if (pendingFocus === 'confirm') {
-        confirmButtonRef.current?.focus();
+        confirmInputRef.current?.focus();
       } else {
         accountInputRef.current?.focus();
       }
@@ -751,7 +901,14 @@ export function BillPayScreen(): ReactElement {
 
   const focusConfirm = useCallback(
     /**
-     * Records the cursor move onto the confirmation control, which is `MOVE -1 TO CONFIRML`.
+     * Records the cursor move onto the confirmation FIELD, which is `MOVE -1 TO CONFIRML`.
+     *
+     * Assumptions: the destination is the one-position input and nothing else, and that is the whole
+     * of the CRITICAL fix rather than a detail of it. `app/bms/COBIL00.bms` L115-L119 declares
+     * `CONFIRM` unprotected with no `IC`, so the cursor arriving there arms nothing: the field is
+     * empty, and an Enter pressed against an empty confirmation is answered by this screen with no
+     * request and no dialogue at all. The destination it replaced was a button whose activation paid
+     * the balance, which made Enter the commit gesture at two consecutive turns.
      * @returns {void} Nothing; the effect above performs the move after the commit, by which point the
      *   control the reference points at has been enabled by the same commit.
      */
@@ -775,6 +932,14 @@ export function BillPayScreen(): ReactElement {
       setAccountId('');
       setBalance(null);
       setPayable(false);
+      /*
+       * WHY : Assumptions: the typed answer is cleared here as well, which is the paragraph's own
+       *       `MOVE SPACES ... CONFIRMI OF COBIL0AI` at `app/cbl/COBIL00C.cbl` L563-L565 -- one group
+       *       move that blanks the entry, the balance, the answer and the message together. Leaving a
+       *       `'Y'` in the field across a clear would leave the next turn already answered, and the
+       *       next turn is the one that pays.
+       */
+      setConfirmation('');
       setMessage(null);
       setFieldErrors([]);
       setSeverity('error');
@@ -795,15 +960,25 @@ export function BillPayScreen(): ReactElement {
     setSeverity(turn.severity);
     setFieldErrors([]);
 
+    /*
+     * WHY : Assumptions: a settled reading turn leaves the confirmation field EMPTY, whatever it held
+     *       when the turn began. The reference re-sends the whole map with `CONFIRMI` space-filled from
+     *       `INITIALIZE-ALL-FIELDS` or repainted by the prompt path, so the answer never survives the
+     *       turn that reads the balance -- and a surviving answer is the state in which one further
+     *       Enter would pay against a figure that had just been replaced.
+     */
+    setConfirmation('');
+
     if (turn.clearEntry) {
       setAccountId('');
     }
 
     /*
-     * WHY : Assumptions: the cursor lands on the confirmation control only when payment is being
+     * WHY : Assumptions: the cursor lands on the confirmation FIELD only when payment is being
      *       offered, and on the account entry otherwise. That is the reference's own split: L239 moves
      *       the cursor to `CONFIRML` alongside the confirmation prompt, while the nothing-to-pay path at
-     *       L203 and every refusal path move it to `ACTIDINL`.
+     *       L203 and every refusal path move it to `ACTIDINL`. It is safe to move it there because the
+     *       field it moves to is empty and an empty answer commits nothing.
      */
     if (turn.payable) {
       focusConfirm();
@@ -829,8 +1004,12 @@ export function BillPayScreen(): ReactElement {
      *       reference sets the error flag, and L208's `IF NOT ERR-FLG-ON` gate means the confirmation
      *       prompt is never reached on such a turn -- so the operator is not left able to confirm against
      *       a balance the last turn failed to establish.
+     * WHY : Assumptions: the typed answer goes with it, for the same reason. A withdrawn payment with a
+     *       `'Y'` still standing in the field would re-arm the moment a later turn made the balance
+     *       payable again, without the operator having answered that turn.
      */
     setPayable(false);
+    setConfirmation('');
     focusAccountId();
   }
 
@@ -859,73 +1038,135 @@ export function BillPayScreen(): ReactElement {
   }
 
   /**
-   * Runs one turn of the screen, which is `PROCESS-ENTER-KEY` at `app/cbl/COBIL00C.cbl` L154-L244.
+   * Releases the transport bookkeeping a turn holds, whatever that turn's outcome was.
    *
-   * Assumptions: ONE function serves both the report and the payment, because the reference has one
-   * paragraph serving both. `PROCESS-ENTER-KEY` validates the entry, evaluates the confirmation field and
-   * then either reports the balance or writes the payment, so the confirmation value is the only
-   * difference between the two turns and it is this function's only parameter.
+   * Purpose: release the double-submit guard, the screen-wide lock and the per-control indicator in one
+   * place, so no outcome path can release one of the three and leave another standing.
    *
-   * Assumptions: the blank-entry refusal is answered LOCALLY and reaches no network, because the reference
-   * answers it before it reaches a file. L159-L164 tests the entry against spaces and low-values FIRST --
-   * ahead of the confirmation evaluate at L173 -- and sends the map immediately, so the check guards the
-   * payment turn as well as the report. The service validates the same condition independently, so this
-   * is a duplicate by design rather than the only guard.
+   * Refactoring Rationale: the three were released inline in both handlers of the single request this
+   * screen used to make. There are now two requests and four outcome paths between them, and a lock
+   * left standing on any one of them is a screen an operator cannot use again without reloading it.
+   * @returns {void} Nothing; completion is the released lock.
+   */
+  function settleTurn(): void {
+    inFlight.current = false;
+    setBusy(false);
+    setBusyControl(null);
+  }
+
+  /**
+   * Refuses the account entry locally, before any request is composed.
    *
-   * Assumptions: the payment is ONE request carrying the confirmation, not a second write layered on the
-   * report. The reference performs the cross-reference read, the identifier generation, the ledger write
-   * and the balance reduction inside a single CICS task at L210-L235, and the service performs the
-   * equivalent inside one database transaction. Splitting it client-side would make a partially applied
-   * payment observable, a state the baseline never exhibits.
-   * @param {string | null} confirmation - `'Y'` to pay the reported balance, or `null` to report it
-   *   without writing anything.
+   * Purpose: answer a blank, malformed or zero account entry the way the reference answers it -- with a
+   * sentence, a marked field and the cursor back on the entry -- and reach no network at all.
+   *
+   * Assumptions: the reported balance is discarded with the refusal. The entry that produced the
+   * balance is the entry now being refused, so leaving the figure on screen would leave the operator
+   * looking at a balance belonging to no account the screen currently names.
+   * @param {BillPayFieldError} refusal - The refusal {@link refuseAccountIdEntry} raised for the entry.
+   * @returns {void} Nothing; the painted state is the screen's own, and no request is made.
+   */
+  function refuseAccountEntry(refusal: BillPayFieldError): void {
+    setMessage(refusal.message);
+    setSeverity('error');
+    setBalance(null);
+    setPayable(false);
+    setConfirmation('');
+    setFieldErrors([refusal]);
+    focusAccountId();
+  }
+
+  /**
+   * Answers a confirmation character the reference refuses, which is its `WHEN OTHER` arm.
+   *
+   * Purpose: paint `'Invalid value. Valid values are (Y/N)...'` and put the cursor back on the
+   * confirmation field, transcribing `app/cbl/COBIL00C.cbl` L185-L190 exactly.
+   *
+   * Refactoring Rationale: this arm was UNREACHABLE while the answer was supplied by a two-control
+   * dialogue -- nothing but `'Y'` or `'N'` could be submitted, so no third character existed to refuse.
+   * Restoring the typed field restores the arm, and the sentence is read from the shared catalog rather
+   * than retyped because a second program emits the same literal.
+   *
+   * Assumptions: the reported balance and the standing offer both SURVIVE this refusal, and the
+   * reference is what settles that. The arm sends the map at L190, before the balance move at
+   * L193-L194 has run, so the operator keeps looking at the balance the previous turn read and the
+   * confirmation field stays open for a second attempt. Withdrawing the offer here would make a typo
+   * cost the operator the lookup as well.
+   * @returns {void} Nothing; the painted state is the screen's own, and no request is made.
+   */
+  function refuseConfirmationAnswer(): void {
+    setMessage(SHARED_MESSAGES.INVALID_VALUE_VALID_VALUES_ARE_Y_N);
+    setSeverity('error');
+    setFieldErrors([
+      {
+        field: CONFIRMATION_FIELD,
+        state: 'NOT_OK',
+        message: SHARED_MESSAGES.INVALID_VALUE_VALID_VALUES_ARE_Y_N,
+      },
+    ]);
+    focusConfirm();
+  }
+
+  /**
+   * Leaves the standing payment offer exactly as it is, clears the answer, and makes no request.
+   *
+   * Purpose: serve the two arms of the reference's confirmation evaluate that must not move money and
+   * must not damage the turn's work -- the never-answered arm and the declining arm.
+   *
+   * Refactoring Rationale: this is where the CRITICAL defect is actually answered. While the answer was
+   * a focusable control, the never-answered arm did not exist as a state at all: the cursor was placed
+   * on a control whose default activation paid, so an Enter pressed against an unanswered prompt WAS
+   * the payment. Measured before the fix, an operator who typed only the eleven account digits and then
+   * pressed Enter three times moved the whole balance. Answering the unanswered prompt with nothing but
+   * the prompt again is what makes Enter safe by default.
+   *
+   * Assumptions: the never-answered arm makes NO request, where `app/cbl/COBIL00C.cbl` L182-L184
+   * performs `READ-ACCTDAT-FILE`. The observable outcome is identical -- the reference re-read the
+   * record and repainted the same balance and the same prompt, because a 3270 turn always round-trips
+   * -- so what is dropped is one request whose answer the screen already holds, not a state the
+   * operator could see. Not making it is also what lets the regression be asserted directly: after a
+   * preview, a bare Enter is provably a no-op on the wire.
+   *
+   * Assumptions: the declining arm keeps the entry and the balance, where L178-L181 performs
+   * `CLEAR-CURRENT-SCREEN`. This is a DELIBERATE divergence and it is the one this screen's QA finding
+   * names: measured, `'N'` erased the account number and discarded the fetched balance with no
+   * acknowledgement anywhere on screen, so an operator who declined once had to retype the identifier
+   * and pay for a second lookup to get back to where they were. Declining a payment is a safe act and a
+   * safe act must not destroy work.
+   *
+   * Assumptions: the prompt is re-asserted rather than an acknowledgement composed, because
+   * `app/cbl/COBIL00C.cbl` declares no cancellation literal at all -- its declining arm sets the error
+   * flag precisely so that no sentence is emitted -- and rule T8 forbids putting words on the screen
+   * that no line of the baseline holds. The offer genuinely does still stand, so the sentence that
+   * states it is the honest one to leave standing.
+   * @returns {void} Nothing; the painted state is the screen's own, and no request is made.
+   */
+  function awaitConfirmationAnswer(): void {
+    setConfirmation('');
+    setFieldErrors([]);
+    setMessage(BILL_PAY_MESSAGES.CONFIRM_TO_MAKE_A_BILL_PAYMENT);
+    setSeverity('error');
+    focusConfirm();
+  }
+
+  /**
+   * Reads the payable balance for an account, which is the reference's reporting turn.
+   *
+   * Purpose: compose the ONE request that carries no confirmation, so a reading turn cannot post a
+   * payment however the screen's state got there.
+   *
+   * Refactoring Rationale: the reading and the paying turn used to be one call whose only difference
+   * was whether a `confirmation` member was present, which made "this turn cannot move money" a
+   * property of a conditional rather than of the call. `inquireAccountPayableBalance` builds the body
+   * itself and refuses to report a posted payment, so the guarantee is carried by the function that is
+   * called and not by the branch that called it.
+   * @param {string} account - The eleven-digit account entry, already refused if it was not one.
    * @returns {void} Nothing; every outcome, including every failure, is painted onto the screen.
    */
-  function runTurn(confirmation: string | null): void {
-    /*
-     * WHY : Assumptions: a turn arriving while one is in flight is DROPPED, and the guard matters more
-     *       here than on a read-only screen. A 3270 keyboard locks until the region replies, so the
-     *       reference is serialised by the hardware and needs no such guard; without one, a doubled Enter
-     *       or a double-clicked confirmation could submit the same payment twice and move the money twice
-     *       where the operator asked once. A ref rather than the busy flag is what makes it effective:
-     *       state updates are batched, so two events in one batch would both observe the old flag.
-     */
-    if (inFlight.current) {
-      return;
-    }
-
-    if (accountId === '') {
-      setMessage(BILL_PAY_MESSAGES.ACCT_ID_CAN_NOT_BE_EMPTY);
-      setSeverity('error');
-      setBalance(null);
-      setPayable(false);
-      /*
-       * WHY : Assumptions: the entry is marked BLANK rather than merely wrong, because the contract
-       *       distinguishes the two states and the reference's own condition is emptiness. The sentence is
-       *       the catalog's, so the field marker and the message line carry one wording between them.
-       */
-      setFieldErrors([
-        {
-          field: ACCOUNT_ID_FIELD,
-          state: 'BLANK',
-          message: BILL_PAY_MESSAGES.ACCT_ID_CAN_NOT_BE_EMPTY,
-        },
-      ]);
-      focusAccountId();
-      return;
-    }
-
-    /*
-     * WHY : Assumptions: the confirmation member is OMITTED on the reporting turn rather than set to
-     *       `undefined`. The contract declares it optional and the service reads its absence as the
-     *       reference reads a blank `CONFIRMI` at L182-L184 -- read the account and report the balance
-     *       without writing. `ui/tsconfig.json` sets `exactOptionalPropertyTypes`, under which an
-     *       explicit `undefined` and an absent member are different types, and only absence matches.
-     */
-    const request = confirmation === null ? { accountId } : { accountId, confirmation };
-
+  function dispatchInquiry(account: string): void {
     inFlight.current = true;
     setBusy(true);
+    setBusyControl('accountId');
 
     /*
      * WHY : Assumptions: the promise is consumed with a two-argument `then` rather than being awaited in
@@ -934,42 +1175,156 @@ export function BillPayScreen(): ReactElement {
      *       caller drops or wrapping every call in a discard -- so the rejection path is given a named
      *       function here, which is also where the reference's own refusal wording is applied.
      */
-    payAccountBalanceInFull(request).then(
+    inquireAccountPayableBalance(account).then(
       /**
-       * Paints a settled turn.
-       * @param {Awaited<ReturnType<typeof payAccountBalanceInFull>>} outcome - Which outcome the service
-       *   reported: a written payment, or the balance a confirmed request would pay.
+       * Paints the balance the service read.
+       * @param {BillPaymentPreview} preview - The unconfirmed answer the service returned.
        * @returns {void} Nothing; the painted state is the screen's own.
        */
-      (outcome): void => {
-        inFlight.current = false;
-        setBusy(false);
-
-        if (outcome.outcome === 'PAID') {
-          applyPaid(outcome.payment.transactionId);
-          return;
-        }
-
-        /*
-         * WHY : Assumptions: a CONFIRMED request answered with a preview is painted as a preview rather
-         *       than reported as a fault. The service answers 200 with a preview whenever it declines to
-         *       write, and a balance that turned non-positive between the two turns is the realistic
-         *       case, because the reporting turn deliberately takes no lock. The reference behaves the
-         *       same way: L197-L206 re-tests the balance on the confirming turn before it writes.
-         */
-        applyTurn(previewTurn(outcome.preview));
+      (preview: BillPaymentPreview): void => {
+        settleTurn();
+        applyTurn(previewTurn(preview));
       },
       /**
-       * Paints a failed turn in the reference's own words.
+       * Paints a failed lookup in the reference's own words.
        * @param {unknown} failure - Whatever the request rejected with.
        * @returns {void} Nothing; the reported state is the screen's own.
        */
       (failure: unknown): void => {
-        inFlight.current = false;
-        setBusy(false);
-        reportFailure(failure, confirmation !== null);
+        settleTurn();
+        reportFailure(failure, false);
       },
     );
+  }
+
+  /**
+   * Writes the payment the operator confirmed by typing a confirming answer.
+   *
+   * Purpose: compose the ONE request that carries the confirmation, and reach it only from the arm that
+   * classified a typed answer as confirming.
+   *
+   * Assumptions: the payment is ONE request, not a second write layered on the report. The reference
+   * performs the cross-reference read, the identifier generation, the ledger write and the balance
+   * reduction inside a single CICS task at L210-L235, and the service performs the equivalent inside one
+   * database transaction. Splitting it client-side would make a partially applied payment observable, a
+   * state the baseline never exhibits.
+   *
+   * Trade-offs: `payAccountBalanceConfirmed` REJECTS if the service answers a confirmed request with a
+   * preview, so that outcome is painted with `'Unable to Add Bill pay Transaction...'` rather than with
+   * the preview's own advisory. It is reachable -- the balance can fall to zero between the two turns,
+   * because the reading turn deliberately takes no lock, and L197-L206 re-tests it on the confirming
+   * turn for exactly that reason. The exchange is accepted: the sentence painted is one the reference
+   * emits for a payment that did not write, it is painted for a payment that did not write, and what is
+   * bought with it is a commit path that structurally cannot be reached with a non-confirming answer.
+   * @param {string} account - The eleven-digit account entry, already refused if it was not one.
+   * @param {string} answer - The confirming answer the operator typed, `'Y'` or `'y'`.
+   * @returns {void} Nothing; every outcome, including every failure, is painted onto the screen.
+   */
+  function dispatchPayment(account: string, answer: string): void {
+    inFlight.current = true;
+    setBusy(true);
+    setBusyControl('confirm');
+
+    payAccountBalanceConfirmed(account, answer).then(
+      /**
+       * Paints the outcome of a written payment.
+       * @param {Awaited<ReturnType<typeof payAccountBalanceConfirmed>>} payment - The row the service
+       *   wrote for the payment.
+       * @returns {void} Nothing; the painted state is the screen's own.
+       */
+      (payment): void => {
+        settleTurn();
+        applyPaid(payment.transactionId);
+      },
+      /**
+       * Paints a failed payment in the reference's own words.
+       * @param {unknown} failure - Whatever the request rejected with.
+       * @returns {void} Nothing; the reported state is the screen's own.
+       */
+      (failure: unknown): void => {
+        settleTurn();
+        reportFailure(failure, true);
+      },
+    );
+  }
+
+  /**
+   * Runs one turn of the screen, which is `PROCESS-ENTER-KEY` at `app/cbl/COBIL00C.cbl` L154-L244.
+   *
+   * Purpose: dispatch the Enter key to exactly one of the reference's arms, reading the confirmation
+   * answer the operator typed rather than inferring one from which control happens to hold the cursor.
+   *
+   * Assumptions: the turn is dispatched on the FOUR-state classification of the typed answer, because
+   * the reference's `EVALUATE CONFIRMI` at L173-L191 has four arms. Only one of them writes anything,
+   * and it is reached only by a character the operator supplied, which is the whole of the safety
+   * property this screen has to hold.
+   *
+   * Assumptions: the answer is only consulted while a payment is actually on offer. The reference has
+   * the same gate in a different shape -- L208's `IF NOT ERR-FLG-ON` and the `CONF-PAY-YES` test at
+   * L210 are both reached only after a read established a positive balance -- and this screen withdraws
+   * the offer on every refusal, every failure and every edit of the account entry, so a stale answer
+   * cannot survive into a turn that would honour it.
+   *
+   * Assumptions: the blank-entry refusal is answered LOCALLY and reaches no network, because the
+   * reference answers it before it reaches a file. L159-L164 tests the entry against spaces and
+   * low-values FIRST -- ahead of the confirmation evaluate at L173 -- and sends the map immediately, so
+   * the check guards the payment turn as well as the report. The service validates the same condition
+   * independently, so this is a duplicate by design rather than the only guard.
+   * @returns {void} Nothing; every outcome, including every failure, is painted onto the screen.
+   */
+  function runEnterTurn(): void {
+    /*
+     * WHY : Assumptions: a turn arriving while one is in flight is DROPPED, and the guard matters more
+     *       here than on a read-only screen. A 3270 keyboard locks until the region replies, so the
+     *       reference is serialised by the hardware and needs no such guard; without one, a doubled Enter
+     *       could submit the same payment twice and move the money twice where the operator asked once. A
+     *       ref rather than the busy flag is what makes it effective: state updates are batched, so two
+     *       events in one batch would both observe the old flag.
+     */
+    if (inFlight.current) {
+      return;
+    }
+
+    const refusal = refuseAccountIdEntry(accountId);
+    if (refusal !== null) {
+      refuseAccountEntry(refusal);
+      return;
+    }
+
+    /*
+     * WHY : Assumptions: the entry is trimmed for the wire the same way it was trimmed to be judged, so
+     *       the value looked up is the value the edit admitted. A 3270 field arrives space-filled to its
+     *       declared width and the reference moves it into `ACCT-ID PIC 9(11)`, which discards the
+     *       padding; a browser control has no padding, so the only blanks that can be here came from a
+     *       paste and are not part of the identifier either.
+     */
+    const account = accountId.trim();
+
+    if (!payable) {
+      dispatchInquiry(account);
+      return;
+    }
+
+    switch (classifyConfirmationAnswer(confirmation)) {
+      case 'PAY':
+        dispatchPayment(account, confirmation);
+        return;
+      case 'REFUSE':
+        refuseConfirmationAnswer();
+        return;
+      /*
+       * WHY : Assumptions: the declining answer and the never-answered field share one arm here where
+       *       the reference gives them two, and they share it because after the divergence recorded at
+       *       `awaitConfirmationAnswer` the two outcomes are identical: no request, no state discarded,
+       *       the answer blank and the offer still standing. Writing them as two arms with one body
+       *       would assert a difference that no longer exists.
+       */
+      case 'DECLINE':
+      case 'PREVIEW':
+      default:
+        awaitConfirmationAnswer();
+        return;
+    }
   }
 
   /*
@@ -998,14 +1353,22 @@ export function BillPayScreen(): ReactElement {
    *       `app/cpy/CSSTRPFY.cpy`'s own aliasing, so F15 and F16 reach the PF3 and PF4 handlers below
    *       without this screen registering them. Verified in a browser: F16 left the screen in a state
    *       byte-identical to the F4 state, and F15 reached the same destination as F3.
-   * WHY : Refactoring Rationale: ALL THREE bindings carry `disabled: busy`, where only ENTER did. A
-   *       3270 keyboard is locked for the whole turn -- the terminal accepts no attention identifier
-   *       at all between sending the map and receiving the region's reply -- so the reference could not
-   *       have taken PF3 or PF4 mid-turn even in principle. Leaving those two live let an operator
-   *       press F3 and leave the screen, or F4 and watch it clear, while `payAccountBalanceInFull` was
-   *       still in flight and about to commit: the screen then showed a cleared or abandoned state for
-   *       a payment that had moved money. Reproducing the lock explicitly is what a browser has to do,
-   *       because nothing between the keyboard and this handler map enforces it.
+   * WHY : Refactoring Rationale: ALL THREE bindings are held shut for the duration of a turn, where
+   *       only ENTER was. A 3270 keyboard is locked for the whole turn -- the terminal accepts no
+   *       attention identifier at all between sending the map and receiving the region's reply -- so
+   *       the reference could not have taken PF3 or PF4 mid-turn even in principle. Leaving those two
+   *       live let an operator press F3 and leave the screen, or F4 and watch it clear, while
+   *       `payAccountBalanceConfirmed` was still in flight and about to commit: the screen then showed a
+   *       cleared or abandoned state for a payment that had moved money. Reproducing the lock explicitly
+   *       is what a browser has to do, because nothing between the keyboard and this handler map
+   *       enforces it.
+   * WHY : Assumptions: they are held shut through TWO different channels and the split is deliberate.
+   *       ENTER reports `busy`, because it is the key whose own turn is outstanding, and a busy control
+   *       stays present, focusable and named while declining the press -- which is what the terminal
+   *       did. PF3 and PF4 report `disabled`, because they are being withheld for a turn that is not
+   *       theirs, and there is nothing running for them to announce. Both channels decline in silence
+   *       here: the hook returns without reporting for a busy entry, and the `onInvalidKey` sink below
+   *       discards a `'disabled'` rejection for exactly this reason.
    * WHY : Alternatives Considered: keeping the two keys live and CANCELLING the request instead, with
    *       an abort signal on the client. Rejected because it presents a cancellation this screen cannot
    *       perform: aborting the HTTP request abandons the response, not the write -- the service posts
@@ -1019,21 +1382,86 @@ export function BillPayScreen(): ReactElement {
    *       own request timeout, after which the rejection path re-enables everything and paints the
    *       reference's own `'Unable to Add Bill pay Transaction...'`.
    */
+  /*
+   * WHY : Assumptions: the risk this legend entry declares follows what the key WILL DO on the next
+   *       press, not which attention identifier carries it and not the caption. `ENTER=Continue` is one
+   *       caption over two different actions in this program: `app/cbl/COBIL00C.cbl` L182-L184 re-reads
+   *       the record and writes nothing, while L173-L176 into L210-L235 writes the ledger row and
+   *       reduces the balance. So the emphasis is derived from the arm {@link runEnterTurn} will take --
+   *       which is exactly the pair of conditions that guard `dispatchPayment` there -- and the operator
+   *       sees the strongest control on the bar only in the state where pressing it moves money.
+   * WHY : Alternatives Considered: declaring this entry `'destructive'` for the whole session, which is
+   *       the example `ui/src/layout/usePfKeys.ts` gives for a bill payment. Rejected on two grounds.
+   *       It would paint the paying emphasis on every turn including the reading one, so the signal
+   *       that distinguishes them would be gone; and `ui/src/layout/PfKeyBar.tsx` wraps a destructive
+   *       control in `destructiveFocusTheme`, which this screen deliberately does not use -- that theme
+   *       overrides only `components.Button.colorPrimaryBorder` and, since the confirmation dialogue was
+   *       withdrawn, there is no destructive `Button` on this screen for it to act on. `'mutating'`
+   *       resolves to a solid primary with no danger wrap, which is the honest treatment for a write
+   *       that the operator has already been asked to confirm in a field of its own.
+   * WHY : Trade-offs: the emphasis changes as the confirmation field is typed into, so the bar is not
+   *       static across a turn. That is accepted because the change is the information: the control
+   *       becomes emphatic at precisely the moment the next press would pay, and the field that caused
+   *       it is the one the cursor is already sitting in.
+   */
+  const enterRisk: PfKeyRisk =
+    payable && classifyConfirmationAnswer(confirmation) === 'PAY' ? 'mutating' : 'read-only';
+
   const pfKeyHandlers: PfKeyHandlerMap = {
     ENTER: {
       label: BILL_PAY_LEGEND_LABELS.ENTER,
-      disabled: busy,
+      risk: enterRisk,
+      /*
+       * WHY : Refactoring Rationale: this entry reports `busy` where it declared `disabled: busy`, and
+       *       the swap is not cosmetic -- `ui/src/layout/usePfKeys.ts` tests `disabled` BEFORE `busy`,
+       *       so an entry carrying both resolves as disabled and the busy channel never runs. The two
+       *       differ in what the operator gets: a disabled legend control is greyed, unfocusable and
+       *       loses its place in the tab order for the duration of a write, where a busy one stays
+       *       present, focusable and named and simply declines the press. `ui/src/layout/PfKeyBar.tsx`
+       *       records the reference behaviour this reproduces -- a 3270 announced a running task and
+       *       withdrew nothing -- and inhibited input at the keyboard, which is a silent decline and
+       *       not a message. Both activation paths stay closed: the hook refuses the key press and the
+       *       design system's own button refuses the click while it is loading.
+       * WHY : Assumptions: the flag is read from the synchronous ref rather than from the `busy` render
+       *       state, and it is passed as a PREDICATE so it is evaluated at dispatch. The ref is set
+       *       inside the same task that starts the turn, where a state update is batched and cannot be
+       *       observed by a second event in the same batch -- which is the doubled-Enter this guard
+       *       exists for and the reason {@link runEnterTurn} already latches on the same ref.
+       */
+      busy:
+        /**
+         * Answers whether a turn this key started is still outstanding.
+         *
+         * Purpose: give the legend control its busy affordance for exactly the window in which a second
+         * press would duplicate a write, and release it the moment the turn settles.
+         * @returns {boolean} True while a turn started from this key has not yet settled.
+         */
+        (): boolean => inFlight.current,
       onInvoke:
         /**
-         * Runs the reporting turn, which is the reference's `DFHENTER` arm at L126-L127.
+         * Runs one turn, which is the reference's `DFHENTER` arm at L126-L127.
+         *
+         * Refactoring Rationale: the binding passes NO argument, where it passed `null` to mean "read,
+         * do not pay". The turn now reads the confirmation field itself, which is what the reference
+         * does at L173 -- so the key that the row-24 legend advertises as `ENTER=Continue` no longer
+         * has a second caller that can pass it a confirming answer the operator never typed.
          * @returns {void} Nothing; the turn paints itself and never rejects to this caller.
          */
         (): void => {
-          runTurn(null);
+          runEnterTurn();
         },
     },
     PFK03: {
       label: BILL_PAY_LEGEND_LABELS.PFK03,
+      /*
+       * WHY : Assumptions: `F3=Back` is declared `'read-only'` because the caption names a navigation
+       *       and `app/cbl/COBIL00C.cbl` L128-L135 performs exactly that -- an `XCTL` to the origin
+       *       program with no file access on the way. It keeps `disabled: busy` rather than reporting
+       *       busy, because it does not OWN the outstanding turn: the busy channel says "the key you
+       *       pressed is running, wait", which would be a false statement about a key that is not
+       *       running and is being withheld for the duration of a write it has nothing to do with.
+       */
+      risk: 'read-only',
       disabled: busy,
       onInvoke:
         /**
@@ -1046,6 +1474,16 @@ export function BillPayScreen(): ReactElement {
     },
     PFK04: {
       label: BILL_PAY_LEGEND_LABELS.PFK04,
+      /*
+       * WHY : Assumptions: `F4=Clear` is declared `'read-only'` on the strength of what it does to the
+       *       RECORD, not to the screen. `CLEAR-CURRENT-SCREEN` at `app/cbl/COBIL00C.cbl` L552-L555
+       *       moves spaces into the map's own fields and sends it; no file is read and none is written,
+       *       so nothing an operator could lose exists outside the fields they can retype. Treating a
+       *       screen reset as `'mutating'` would put the paying emphasis on a key that cannot pay and
+       *       would leave the bar with two emphatic controls, which is the signal this channel exists
+       *       to make scarce.
+       */
+      risk: 'read-only',
       disabled: busy,
       onInvoke:
         /**
@@ -1092,13 +1530,18 @@ export function BillPayScreen(): ReactElement {
          * WHY : Assumptions: only an UNMAPPED identifier paints the sentence; one refused because its
          *       handler is momentarily disabled is answered in silence. The two are different events in
          *       the reference. An unmapped identifier is the `WHEN OTHER` arm, which paints. A disabled
-         *       one only ever arises here because a turn is in flight, which holds ALL THREE of this
-         *       screen's bindings shut -- ENTER, PF3 and PF4 -- and that is the 3270 keyboard lock,
-         *       which the hardware enforced by refusing the keystroke before the program ever saw it, so
-         *       no sentence was composed and none was painted. Answering both alike would invent a
-         *       message on a keystroke the reference discards, and it would invent it three times over
-         *       for an operator who kept pressing keys while a payment was being written. The sibling
-         *       main-menu screen draws the same distinction for the same reason.
+         *       one only ever arises here because a turn is in flight, which holds PF3 and PF4 shut --
+         *       and that is the 3270 keyboard lock, which the hardware enforced by refusing the
+         *       keystroke before the program ever saw it, so no sentence was composed and none was
+         *       painted. Answering both alike would invent a message on a keystroke the reference
+         *       discards, and it would invent it three times over for an operator who kept pressing
+         *       keys while a payment was being written. The sibling main-menu screen draws the same
+         *       distinction for the same reason.
+         * WHY : Assumptions: ENTER never reaches this sink at all during a turn, because it reports
+         *       `busy` rather than `disabled` and `ui/src/layout/usePfKeys.ts` returns from a busy entry
+         *       without reporting anything. So the two channels agree on the outcome -- silence -- by
+         *       two routes, and this guard remains load-bearing for the two keys that still take the
+         *       disabled route.
          */
         if (rejection.reason !== 'unmapped') {
           return;
@@ -1140,6 +1583,20 @@ export function BillPayScreen(): ReactElement {
       programName: BILL_PAY_PROGRAM_NAME,
     },
     now: paintedAt,
+    /*
+     * WHY : Assumptions: the `message` slot carries NO `information` member, and the omission is a
+     *       measured decision rather than an oversight. The frame's information channel reproduces the
+     *       second message line some mapsets declare at row 22 -- `INFOMSG` -- and `COBIL00` declares
+     *       none: `grep -n "POS=(2[0-4]" app/bms/COBIL00.bms` returns exactly two fields, `ERRMSG` at
+     *       `POS=(23,1)` and the legend at `POS=(24,1)`, and `grep -n INFOMSG` returns nothing. This
+     *       screen therefore has one message line and reserves no row for a second.
+     * WHY : Alternatives Considered: publishing `information: { text: null }` to reserve the row anyway,
+     *       which is the shape a screen whose mapset DOES declare row 22 must publish on every turn so
+     *       the row does not appear and disappear under the operator. Rejected here because it would
+     *       reserve vertical space this map never spends, pushing the row-24 legend down by one line
+     *       relative to the terminal on every turn of this screen -- a fidelity loss taken to hold open
+     *       a channel that has nothing to say.
+     */
     message: { text: message, severity, mapset: BILL_PAY_MAPSET },
     pfKeys: { keys: bindings, onInvoke: invoke },
     /*
@@ -1176,21 +1633,131 @@ export function BillPayScreen(): ReactElement {
   };
   const accountLabelStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.GREEN] };
   const promptStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.TURQUOISE] };
-  const hintStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL] };
   const ruleStyle: CSSProperties = { borderColor: cssVar[BMS_TEXT_COLOR_TOKENS.YELLOW] };
+
+  /*
+   * WHY : Refactoring Rationale: the `(Y/N)` hint resolves through `HINT_TEXT_TOKENS` rather than
+   *       through the BMS role map directly. Both name the same measured source attribute -- `(Y/N)` is
+   *       `COLOR=NEUTRAL` at `app/bms/COBIL00.bms` L121-L125 -- but the hint map is where the tree
+   *       records that a parenthesised domain hint has TWO measured roles, blue and neutral, and that
+   *       the neutral one must resolve to the text-grade secondary shade rather than to the design
+   *       system's own de-emphasis default. Reading it from there is what keeps this hint painted the
+   *       same as every other neutral hint in the application.
+   */
+  const domainHintStyle: CSSProperties = { color: cssVar[HINT_TEXT_TOKENS.NEUTRAL] };
+
+  /*
+   * WHY : Refactoring Rationale: both entry controls are sized from the character width their copybook
+   *       PICTURE declares, where neither was sized at all. Measured, the eleven-character account entry
+   *       rendered 1173.33px wide -- the full content column -- so the value it holds sat alone at the
+   *       left of a field a hundred times wider than its data, and any marker at the field's right-hand
+   *       edge sat about 1150px from the value it qualified. The helper is spread onto the antd control
+   *       itself rather than onto a wrapper because the padding term it reads resolves in the control's
+   *       own class scope and returns empty on a plain element.
+   * WHY : Trade-offs: the declared width is a CEILING, not a fixed size -- the helper keeps
+   *       `inlineSize: '100%'` alongside it -- so a field wider than a phone viewport still shrinks to
+   *       fit rather than forcing the page to scroll sideways. Design gap G1 records the same trade for
+   *       position.
+   */
+  const accountFieldStyle = copybookFieldWidthStyle(BILL_PAY_FIELD_WIDTHS.accountId, cssVar);
+  const confirmationFieldStyle = copybookFieldWidthStyle(
+    BILL_PAY_FIELD_WIDTHS.confirmation,
+    cssVar,
+  );
+
+  /*
+   * WHY : Refactoring Rationale: the balance is rendered through the shared money renderer, which
+   *       returns the masked text, the sign it classified, the token that sign is painted in and the
+   *       `white-space` mode the rendering requires. The mode is load-bearing rather than decorative:
+   *       every measured picture pads its integer field, and HTML collapses a run of spaces in a text
+   *       node, so painting the text without it discards the column alignment the mask exists to
+   *       produce.
+   * WHY : Trade-offs: the colour therefore comes from the SIGN and no longer from this mapset's single
+   *       `COLOR=BLUE` on `CURBAL` at `app/bms/COBIL00.bms` L103-L106. That is the shared module's own
+   *       recorded decision and it is taken deliberately here: the baseline paints a credit, a debit and
+   *       a settled balance in one hue, and this screen can reach all three -- the nothing-to-pay
+   *       advisory at `app/cbl/COBIL00C.cbl` L198 is `<= ZEROS`, so zero and credit both land on it.
+   *       Colour is redundant either way, because the picture is signed and the leading `+` or `-` is in
+   *       the rendered text.
+   */
+  const renderedBalance = balance === null ? null : renderMoney(balance, BALANCE_PICTURE);
+
+  /*
+   * WHY : Refactoring Rationale: the resolved reference is narrowed by a `typeof` TEST, where it was
+   *       narrowed by calling `String` on it. The renderer publishes a token NAME typed as any key of
+   *       the theme's token map, and that map carries non-string members -- radii, heights -- so the
+   *       indexed type is wider than a colour even though every name the renderer can return addresses
+   *       one. `String` looked like the narrowing that cannot be wrong, but it is the one narrowing that
+   *       cannot FAIL: applied to a member that was not a string it would have produced a CSS value of
+   *       `[object Object]` and painted nothing, which is why `@typescript-eslint/no-base-to-string`
+   *       refuses it. A `typeof` test proves the member is a string before it is used and drops the
+   *       declaration entirely when it is not, so a mis-typed token name loses the colour rather than
+   *       poisoning the style.
+   * WHY : Assumptions: at run time this is the same value it always was. Every name the renderer can
+   *       return addresses a colour, and a resolved reference is already the string `var(--ant-...)`,
+   *       so the test passes on every reachable input and the painted colour is unchanged.
+   * WHY : Alternatives Considered: a type assertion on the indexed access, which the checker accepts
+   *       silently. Rejected because it asserts the very thing that would be false in the failing case
+   *       and would put the `[object Object]` back with the diagnostic removed.
+   */
+  const balanceColourReference =
+    renderedBalance === null ? null : cssVar[renderedBalance.colorToken];
+  const balanceColour = typeof balanceColourReference === 'string' ? balanceColourReference : null;
   const balanceStyle: CSSProperties = {
-    color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE],
     fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData],
+    ...(renderedBalance === null
+      ? {}
+      : {
+          ...(balanceColour === null ? {} : { color: balanceColour }),
+          whiteSpace: renderedBalance.whiteSpace,
+        }),
   };
 
   const accountRefusal = fieldErrors.find(
     /**
      * Selects the refusal attributed to the account entry.
      * @param {BillPayFieldError} refusal - One refusal from the settled turn.
-     * @returns {boolean} True when the refusal names this screen's only editable field.
+     * @returns {boolean} True when the refusal names the account entry.
      */
     (refusal) => refusal.field === ACCOUNT_ID_FIELD,
   );
+
+  /*
+   * WHY : Refactoring Rationale: refusals attributed to the confirmation field are selected and
+   *       rendered, where they were discarded. There is now a control for them to mark -- the field the
+   *       reference declares -- and two sources can raise one: this screen's own `WHEN OTHER` arm, and
+   *       the service, which validates the same member independently against its own `^[YyNn]?$`
+   *       pattern. Both arrive as the same shape and are marked by the same code path.
+   */
+  const confirmationRefusal = fieldErrors.find(
+    /**
+     * Selects the refusal attributed to the confirmation answer.
+     * @param {BillPayFieldError} refusal - One refusal from the settled turn.
+     * @returns {boolean} True when the refusal names the confirmation field.
+     */
+    (refusal) => refusal.field === CONFIRMATION_FIELD,
+  );
+
+  /**
+   * Drops the confirmation field's refusal while leaving every other refusal standing.
+   *
+   * Purpose: let the operator's next keystroke in the confirmation field clear that field's sentence
+   * without disturbing a refusal the same turn attributed to the account entry.
+   * @param {readonly BillPayFieldError[]} current - The refusals the last turn left standing.
+   * @returns {readonly BillPayFieldError[]} The same refusals without the confirmation field's.
+   */
+  function withoutConfirmationRefusal(
+    current: readonly BillPayFieldError[],
+  ): readonly BillPayFieldError[] {
+    return current.filter(
+      /**
+       * Keeps every refusal that is not the confirmation field's.
+       * @param {BillPayFieldError} refusal - One refusal the last turn left standing.
+       * @returns {boolean} True when the refusal names a field other than the confirmation entry.
+       */
+      (refusal: BillPayFieldError): boolean => refusal.field !== CONFIRMATION_FIELD,
+    );
+  }
 
   /*
    * WHY : Trade-offs: the map's absolute row and column positions are NOT reproduced. Every field on
@@ -1212,6 +1779,35 @@ export function BillPayScreen(): ReactElement {
        * colour, which is how the 3270 brightness attribute is carried across.
        */}
       <ScreenTitle style={titleStyle}>{BILL_PAY_TITLE}</ScreenTitle>
+      {/*
+       * WHY : Purpose: this states IN WORDS that a turn is running, which nothing else on the screen
+       *       does. `aria-busy` on the field that owns the turn reports the state and no remedy;
+       *       `REQUEST_IN_PROGRESS` reads "Working on your request. Wait for the screen to answer." and
+       *       tells the operator what to do about it. It matters most on the paying turn, where the
+       *       operator has just committed money and every control they might reach for -- the two
+       *       fields, PF3 and PF4 -- has gone quiet at once.
+       * WHY : Assumptions: the region is mounted on EVERY turn and holds the empty string when idle,
+       *       which is `busyAnnouncement`'s own contract and is load-bearing rather than tidy. A
+       *       `role="status"` element that is inserted at the moment it acquires text is frequently not
+       *       announced at all, because the assistive reader has no live region to observe until after
+       *       the text is already there; one that is present from the first render and changes content
+       *       is announced. The element is visually hidden, so an always-mounted region costs nothing
+       *       an operator can see.
+       * WHY : Assumptions: the sentence is passed for the WHOLE busy window rather than per control,
+       *       because the whole screen is inhibited for it -- `busy` disables both fields and both
+       *       withheld keys -- so a per-control announcement would say the same thing twice about one
+       *       event. Which control owns the turn is already carried by `aria-busy` through
+       *       {@link busyProps}, and that is the right channel for it: it is a property of a control,
+       *       not a sentence for an operator.
+       * WHY : Alternatives Considered: publishing the sentence onto the row-23 message line instead.
+       *       Rejected because that line is a parity surface -- every sentence on it is transcribed from
+       *       a baseline source under rule T8 -- and it already holds the reference's own
+       *       `'Confirm to make a bill payment...'` at exactly the moment a payment is in flight.
+       *       Overwriting a transcribed sentence with an authored one would lose the offer the operator
+       *       is answering, and restoring it afterwards would repaint the band on a turn the reference
+       *       does not repaint.
+       */}
+      {busyAnnouncement(busy ? REQUEST_IN_PROGRESS : undefined)}
 
       {/*
        * Assumptions: no `onFinish` and no submit control, deliberately. Every turn on this screen is
@@ -1265,6 +1861,8 @@ export function BillPayScreen(): ReactElement {
             inputMode="numeric"
             autoFocus
             disabled={busy}
+            style={accountFieldStyle}
+            {...busyProps(busyControl === 'accountId')}
             {...fieldAriaProps(ACCOUNT_ID_CONTROL_ID, {
               invalid: accountRefusal !== undefined,
               hasError: accountRefusal !== undefined,
@@ -1272,13 +1870,21 @@ export function BillPayScreen(): ReactElement {
             })}
             onChange={
               /**
-               * Accepts the digits of a proposed entry and discards the rest of the turn's state.
+               * Records the operator's own entry unchanged and discards the rest of the turn's state.
+               *
+               * Refactoring Rationale: the proposed value is stored AS TYPED, where it used to be run
+               * through a digit filter first. The filter's failure was measured, not theorised: a paste
+               * of `{{7*7}} and ${7*7}` became `7777`, which was then looked up, returned a real
+               * balance for an account the operator never named, and armed the payment -- with nothing
+               * on screen saying the value had been altered. A 3270 numeric field DISCARDED a
+               * non-numeric keystroke; it never compacted the digits out of a longer string into a
+               * different well-formed identifier. Keeping the operator's characters and refusing the
+               * turn is the honest reconstruction, and {@link refuseAccountIdEntry} is what refuses it.
                * @param {ChangeEvent<HTMLInputElement>} event - The control's change event.
-               * @returns {void} Nothing; the accepted value becomes the screen's state.
+               * @returns {void} Nothing; the entry becomes the screen's state.
                */
               (event: ChangeEvent<HTMLInputElement>): void => {
-                const accepted = acceptAccountIdKeystrokes(event.target.value);
-                setAccountId(accepted);
+                setAccountId(event.target.value);
                 /*
                  * WHY : Assumptions: editing the entry discards the reported balance and withdraws the
                  *       payment control, because the balance on screen describes the account that WAS
@@ -1286,9 +1892,14 @@ export function BillPayScreen(): ReactElement {
                  *       figure belonging to a different account than the one now typed, which is a
                  *       money-moving confusion the reference cannot produce -- its balance field is
                  *       repainted by the same turn that reads the entry.
+                 * WHY : Assumptions: the typed answer goes with them. An operator who had already typed
+                 *       `'Y'` and then corrected the identifier would otherwise be one Enter away from
+                 *       paying the account they had just finished typing, on an answer they gave about a
+                 *       different one.
                  */
                 setBalance(null);
                 setPayable(false);
+                setConfirmation('');
                 setFieldErrors([]);
               }
             }
@@ -1319,237 +1930,152 @@ export function BillPayScreen(): ReactElement {
           {BILL_PAY_FIELD_LABELS.currentBalance}
         </Typography.Text>
         <Typography.Text style={balanceStyle} data-testid="billpay-current-balance">
-          {balance === null ? '' : applyBalanceEditMask(balance)}
+          {renderedBalance === null ? '' : renderedBalance.text}
         </Typography.Text>
       </Flex>
 
-      <Flex align="center" gap={cssVar[SPACING_TOKENS.sectionGapCompact]} wrap>
-        <Typography.Text style={promptStyle}>{BILL_PAY_FIELD_LABELS.confirmPrompt}</Typography.Text>
-
-        {/*
-         * WHY : Refactoring Rationale: the single-character `CONFIRM` field is replaced by a confirmation
-         *       dialogue, and the field only existed because a 3270 terminal had no modal. `CONFIRM` is
-         *       `LENGTH=1` at `app/bms/COBIL00.bms` L115-L119 and the program re-reads the whole map to
-         *       find out what was typed into it; a dialogue asks the question directly and cannot receive
-         *       an answer outside the two it offers.
-         * WHY : Assumptions: `'Invalid value. Valid values are (Y/N)...'` at `app/cbl/COBIL00C.cbl` L187
-         *       therefore becomes UNREACHABLE from this screen, and that is a consequence of the dialogue
-         *       rather than an omission. The two controls send `'Y'` and `'N'` and nothing else can be
-         *       submitted, so the branch that rejected a third character has no way to fire. The sentence
-         *       stays in the shared catalog because a second program still emits it and because the
-         *       service still validates the member independently, and `billPayFailure` renders it verbatim
-         *       if it ever arrives.
-         * WHY : Trade-offs: the primary control is marked as a destructive action. Paying a balance in
-         *       full moves real money and cannot be undone from this screen, so it is treated as
-         *       destructive of value even though it destroys no record. The alternative reading is that
-         *       the measured source colours are `COLOR=TURQUOISE` on the prompt and `COLOR=GREEN` on the
-         *       field, with no warning hue anywhere near either; that is accepted as the weaker argument
-         *       here because the 3270 convention for "are you sure" was the re-key itself, which has no
-         *       colour, and the dialogue is what now carries that weight.
-         * WHY : Assumptions: the two controls are LABELLED with the same two characters the mapset's own
-         *       `(Y/N)` hint names, so the answers an operator gives are the answers the reference
-         *       documented, and the retained hint beside them still describes the choice.
-         */}
-        {/*
-         * WHY : Refactoring Rationale: the dialogue takes the cursor onto its CONFIRMING control when it
-         *       opens, and is destroyed when it closes. Neither was set before, and measuring the result
-         *       in a browser is what settled both. antd renders the panel into a portal at the end of
-         *       `<body>`, so an operator who opened it from the keyboard had to press Tab FIVE times to
-         *       reach the answer -- traversing all three row-24 legend controls on the way -- and the
-         *       first control inside the panel is the DECLINING one, so an Enter pressed a single stop
-         *       early cleared the screen instead of paying. That is the opposite of what an operator who
-         *       opened a payment confirmation asked for, and it is nothing like the reference, where
-         *       L239's `MOVE -1 TO CONFIRML` puts the cursor straight onto the answer field.
-         * WHY : Assumptions: the two-act shape of the reference is preserved exactly, not shortened.
-         *       Activating this screen's `Y` is the analogue of typing `'Y'` into `CONFIRMI`, and
-         *       answering in the dialogue is the analogue of the Enter that follows it at L173-L177 --
-         *       so the operator still performs two deliberate acts after the prompt, and the count is
-         *       unchanged from the terminal.
-         * WHY : Trade-offs: the cursor therefore lands on a control that moves money, which is the cost
-         *       of this choice and is accepted on two grounds. The declining control stays FIRST in
-         *       document order, so it is one Shift+Tab away and remains the leftmost target for a
-         *       pointer; and the alternative -- taking the cursor to the declining control instead --
-         *       would make Enter clear the screen on a turn opened in order to pay, which is a worse
-         *       failure than the one it avoids because it discards work silently.
-         * WHY : Assumptions: `destroyOnHidden` is required for the cursor move to happen more than once.
-         *       `ui/node_modules/antd/es/_util/ActionButton.js` focuses from an effect keyed on the flag
-         *       alone, so it fires on mount and never again; without destruction the panel stays mounted
-         *       after the first close and every later opening would leave the cursor outside it.
-         */}
-        {/*
-         * WHY : Alternatives Considered: extending the in-flight lock to the panel's own two answer
-         *       buttons the way every other control on this screen carries it, with
-         *       `okButtonProps={{ disabled: busy }}` and `cancelButtonProps={{ disabled: busy }}`.
-         *       REJECTED because it does not work, and measuring it is what established that: this
-         *       version of the design system renders the panel's content once per opening and does not
-         *       propagate a later `okButtonProps` or `cancelButtonProps` change into a panel that is
-         *       already on screen. A minimal case outside this screen -- a `Popconfirm` whose button
-         *       props are driven by outside state -- kept both answer buttons enabled after that state
-         *       flipped, and the same nodes stayed enabled while the panel was leaving. Shipping the
-         *       props would have looked like the lock and enforced nothing, so the lock is enforced in
-         *       the two handlers below, which is the only place this screen can enforce it.
-         * WHY : Assumptions: `disabled` on the TRIGGER still carries its own weight, and this is not a
-         *       duplicate of that. It stops the panel from being OPENED during a turn; it says nothing
-         *       about a panel that was already open when the turn began, or about the answer buttons of
-         *       one that is closing after `Y` -- both of which stay wired to their handlers.
-         */}
-        <Popconfirm
-          title={BILL_PAY_FIELD_LABELS.confirmPrompt}
-          okText={CONFIRMING_ANSWER}
-          cancelText={DECLINING_ANSWER}
-          okType="danger"
-          okButtonProps={{ autoFocus: true }}
-          destroyOnHidden
-          disabled={!payable || busy}
-          onOpenChange={
-            /**
-             * Returns the cursor to the answer control when the dialogue is DISMISSED rather than
-             * answered.
-             *
-             * Assumptions: a dismissal leaves the confirmation prompt standing, and while that prompt
-             * stands the cursor belongs on the answer -- which is `MOVE -1 TO CONFIRML` at
-             * `app/cbl/COBIL00C.cbl` L239, the placement the reference issues alongside the prompt
-             * itself. So this restores the reference's own resting position rather than inventing one.
-             *
-             * Assumptions: this is the KEYBOARD dismissal path in practice. It is registered for every
-             * close, but a close driven by a pointer carries the browser's own focus action for the same
-             * gesture, and that action is applied afterwards and supersedes this one. That outcome is
-             * deliberate and is documented at the guard below.
-             * @param {boolean} nextOpen - Whether the dialogue is now open.
-             * @returns {void} Nothing; completion is the recorded cursor move, applied after the commit.
-             */
-            (nextOpen: boolean): void => {
-              /*
-               * WHY : Refactoring Rationale: this handler exists because taking the cursor INTO the
-               *       dialogue created an exit that did not previously exist. Measured in a browser: once
-               *       the panel holds focus, closing it with Escape destroys the focused node and leaves
-               *       `document.activeElement` on `<body>`, from which four Tab presses are needed to get
-               *       back to the answer and an Enter would re-run the lookup instead of re-opening the
-               *       dialogue. Before the cursor was moved in, Escape could not lose it, so this is a
-               *       path the focus change introduced and therefore one it has to close.
-               * WHY : Assumptions: the two ANSWERED exits are excluded, and the guard reads state rather
-               *       than a flag because antd's own ordering makes that sufficient and self-evident.
-               *       Confirming runs `onConfirm` BEFORE `close()`, so `runTurn` has already set the
-               *       in-flight ref by the time this fires and the first clause skips -- which is what
-               *       keeps the cursor from flicking onto the answer control on the very turn that is
-               *       clearing the screen. Declining runs this handler BEFORE `onCancel`, so the recorded
-               *       destination here is superseded within the same batch by the account-entry
-               *       destination that `INITIALIZE-ALL-FIELDS` records, and last write wins.
-               * WHY : Trade-offs: `payable` is re-tested even though the dialogue is `disabled` whenever
-               *       it is false and antd returns early on a disabled trigger. Retested anyway because
-               *       the cost is one boolean read and the failure it prevents is silent: were the panel
-               *       ever dismissed with payment withdrawn, the cursor would be sent to a control that
-               *       is disabled, focus would be refused, and it would rest on `<body>` again.
-               * WHY : Alternatives Considered: making this restore WIN against a pointer dismissal, by
-               *       cancelling the default focus action or re-asserting the destination after the
-               *       pointer's own action had landed. REJECTED, and measurement is what rejected it. On a
-               *       pointer dismissal the focus sequence is: this handler moves the cursor to the answer
-               *       control, and about a millisecond later the browser's action for the same mousedown
-               *       moves it to whatever was clicked. Where the operator clicks the ACCOUNT ENTRY -- the
-               *       obvious way to correct a mistyped identifier -- the browser's action is the one that
-               *       is right: the caret lands in the entry and typing goes into it, which was verified
-               *       character by character. Making this handler win there would pull the caret out of
-               *       the field the operator had just clicked in order to edit, and the same reasoning
-               *       applies to the frame's sign-off control, which was verified to activate on its first
-               *       click. Losing this race is therefore the CORRECT outcome for a pointer, and the
-               *       cosmetic cost -- a click on non-focusable frame chrome resting the cursor on the
-               *       container or on `<body>` -- was reproduced with no dialogue present at all, on this
-               *       screen and on the main menu alike. It is the browser's own delegation over
-               *       non-focusable content, and belongs to the frame that owns that markup rather than
-               *       to this screen. Escape has no competing default action, which is exactly why the
-               *       keyboard path lands.
-               */
-              if (nextOpen || !payable || inFlight.current) {
-                return;
-              }
-
-              focusConfirm();
-            }
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the confirmation is the single-position `CONFIRM` FIELD the
+       *       mapset declares, and the dialogue that replaced it is withdrawn. The claim it was
+       *       introduced on -- that the field "only existed because a 3270 terminal had no modal" -- is
+       *       measurably the wrong way round: the field is what made the payment safe. `CONFIRM` at
+       *       `app/bms/COBIL00.bms` L115-L119 is `ATTRB=(FSET,NORM,UNPROT) LENGTH=1` with NO `IC`, and
+       *       `app/cbl/COBIL00C.cbl` L173-L191 pays only on a `'Y'` or `'y'` the operator put there --
+       *       so the gate was a KEYSTROKE, not a control an Enter could fall onto.
+       * WHY : ⚠️ Refactoring Rationale: what the dialogue actually produced was measured in a browser
+       *       and it is this screen's release blocker. The dialogue's trigger was focused
+       *       programmatically once a balance became payable, and the dialogue's own affirmative control
+       *       carried `autoFocus`, so "commit" was the default action at two CONSECUTIVE turns: an
+       *       operator who typed only the eleven account digits and then pressed Enter three times --
+       *       zero clicks, no `Y` ever typed -- moved the entire current balance, on a key the row-24
+       *       legend advertises as `ENTER=Continue`. Both auto-focus steps are gone and the answer is a
+       *       character the operator types.
+       * WHY : Assumptions: `'Invalid value. Valid values are (Y/N)...'` at `app/cbl/COBIL00C.cbl` L187
+       *       becomes REACHABLE again, where the dialogue had made it dead code -- two controls sending
+       *       `'Y'` and `'N'` left no third character to refuse. {@link refuseConfirmationAnswer} is
+       *       that arm, and it is now the only thing a character outside the domain can produce.
+       * WHY : Alternatives Considered: keeping the dialogue and merely moving its initial focus onto the
+       *       declining control, which is the narrowest possible change and is what the finding's own
+       *       suggested fix offers first. Rejected on two grounds. It leaves Enter as a COMMIT gesture
+       *       one Tab away rather than removing it, so the same defect returns for any operator who
+       *       tabs once; and it makes Enter on a dialogue opened in order to pay clear the screen
+       *       instead, which discards the operator's work silently. Also considered: keeping the
+       *       dialogue and adding a typed field inside it. Rejected as two gates for one question --
+       *       the baseline asks once, and asking twice trains an operator to answer without reading.
+       * WHY : Trade-offs: no control on this screen is now marked destructive, and `destructiveFocusTheme`
+       *       is therefore NOT wrapped around this field. Three reasons, in order of weight. The theme
+       *       overrides `Button.colorPrimaryBorder` only, so on an `Input` it resolves to nothing at all
+       *       and wrapping it would assert a treatment that does not exist. The mapset paints this field
+       *       `COLOR=GREEN` with no warning hue anywhere near it, so an error-ramp ring here is a design
+       *       value the baseline contradicts. And this field already uses the error ramp for its REAL
+       *       refusal state, so painting the same ramp on focus would give one control two meanings for
+       *       one colour. The control that commits is the row-24 `ENTER=Continue` button, which
+       *       `ui/src/layout/PfKeyBar.tsx` owns.
+       */}
+      <Form layout="vertical">
+        <Form.Item
+          /*
+           * WHY : Refactoring Rationale: the 53-character prompt is the field's LABEL, where it was an
+           *       inline block beside the control. Measured at 375: the prompt rendered as a fixed
+           *       333.7px block that filled the line, so the answer control wrapped below it and came to
+           *       rest flush at x=0 with its focus ring clipped on the left. A label owns its own line
+           *       and takes the control's width with it, which removes the orphaned wrap rather than
+           *       relying on the viewport being wide enough to avoid it.
+           * WHY : Assumptions: the text is `COLOR=TURQUOISE` on `app/bms/COBIL00.bms` L109-L113 and the
+           *       trailing space the catalog carries is part of the declared literal, so neither is
+           *       altered by moving where the text is rendered.
+           */
+          label={
+            <Typography.Text style={promptStyle}>
+              {BILL_PAY_FIELD_LABELS.confirmPrompt}
+            </Typography.Text>
           }
-          onConfirm={
-            /**
-             * Submits the confirming answer, which pays the balance in full.
-             * @returns {void} Nothing; the turn paints itself and never rejects to this caller.
-             */
-            (): void => {
-              runTurn(CONFIRMING_ANSWER);
-            }
-          }
-          onCancel={
-            /**
-             * Answers a declining response by clearing the screen and saying nothing.
-             *
-             * Assumptions: the decline is handled LOCALLY and reaches no network, because the reference
-             * reaches no file either -- `app/cbl/COBIL00C.cbl` L178-L181 performs `CLEAR-CURRENT-SCREEN`
-             * and sets the error flag, which suppresses every later sentence. The service agrees: its
-             * declined path performs zero account interactions and answers with a cleared preview
-             * carrying no balance and no message. Sending the answer would spend a request to be told
-             * what is already known, and would let an unrelated transport failure paint an error on a
-             * turn the reference answers silently.
-             * @returns {void} Nothing; the cleared state is the screen's own, and nothing at all when a
-             *   turn is in flight.
-             */
-            (): void => {
-              /*
-               * WHY : Refactoring Rationale: a decline arriving DURING a turn is dropped, where it used
-               *       to clear the screen. This is the panel's half of the in-flight lock, and it is a
-               *       guard rather than a `disabled` prop because the design system will not carry a
-               *       prop change into a panel it has already rendered -- measured, and recorded at the
-               *       `Popconfirm` above. Without it, `N` on a panel still leaving after `Y` ran
-               *       `INITIALIZE-ALL-FIELDS` over a payment that was still being written: measured with
-               *       a deferred transport, the entry and the balance both went blank while the request
-               *       was outstanding, so the screen showed an abandoned turn for money that then moved.
-               * WHY : Assumptions: dropping it SILENTLY is the faithful answer, not a courtesy. The
-               *       reference's keyboard was locked for the whole turn, so this keystroke never
-               *       reached the program and no sentence was composed for it -- which is the same
-               *       reading the disabled-AID path applies at `onInvalidKey`, and the reason neither
-               *       paints a message.
-               * WHY : Assumptions: the ref is read rather than the `busy` state, for the reason
-               *       `runTurn` records at its own guard -- state updates are batched, so two events
-               *       delivered in one batch would both observe the stale flag.
-               */
-              if (inFlight.current) {
-                return;
-              }
-
-              clearScreen();
-            }
-          }
+          htmlFor={CONFIRMATION_CONTROL_ID}
+          {...(confirmationRefusal === undefined
+            ? {}
+            : {
+                validateStatus: 'error' as const,
+                help: fieldErrorHelp(CONFIRMATION_CONTROL_ID, confirmationRefusal.message),
+              })}
         >
           {/*
-           * Assumptions: the control is a real button carrying the dialogue's trigger, so it is reachable
-           * by keyboard and announced as an action. It is also the element `MOVE -1 TO CONFIRML` maps onto,
-           * which is why a ref is attached to it.
-           * Trade-offs: the in-progress affordance is ADDITIVE and has no counterpart in the reference at
-           * all -- a 3270 keyboard locks while the region works, so the terminal expressed "busy" by
-           * refusing input rather than by drawing anything. Gap G5 in AAP section 0.3.4 records that
-           * class of addition. It is carried on this control rather than as a separate overlay so the
-           * indication sits on the action it describes, and the flag that draws it is the same one that
-           * shuts the account entry, this trigger and all three key bindings -- together the browser's
-           * reconstruction of the lock the hardware provided.
-           * Refactoring Rationale: `disabled` names the in-flight flag as well as the unpayable state,
-           * where it named only the latter. `loading` alone is not a lock: `antd`'s button calls
-           * `preventDefault` on a click while loading, so the dialogue could not be reopened, but it
-           * leaves the element focusable and leaves `aria-disabled` unset -- so assistive software still
-           * announced an available action on a screen that would refuse it. Naming both conditions puts
-           * the DOM `disabled` attribute on the control for the whole turn, and the spinner still renders
-           * because the loading icon does not depend on the enabled state.
+           * WHY : Refactoring Rationale: the hint sits in a `Flex` with a token gap, where it sat in a
+           *       `Space` with the same token passed as `size`. Measured, that produced a 0.0px gap and
+           *       the `(Y/N)` butted directly against the control. The cause is in the pinned package:
+           *       `antd/lib/_util/gapSize.js` accepts only the four preset NAMES or a number, and
+           *       `antd/lib/space/index.js` emits neither a preset class nor a `columnGap` for anything
+           *       else -- so a `var(--ant-margin-xs)` reference was accepted and then dropped. `Flex`
+           *       assigns its `gap` straight to the CSS property, where a custom-property reference
+           *       resolves.
+           * WHY : Assumptions: a gap belongs here at all because the mapset declares one. `CONFIRM`
+           *       occupies column 60 and the `(Y/N)` literal starts at `POS=(15,63)` on
+           *       `app/bms/COBIL00.bms` L121-L125, so the terminal left two character cells between
+           *       them.
            */}
-          <Space size={cssVar[SPACING_TOKENS.sectionGapCompact]}>
-            <Button
-              ref={confirmButtonRef}
-              type="primary"
-              danger
+          <Flex align="center" gap={cssVar[SPACING_TOKENS.sectionGapCompact]} wrap>
+            {/*
+             * Assumptions: `maxLength` is ONE because three declarations agree -- `CONFIRM LENGTH=1` at
+             * `app/bms/COBIL00.bms` L115-L119, `CONFIRMI PIC X(1)` in the symbolic map, and the
+             * service's own `^[YyNn]?$` pattern on the request member. One position is also what makes
+             * the four-arm classification total: there is no multi-character value to disambiguate.
+             * Assumptions: this is NOT an initial-cursor control. `ACTIDIN` carries this mapset's single
+             * `IC` attribute, so `autoFocus` stays on the account entry; the cursor arrives here only
+             * when a settled turn offers payment, which is `MOVE -1 TO CONFIRML` at
+             * `app/cbl/COBIL00C.cbl` L239, and arriving here arms nothing because the field is empty.
+             * Assumptions: the control is DISABLED until a payment is on offer, which is the browser's
+             * reconstruction of a field the reference simply ignored -- L208's `IF NOT ERR-FLG-ON` and
+             * the `CONF-PAY-YES` test at L210 are reached only after a read established a positive
+             * balance, so a `'Y'` typed before that read had no effect on the terminal either.
+             * Trade-offs: `inputMode` is left at its default rather than set to `numeric`, because the
+             * two values this field admits are letters. The account entry above sets it because that
+             * field admits digits only.
+             */}
+            <Input
+              id={CONFIRMATION_CONTROL_ID}
+              ref={confirmInputRef}
+              value={confirmation}
+              maxLength={BILL_PAY_FIELD_WIDTHS.confirmation}
               disabled={!payable || busy}
-              loading={busy}
-              data-testid="billpay-confirm"
-            >
-              {CONFIRMING_ANSWER}
-            </Button>
-            <Typography.Text style={hintStyle}>{BILL_PAY_CONFIRM_DOMAIN_HINT}</Typography.Text>
-          </Space>
-        </Popconfirm>
-      </Flex>
+              style={confirmationFieldStyle}
+              data-testid={CONFIRMATION_CONTROL_TEST_ID}
+              {...busyProps(busyControl === 'confirm')}
+              {...fieldAriaProps(CONFIRMATION_CONTROL_ID, {
+                invalid: confirmationRefusal !== undefined,
+                hasError: confirmationRefusal !== undefined,
+                hasHint: true,
+              })}
+              onChange={
+                /**
+                 * Records the answer the operator typed, and nothing else.
+                 *
+                 * Assumptions: the character is stored UNCHANGED -- not upper-cased, not filtered to
+                 * the domain. `app/cbl/COBIL00C.cbl` L174-L175 and L178-L179 accept both cases as two
+                 * arms of one branch, so a lower-case answer is honoured rather than corrected; and a
+                 * character outside the domain has to survive into state for the `WHEN OTHER` arm at
+                 * L185-L190 to have anything to refuse. Filtering here would silently swallow the
+                 * mistake instead of naming it, which is the same defect the account entry above had.
+                 * @param {ChangeEvent<HTMLInputElement>} event - The control's change event.
+                 * @returns {void} Nothing; the typed answer becomes the screen's state.
+                 */
+                (event: ChangeEvent<HTMLInputElement>): void => {
+                  setConfirmation(event.target.value);
+                  /*
+                   * WHY : Assumptions: retyping clears the refusal on THIS field only, so the sentence
+                   *       under the control disappears as soon as the operator starts correcting it,
+                   *       exactly as the account entry above clears its own. The row-23 line is left
+                   *       standing until a turn replaces it, because the reference repaints that line
+                   *       only when it sends the map.
+                   */
+                  setFieldErrors(withoutConfirmationRefusal);
+                }
+              }
+            />
+            <Typography.Text id={fieldHintId(CONFIRMATION_CONTROL_ID)} style={domainHintStyle}>
+              {BILL_PAY_CONFIRM_DOMAIN_HINT}
+            </Typography.Text>
+          </Flex>
+        </Form.Item>
+      </Form>
     </Flex>
   );
 }

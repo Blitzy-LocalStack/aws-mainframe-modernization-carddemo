@@ -51,13 +51,27 @@
  * administrator and renders no access-denied state of its own.
  */
 
-import { Col, Flex, Form, Input, Popconfirm, Row, Space, Table, Typography, theme } from 'antd';
-import type { TableColumnsType } from 'antd';
-import { useCallback, useMemo, useState } from 'react';
-import type { ReactElement } from 'react';
+import {
+  Col,
+  ConfigProvider,
+  Descriptions,
+  Flex,
+  Form,
+  Input,
+  Modal,
+  Row,
+  Space,
+  Table,
+  Typography,
+  theme,
+} from 'antd';
+import type { DescriptionsProps, GlobalToken, TableColumnsType } from 'antd';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement, ReactNode } from 'react';
 import { useNavigate } from 'react-router';
 
-import { isConflictFailure } from '../../api/client';
+import { isApiRequestError, isConflictFailure, isTransientFailure } from '../../api/client';
+import type { ApiRequestError } from '../../api/client';
 import {
   deleteTransactionType,
   listTransactionTypes,
@@ -66,34 +80,55 @@ import {
 import type {
   ApiError,
   FieldError,
+  FieldValidationState,
   PageResponse,
   ReferenceListQuery,
   TransactionType,
 } from '../../api/types';
 import { usePagedQuery } from '../../hooks/usePagedQuery';
+import type { PageBoundary } from '../../hooks/usePagedQuery';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import type { MessageBandSeverity } from '../../layout/MessageBand';
+import { messageBandSeverityForApiSeverity } from '../../layout/MessageBand';
+import type { MessageBandChannel, MessageBandSeverity } from '../../layout/MessageBand';
 import { CICS_AIDS, usePfKeys } from '../../layout/usePfKeys';
-import type { CicsAid, PfKeyHandlerMap } from '../../layout/usePfKeys';
+import type {
+  CicsAid,
+  PfKeyHandlerEntry,
+  PfKeyHandlerMap,
+  PfKeyRisk,
+} from '../../layout/usePfKeys';
 import {
+  ACCESS_DENIED_NOT_AUTHORIZED,
   FIELD_VALIDATION_SUFFIXES,
+  PERSISTENT_FAILURE_REPORT_IT,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
 } from '../../messages/messages';
 import {
   ADMIN_MENU_ROUTE,
   REFERENCE_TYPE_LIST_ROUTE,
   navigateSafely,
 } from '../../routes/navigation';
+import { destructiveFocusTheme } from '../../theme/antdTheme';
 import {
   BMS_TEXT_COLOR_TOKENS,
-  FIELD_ERROR_TOKENS,
+  TARGET_SIZE_AA_MINIMUM,
   TYPOGRAPHY_TOKENS,
   characterCellWidthShare,
 } from '../../theme/tokens';
-import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import {
+  BLANK_FIELD_MARKER_CHARACTERS,
+  busyAnnouncement,
+  busyProps,
+  fieldAriaProps,
+  fieldErrorHelp,
+  fieldRefusalRendering,
+} from '../../layout/fieldHelp';
+import { copybookFieldWidthStyle } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 
 /**
@@ -106,6 +141,142 @@ const LIST_MESSAGES = PROGRAM_MESSAGES.COTRTLIC;
  * width and originating line.
  */
 const LIST_STATUS = STATUS_MESSAGES.COTRTLIC;
+
+/**
+ * Name of the BMS field this program's advisory sentences are sent to.
+ *
+ * Assumptions: `2500-SETUP-MESSAGE` at `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L1571-L1578
+ * moves `WS-INFO-MSG` into `INFOMSGO`, which `COTRTLI.bms` L299-L303 declares at `POS=(21,19)`
+ * `LENGTH=45` `COLOR=NEUTRAL` -- a different field, a different row and a different colour from the
+ * `ERRMSG` line at `POS=(23,1)` `LENGTH=78` `COLOR=RED` that L1568-L1570 sends `WS-RETURN-MSG` to.
+ */
+const INFORMATION_LINE_FIELD = 'WS-INFO-MSG';
+
+/**
+ * The two members of a catalogued sentence this screen reads when routing it to a message line.
+ *
+ * Assumptions: this is a SUPERTYPE of the catalogue's entries rather than their exact shape. Each
+ * entry in `STATUS_MESSAGES.COTRTLIC` also carries the declared width and the originating line, and
+ * naming only the two members the routing decision reads keeps the decision from depending on the
+ * rest. Alternatives Considered: annotating the two callbacks with inline object types, which is what
+ * stood here; `jsdoc/require-param` reads an inline record type in a doc comment as a destructured
+ * parameter and demands a `@param` entry per member, so a named type is what documents cleanly.
+ */
+interface CataloguedSentence {
+  /** The sentence exactly as the catalogue declares it, including any contract-bearing spaces. */
+  readonly text: string;
+  /** Name of the BMS field the program moves this sentence to. */
+  readonly field: string;
+}
+
+/**
+ * The sentences this program sends to its advisory line rather than to its outcome line.
+ *
+ * Purpose: answer the routing question from the catalogue, once, for every sentence this screen can
+ * show. Each entry in `STATUS_MESSAGES.COTRTLIC` already records the BMS field its program moves it
+ * to, so which of the two message lines a sentence belongs on is DECLARED rather than inferred.
+ *
+ * ⚠ Refactoring Rationale: this screen published every sentence it had through the row-23 outcome
+ * band, and a browser measurement of the previous revision found the advisory line missing entirely
+ * on both a healthy visit and a refused one. So the standing instruction
+ * `'Type U to update, D to delete any record'` -- which is true before the operator presses anything
+ * and still true afterwards -- was painted in the rejection colour on the rejection row, and the five
+ * advisory sentences and six outcome sentences were indistinguishable on the glass. The reference
+ * keeps them apart by construction: the two fields differ in row, in length and in colour, and the
+ * program can fill both on one turn.
+ *
+ * Alternatives Considered: deriving the channel from the SEVERITY this screen already assigns each
+ * sentence -- `'info'`/`'success'` for the five advisory ones, `'error'` for the six outcome ones.
+ * Rejected because the correspondence is a coincidence of the current call sites rather than a rule:
+ * `MESSAGE_BAND_CHANNELS` in `ui/src/layout/MessageBand.tsx` records that the channels are told apart
+ * by TENSE and not by tone, so a future outcome sentence published as a success -- a completed write,
+ * say -- would silently land on the advisory line. The catalogue's `field` member cannot drift that
+ * way, because it records what the COBOL does.
+ *
+ * Alternatives Considered: importing the sibling maintenance screen's `messageChannel` helper, which
+ * makes the same decision from the same member. Rejected because it is module-local there and
+ * exporting it would create a runtime dependency between two sibling screens for one comparison; the
+ * repository's only cross-screen imports are type-only handover contracts.
+ */
+const INFORMATION_LINE_SENTENCES: ReadonlySet<string> = new Set(
+  Object.values(LIST_STATUS)
+    .filter(
+      /**
+       * Keeps the catalogue entries this program sends to its advisory line.
+       * @param {CataloguedSentence} entry - One catalogued sentence of this program.
+       * @returns {boolean} Whether the entry names the advisory field.
+       */
+      (entry: CataloguedSentence): boolean => entry.field === INFORMATION_LINE_FIELD,
+    )
+    .map(
+      /**
+       * Reduces a catalogue entry to the text the band compares against.
+       * @param {CataloguedSentence} entry - One catalogued sentence of this program.
+       * @returns {string} The sentence exactly as the catalogue declares it.
+       */
+      (entry: CataloguedSentence): string => entry.text,
+    ),
+);
+
+/**
+ * Reports which of the mapset's two message lines a sentence belongs on.
+ *
+ * Purpose: route each sentence to the field its program moves it to, so the advisory line carries
+ * standing guidance and the outcome line carries the result of the turn just taken.
+ *
+ * Assumptions: anything NOT catalogued as advisory goes to the outcome line, which is the safe
+ * default in both directions. The sentences that reach the band from outside this program's catalogue
+ * are a refused authority, a redacted Db2 failure, a transient transport failure and the maintenance
+ * program's three write failures -- every one of them an outcome, and the two shared ones carry no
+ * `field` member to consult. `MESSAGE_BAND_CHANNELS` documents the outcome line as what a caller
+ * naming no channel gets, for the same reason: all 21 mapsets declare it and only five declare the
+ * other.
+ *
+ * Assumptions: the comparison is on the exact catalogued text, which is sound because every advisory
+ * sentence this screen publishes is read straight from `LIST_STATUS` and never composed. A sentence
+ * assembled from parts could not match, and none is.
+ * @param {string} text - The sentence about to be published, or the empty string for none.
+ * @returns {MessageBandChannel} The channel that sentence's BMS field denotes.
+ */
+function bandChannelFor(text: string): MessageBandChannel {
+  return INFORMATION_LINE_SENTENCES.has(text) ? 'information' : 'error';
+}
+
+/**
+ * Discards a browse turn's settlement, for the three call sites that cannot observe it.
+ *
+ * Purpose: `ui/src/hooks/usePagedQuery.ts` returns a promise from `prevPage`, `nextPage` and `reset`
+ * so a caller that needs to sequence on a turn can. These three callers do not: two are
+ * `void`-returning key handlers and the third is the refresh a completed delete leaves behind, and in
+ * every case the page asked for arrives through the hook's own result on a later render.
+ *
+ * ⚠ Refactoring Rationale: the three call sites were bare statements, which became floating promises
+ * the moment those members stopped returning `void` -- three lint failures on a file that has to stay
+ * clean. `ui/eslint.config.js` configures `no-floating-promises` with `ignoreVoid: false`, so the
+ * `void` discard is not available either, and making the callers `async` is worse than unavailable:
+ * `no-misused-promises` with `checksVoidReturn` rejects a promise-returning function where a `void`
+ * one is expected, which is exactly what `PfKeyHandlerEntry.onInvoke` declares. Settling with a named
+ * no-op on both arms is the shape `usePagedQuery.ts` uses for its own opening read and the shape the
+ * user browse adopted for the same two members, so this screen states what those state rather than
+ * inventing a third discipline.
+ *
+ * Alternatives Considered: awaiting the refresh at the delete's own call site, which is already inside
+ * an `async` function so the `await` would compile. Rejected on two counts. The success sentence is
+ * written BEFORE that refresh deliberately -- the tombstone ordering recorded there -- and awaiting it
+ * would hold the commit flag raised until the read landed, which keeps every function key withheld for
+ * a turn the operator has already been told succeeded.
+ *
+ * Assumptions: discarding is CORRECT here and not merely permitted. Every outcome of a browse turn is
+ * applied through the hook's reducer -- the rows, the cursors, the position and any failure -- so
+ * there is nothing at these call sites left to act on. The rejection arm is supplied for the same
+ * reason the hook supplies its own: a handler that exists cannot become the unhandled rejection a
+ * later change to the hook would otherwise introduce here silently.
+ * @returns {void} Nothing; the turn's outcome has already been recorded by the browse hook.
+ */
+function ignoreSettledBrowseTurn(): void {
+  // Assumptions: an empty body is the whole implementation and is deliberate rather than unfinished.
+  //   Logging here would emit a line for every ordinary page turn an operator makes.
+}
 
 /**
  * Sentences the maintenance screen's program emits that this screen reuses.
@@ -280,6 +451,39 @@ function toRowActionCode(entry: string): RowActionCode | null {
 }
 
 /**
+ * Column count of the record block the destructive confirmation names its row with.
+ *
+ * Assumptions: ONE column, so the key and the description stack rather than sitting side by side. A
+ * dialogue is the narrowest surface on the screen and the description is fifty characters wide at
+ * `TR_DESCRIPTION VARCHAR(50)` (`app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L3), so a two-up grid
+ * puts a two-character key beside a value eight times its length and wraps the value anyway.
+ * Trade-offs: one extra line of dialogue height, taken so the two values the operator has to check
+ * read as a list rather than as a row.
+ */
+const CONFIRMATION_RECORD_COLUMNS = 1;
+
+/**
+ * Identifier of the element naming the record inside the delete confirmation.
+ *
+ * ⚠️ Purpose: both of the confirmation's actions point at this element with `aria-describedby`, so the
+ * record being destroyed is announced with whichever action the operator lands on, rather than only if
+ * they happen to read the surface as a whole. That distinction is not theoretical here: browser
+ * measurement found focus placed on the DECLINING control the moment this dialogue opens, so the record
+ * naming has to travel with the control or it is never heard.
+ *
+ * ⚠️ Assumptions: the identifier is put on the record block rather than on the dialogue, and the
+ * dialogue keeps `aria-labelledby` pointing at its own question. A description and a label are different
+ * things -- the label says what is being asked and the description says which record it is being asked
+ * about -- so collapsing them onto one element would lose one of the two.
+ *
+ * ⚠️ Refactoring Rationale: this screen was the outlier rather than the pattern.
+ * `ui/src/screens/cardUpdate/index.tsx` and `ui/src/screens/authDetail/index.tsx` already wire their own
+ * confirmations exactly this way, and cardUpdate's own note claimed this file did too -- a claim that was
+ * false when written and is made true here rather than deleted.
+ */
+const DELETE_CONFIRMATION_RECORD_ID = 'ref-type-list-delete-confirmation-record';
+
+/**
  * Static text the mapset paints as `INITIAL=` operands, reproduced byte for byte.
  *
  * Assumptions: these live here rather than in `ui/src/messages/messages.ts` because that
@@ -442,6 +646,184 @@ const COLUMN_CELL_COUNTS = Object.freeze({
 } as const);
 
 /**
+ * Gives the one-character action cell a content box its character stays readable in.
+ *
+ * Purpose: turn this column's proportional share into a CEILING for the control inside it, so the share
+ * decides how much room the column takes and this decides the least the control may be squeezed to.
+ *
+ * ⚠ WHY : Assumptions: this is a MINIMUM and deliberately not {@link copybookFieldWidthStyle}, which
+ *       publishes a maximum. Spreading both onto one box would set a maximum of one column and a
+ *       minimum of one column plus padding on the same control, which is a contradiction rather than a
+ *       pair of bounds. The same division is drawn on the user browse, whose action cell is the same
+ *       one-character control in the same position.
+ *
+ *       Assumptions: {@link TARGET_SIZE_AA_MINIMUM} is named explicitly inside `max()` rather than left
+ *       to fall out of the arithmetic. The character-plus-padding term clears it comfortably at the
+ *       pinned theme, but that is a property of a token's current value and not of this expression, and
+ *       a conformance floor that holds only while a token keeps its value is not a floor. `max()` also
+ *       fails safe: the padding custom property is scoped to component class scopes rather than to the
+ *       document root, so if it does not resolve the `calc()` term is invalid at computed-value time and
+ *       the conformance figure remains operative -- the control can never return to a zero-width content
+ *       box.
+ *
+ *       Trade-offs: a pixel figure reaches this file, which the zero-hardcoded-values rule otherwise
+ *       forbids. Admitted for the reason `ui/src/theme/tokens.ts` records where it holds the figure: it
+ *       is a WCAG success-criterion threshold rather than a design value, and no token on any of the
+ *       design system's scales expresses a conformance floor.
+ * @param {GlobalToken} cssVar - The theme's CSS-variable reference map, from `theme.useToken()`.
+ * @returns {CSSProperties} The minimum measure to spread onto the action cell's control.
+ */
+function actionCellWidthStyle(cssVar: GlobalToken): CSSProperties {
+  return {
+    minInlineSize: `max(${String(TARGET_SIZE_AA_MINIMUM)}px, calc(${String(
+      ACTION_CODE_LENGTH,
+    )}ch + 2 * ${String(cssVar.controlPaddingHorizontal)}))`,
+  };
+}
+
+/**
+ * Style that tells the pointer a browse row can be acted on.
+ *
+ * ⚠ WHY : Purpose: regress a measured absence. A browser pass measured `cursor: auto` on these rows both
+ *       at rest and hovered, on a browse whose entire purpose is choosing a row to act on -- so nothing
+ *       about a row said it was actionable, and the only affordance was the one-character control in its
+ *       leading column.
+ *
+ *       Assumptions: `pointer` is a CSS keyword and not a design value, so naming it here does not
+ *       breach the zero-hardcoded-values rule for the same reason `auto` and `none` do not. The three
+ *       sibling browses -- card list, user list and authorization summary -- each declare exactly this
+ *       constant, and it is declared per screen rather than shared because it is one keyword whose
+ *       meaning is complete where it is read.
+ */
+const ROW_AFFORDANCE_STYLE: CSSProperties = { cursor: 'pointer' };
+
+/**
+ * The rows this screen has deleted and the browse has not yet stopped delivering.
+ *
+ * ⚠ WHY : Assumptions: ONE frozen array, shared by every reset of the tombstone list, so the state is
+ *       set back to a value that is identical by reference. React bails out of a re-render when a
+ *       setter is given the value already held, and the effect that clears this list runs on every page
+ *       the browse delivers -- with a fresh `[]` each time, that effect would schedule a render, which
+ *       would re-run nothing but would still be a render per page for no change.
+ */
+const NO_REMOVED_KEYS: readonly string[] = Object.freeze([]);
+
+/**
+ * Selector naming every element inside a row that answers a click for itself.
+ *
+ * ⚠ WHY : Assumptions: the list is of elements that ALREADY take focus and act on a click, not of every
+ *       element that happens to be focusable. A row on this grid contains two of them -- the
+ *       one-character action cell and the fifty-character description editor -- and the design system
+ *       may compose more inside a control it owns, which is why the guard is written as a selector over
+ *       roles rather than as a comparison against two known identifiers.
+ *
+ *       Assumptions: `[contenteditable]` is included even though nothing here renders one, because the
+ *       predicate answers a general question about a row and a later cell that carried one would
+ *       otherwise lose its clicks silently.
+ */
+const SELF_HANDLING_DESCENDANTS = 'input, textarea, select, button, a, [contenteditable]';
+
+/**
+ * Answers whether a click inside a row landed on something that handles clicks for itself.
+ *
+ * Purpose: keep the row-level affordance from taking a click away from the control the operator aimed
+ * at.
+ *
+ * ⚠ WHY : Refactoring Rationale: this predicate exists because its absence was a measured defect. The
+ *       row handler moved focus to the action cell on EVERY click that reached the row, and a click on
+ *       the description editor reaches the row, because a click bubbles. Measured: the operator clicked
+ *       into the description of type `02`, typed ` RETAIL` onto `PAYMENT`, and the field still held
+ *       `PAYMENT` -- `document.activeElement` was `ref-type-list-action-02`, so every keystroke after
+ *       the click went into the one-character action cell instead. In a browser that is an operator
+ *       whose typing vanishes AND whose keystrokes are landing in the field that decides whether the
+ *       row is updated or deleted.
+ *
+ *       Alternatives Considered: (1) `event.stopPropagation()` on the editor's own click handler.
+ *       Rejected because it puts the row's correctness inside every cell that will ever be added to the
+ *       row -- the omission would be silent and would look exactly like this defect. (2) Comparing the
+ *       target against {@link actionCellId} and {@link descriptionEditorId}. Rejected as a second list
+ *       of the row's interactive contents, which drifts from the row itself. (3) Reading
+ *       `document.activeElement` after the click. Rejected because a click sets focus asynchronously
+ *       with respect to the handler, so the answer is not available where the decision is made.
+ *
+ *       Assumptions: `closest` is used rather than an identity test, because the click's target is
+ *       frequently a node INSIDE the control -- the design system wraps its input in an affix wrapper,
+ *       so a click near the field's edge targets the wrapper, and a click on a control's own icon
+ *       targets that icon.
+ * @param {EventTarget | null} target - The element the click was delivered to.
+ * @returns {boolean} `true` when the click belongs to a control inside the row, `false` when it landed
+ *   on the row's own static content.
+ */
+function landedOnSelfHandlingControl(target: EventTarget | null): boolean {
+  // WHY : Assumptions: the guard answers `false` for a target that is not an element -- a click
+  //       delivered to a text node or to the document has no control to belong to, so the row's own
+  //       affordance is the right answer for it.
+  return target instanceof Element && target.closest(SELF_HANDLING_DESCENDANTS) !== null;
+}
+
+/**
+ * Style keeping a value that must never be read across two lines on one line.
+ *
+ * ⚠ WHY : Refactoring Rationale: measured at a 375-pixel viewport, this grid's TWO-character key `01`
+ *       rendered as `0` above `1`, and the `Type` heading above it rendered one letter per line in a
+ *       121-pixel-tall header row. A key split down the middle is a misreading risk in a card system
+ *       and not a cosmetic one: `0` over `1` reads as two values, and the terminal wrote the key into a
+ *       two-column field (`TRAN-TYPE PIC X(02)` at `app/cpy/CVTRA03Y.cpy` L5, `TR_TYPE CHAR(2)` at
+ *       `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L2) where splitting it was impossible.
+ *
+ *       Assumptions: this states the invariant and {@link tableMinimumMeasure} makes room for it. Under
+ *       `table-layout: fixed` a `min-width` on a cell is ignored, so nothing a cell declares can widen
+ *       its own column -- the width has to come from the table. Both are therefore applied: the table
+ *       reserves the room and the cell refuses to break the token if anything ever squeezes it anyway.
+ */
+const UNBREAKABLE_VALUE_STYLE: CSSProperties = { whiteSpace: 'nowrap' };
+
+/**
+ * Least measure this grid may be laid out at, in the mapset's own character cells.
+ *
+ * Purpose: give the column shares a floor to resolve against, so a narrow viewport SCROLLS the grid
+ * horizontally instead of squeezing a column down to one character.
+ *
+ * ⚠ WHY : Refactoring Rationale: the grid declared no horizontal extent at all, so at 375 pixels the
+ *       three percentage shares resolved against 375 pixels: the eight-cell key column became about
+ *       eleven pixels of content and both the key and its heading wrapped. The heading's 121-pixel row
+ *       is what produced this screen's measured +136 pixels of VERTICAL overflow, which pushed the
+ *       whole function-key bar off screen -- so a horizontal shortfall was being paid for in lost
+ *       controls.
+ *
+ *       Assumptions: the floor is the mapset's own row geometry and not a chosen breakpoint. The three
+ *       columns span 69 character cells of the 80-column display -- {@link COLUMN_CELL_COUNTS} counts
+ *       them off `app/app-transaction-type-db2/bms/COTRTLI.bms` L133-L279 -- and the design system's
+ *       table adds its cell padding on both sides of each of the three columns, which
+ *       `antd/lib/table/style/index.js` L214-L215 derives from the `padding` token. `ch` is the
+ *       browser's nearest equivalent of a character column, the same equivalence
+ *       `copybookFieldWidthStyle` in `ui/src/layout/recordLayout.ts` records.
+ *
+ *       Alternatives Considered: (1) leaving the layout automatic so the browser sizes columns from
+ *       content. Already rejected on measurement where the shares are declared -- an unconstrained
+ *       `Input` reports a full-width intrinsic size, which gave the one-character action column 1101
+ *       pixels and the fifty-character description 511. (2) Truncating the key with an ellipsis, which
+ *       fixed layout does support. Rejected outright: a truncated key is worse than a wrapped one,
+ *       because it reads as a complete value that happens to be short. (3) Letting the table simply
+ *       overflow its container without a scroller, which is what a bare minimum measure would do.
+ *       Rejected because unreachable content is a defect of its own; the design system's `scroll`
+ *       gives the grid its own scrolling region and leaves the page's own width alone.
+ *
+ *       Trade-offs: below the floor the grid scrolls sideways, which the terminal never did because it
+ *       was exactly 80 columns wide. Design gap G1 already records that a fixed character grid can
+ *       only scale or clip; scrolling one region is the least lossy of those, and it is what the
+ *       finding this answers asks for -- it names the absence of a scroller as the defect.
+ * @param {GlobalToken} cssVar - The theme's CSS-variable reference map, from `theme.useToken()`.
+ * @returns {string} The measure, as a CSS length expression.
+ */
+export function tableMinimumMeasure(cssVar: GlobalToken): string {
+  const columns = 3;
+  return `calc(${String(COLUMN_CELL_COUNTS.span)}ch + ${String(columns * 2)} * ${String(
+    cssVar.padding,
+  )})`;
+}
+
+/**
  * Share of the row width each of the three per-row columns occupies.
  *
  * Refactoring Rationale: the three values were percentage LITERALS here, under a local
@@ -571,14 +953,88 @@ interface FieldErrors {
   readonly descriptionFilter: string | null;
   /** Error on the edited description, or `null`. */
   readonly description: string | null;
+
+  /**
+   * WHICH refusal the edited description earned, or `null` when the sentence is not a field refusal.
+   *
+   * ⚠ Assumptions: this member exists because the sentence alone cannot answer how the field renders.
+   * `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` carries a THREE-valued flag for exactly this at
+   * L133-L137 -- valid, `'0'` not-OK, `'B'` blank -- and the two rendering decisions read different
+   * parts of it: L1366-L1368 reddens the field when the flag is anything but valid, and L1412-L1415
+   * writes the asterisk only for the blank value. Holding the sentence and not the state left this
+   * screen deriving blankness from whatever was in the control at render time, which marked a field the
+   * operator had just emptied before any turn had refused it.
+   */
+  readonly descriptionState: FieldValidationState | null;
 }
+
+/**
+ * The positions from which a backward step has nothing to answer with.
+ *
+ * WHY : ⚠️ Refactoring Rationale: the two guards below read a NAMED position where they used to read
+ *       `browse.hasPrev` and `browse.hasNext` directly. Those two members are exactly equivalent -- the
+ *       hook derives all five positions from them -- so nothing about which sentence appears when has
+ *       changed. What changes is that the dead end is now ENUMERATED rather than falling out of two
+ *       false flags, which is the state a reader of the old guards had to reconstruct: a browse with no
+ *       rows and no page on either side satisfied `!hasPrev` and `!hasNext` at once, and neither guard
+ *       said so. `ui/src/hooks/usePagedQuery.ts` records that five screens had five idioms for this and
+ *       that publishing the position once is what stops a sixth inventing another.
+ *
+ *       Assumptions: the two sets are written out rather than derived from each other, because they are
+ *       not complements -- `INTERIOR` is in neither and `EMPTY` and `ONLY` are in both -- so an
+ *       expression relating them would be longer than the enumeration and harder to check against the
+ *       hook's own table.
+ */
+const BACKWARD_EXHAUSTED: readonly PageBoundary[] = Object.freeze(['EMPTY', 'ONLY', 'FIRST']);
+
+/**
+ * The positions from which a forward step has nothing to answer with.
+ *
+ * Assumptions: the mirror of {@link BACKWARD_EXHAUSTED}, with `LAST` in place of `FIRST`. Which of the
+ * two forward sentences is shown is decided separately and is NOT a function of the position -- the
+ * first press at the end and the second press produce different text, which
+ * {@link pageForward} records.
+ */
+const FORWARD_EXHAUSTED: readonly PageBoundary[] = Object.freeze(['EMPTY', 'ONLY', 'LAST']);
 
 /** No field is in error; the state each validation pass starts from. */
 const NO_FIELD_ERRORS: FieldErrors = Object.freeze({
   typeFilter: null,
   descriptionFilter: null,
   description: null,
+  descriptionState: null,
 });
+
+/**
+ * Occupies the description editor's suffix slot on every turn the blank marker is not due.
+ *
+ * Purpose: keep the editor's DOM SHAPE constant, so its input element is never unmounted and remounted
+ * between one keystroke and the next.
+ *
+ * ⚠ WHY : Refactoring Rationale: `antd/lib/input/Input.js` L116 warns that adding or removing a suffix
+ *       while the control has focus loses that focus "caused by dom structure change", and
+ *       `@rc-component/input/lib/BaseInput.js` is where the change happens -- it returns the bare
+ *       `<input>` with no affix and wraps it in a `<span>` with one, so the element at that position
+ *       changes type and React replaces the input. This editor rendered its marker conditionally and
+ *       therefore did exactly that on the first keystroke after a blank refusal. Measured here: the
+ *       node the operator was typing into came back with `isConnected` false.
+ *
+ *       Assumptions: the defect was INVISIBLE on this screen and is fixed anyway. The editor carries
+ *       `autoFocus`, so React focused the replacement as it mounted and the remaining keystrokes
+ *       happened to land -- which is why its own case passed throughout. What `autoFocus` cannot
+ *       restore is the caret's position within the value or a selection in progress, and it re-focuses
+ *       whatever mounts rather than whatever the operator was using.
+ *
+ *       Assumptions: a {@link Typography.Text} and not a bare element, so the occupied and unoccupied
+ *       slot render the same component and React updates attributes instead of replacing anything --
+ *       `blankFieldMarker` in `ui/src/layout/fieldHelp.tsx` builds the marker from that component too.
+ *       It carries `aria-hidden` and no text, so an empty slot announces nothing.
+ *
+ *       Trade-offs: `.ant-input-suffix` is present on every turn now, so its inline margin is reserved
+ *       whether or not a marker occupies it. Accepted for a cell in a fifty-character column, and it
+ *       buys a control that never changes shape under the operator's hands.
+ */
+const MARKER_SLOT_UNOCCUPIED: ReactElement = <Typography.Text aria-hidden="true" />;
 
 /** The filter values a browse is currently reading under. */
 interface AppliedFilters {
@@ -694,6 +1150,146 @@ export function buildTransactionTypeQuery(
  * filter the operator supplied rather than as a missing resource.
  */
 const BAD_REQUEST_STATUS = 400;
+
+/**
+ * HTTP status the transport answers a bearer-carrying request whose session is no longer valid.
+ *
+ * Assumptions: the shared client ends the session on this status, so the route guard replaces this
+ * screen with the sign-on screen within the same paint. Nothing is written to the band for it.
+ */
+const SESSION_REFUSED_STATUS = 401;
+
+/**
+ * HTTP status the transport answers a request whose token carries neither CardDemo group.
+ *
+ * Assumptions: `services/reference-service/src/main/resources/openapi/reference-api.yaml` declares
+ * `x-required-authority: carddemo-user` on the transaction-type browse, which its authority model
+ * defines as any authenticated caller -- so a refusal of THIS operation says the token carries no
+ * CardDemo group at all, and says nothing about administrative authority.
+ */
+const AUTHORITY_REFUSED_STATUS = 403;
+
+/**
+ * The status a classified failure carries when no response ever arrived.
+ *
+ * Assumptions: `ui/src/api/client.ts` declares its own `NO_HTTP_STATUS = 0` and does not export it,
+ * so the value is restated here rather than reached for. It is part of the published shape of
+ * `ApiRequestError` -- its `status` member documents `0` when no response arrived -- so restating it
+ * copies a documented contract and not an implementation detail.
+ */
+const NO_TRANSPORT_STATUS = 0;
+
+/**
+ * Reports the band a browse failure should show, told apart by what the failure actually was.
+ *
+ * WHY : ⚠️ Refactoring Rationale: every browse failure except the filtered-empty refusal used to
+ *       report `'UNEXPECTED ABEND OCCURRED.'`, so an operator refused the browse for want of
+ *       authority was told the system had failed. The abend sentence belongs to a genuine fault: it
+ *       is the registered redaction replacement for the Db2 diagnostic
+ *       `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L1690-L1725 composes when the cursor itself
+ *       fails, and painting it over a refusal both misinforms the operator -- who can act on a
+ *       refusal and cannot act on a fault -- and hides a real authority problem behind a sentence
+ *       that invites a support call.
+ *
+ *       Assumptions: 401 writes NOTHING, deliberately. The shared client ends the session on a 401
+ *       answered to a bearer-carrying request, so the guard swaps this screen for the sign-on screen
+ *       in the same paint; a sentence written here would flash for one frame, or imply the browse
+ *       failed when the session did.
+ *
+ *       Assumptions: the severity is taken from the document through the single published
+ *       correspondence rather than fixed at `'error'` here, so a service that classifies a condition
+ *       as advisory is rendered advisory instead of being escalated by this screen.
+ *
+ *       ⚠ Refactoring Rationale: a momentary condition and a service defect no longer read alike, and
+ *       the residual this paragraph used to record is closed. It said the distinction was available on
+ *       the failure -- `kind`, `transient` and `repeatable` -- but not available HERE, because
+ *       `usePagedQuery` surfaced only `isFailed` and the problem document, and because the catalogue
+ *       carried no authored sentence for a transient condition that this screen was permitted to
+ *       write. Both halves have since landed: the hook publishes the classified failure on `failure`,
+ *       and `ui/src/messages/messages.ts` registers `TRANSIENT_FAILURE_TRY_AGAIN` and
+ *       `PERSISTENT_FAILURE_REPORT_IT` as authored operator sentences. So a gateway throttle, a
+ *       load-balancer failure and a read that timed out now say the condition may clear, where every
+ *       one of them used to report the Db2 cursor's abend replacement.
+ *
+ *       Assumptions: a 500 still reports that abend replacement, deliberately, and the transient arm
+ *       is placed so it cannot capture one. `TRANSIENT_STATUSES` in `ui/src/api/client.ts` excludes
+ *       500 on the stated ground that it is the status a service answers for a defect it has already
+ *       recorded -- and 500 is exactly the condition `COTRTLIC.cbl` L1690-L1725 composes its
+ *       diagnostic for, so its registered replacement is the faithful sentence and telling the
+ *       operator to try again would send them into a loop.
+ *
+ *       Assumptions: a request that reached NO service reports the persistent sentence rather than the
+ *       abend one. The transport classifies a dropped connection as `NETWORK` with no status and
+ *       `transient` false, so it is not a momentary condition to wait out; it is also not the Db2
+ *       cursor failing, because nothing was asked. Reporting the abend replacement for it would send
+ *       an investigation to the reference service's logs for a request that never arrived there.
+ * @param {ApiError | null} failure - The problem document from the most recent browse failure, or
+ *   `null` when the failure carried none.
+ * @param {ApiRequestError | null} requestFailure - The classified failure the transport raised, or
+ *   `null` when the read rejected with something the transport did not classify.
+ * @returns {BandMessage} The sentence and appearance to show for that failure.
+ */
+function describeBrowseFailure(
+  failure: ApiError | null,
+  requestFailure: ApiRequestError | null,
+): BandMessage {
+  if (failure === null) {
+    return { text: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED, severity: 'error' };
+  }
+
+  const severity = messageBandSeverityForApiSeverity(failure.severity);
+
+  if (failure.status === SESSION_REFUSED_STATUS) {
+    return { text: '', severity: 'info' };
+  }
+
+  if (failure.status === AUTHORITY_REFUSED_STATUS) {
+    return { text: ACCESS_DENIED_NOT_AUTHORIZED, severity };
+  }
+
+  /*
+   * WHY : ⚠ Assumptions: a sentence the SERVICE supplied is preferred over each of the two authored
+   *       classifications below, and over NOTHING else. Within those two arms it is the better
+   *       sentence: both classify a transport outcome and say nothing about what was asked, so a
+   *       service that named the condition said more. Outside them it must not be consulted, and this
+   *       screen has measured evidence for that rather than a preference -- the filtered-empty refusal
+   *       is recognised by the FIELD ENTRIES the document carries and not by its prose, and the control
+   *       case `still reports a genuine failure as an abend` in
+   *       `ui/src/screens/refTypeListFilter.test.tsx` proves a 400 naming `cursor` must report the
+   *       fault sentence. Preferring prose ahead of that classification made that case report the
+   *       filter refusal for a genuine fault.
+   *       Assumptions: the member is empty for both failures that reached no service --
+   *       `synthesisedProblem` in `ui/src/api/client.ts` mints `message: null` -- so what this can
+   *       carry is a service's own words and never the transport's diagnostic. Trade-offs: this screen
+   *       cannot verify the prose it renders; the redaction obligation sits with the service, and this
+   *       screen's own duty -- never composing a sentence from a status, a SQL code or a response body
+   *       -- is unaffected.
+   */
+  const message = failure.message;
+  const supplied = message !== null && message.trim() !== '' ? message : null;
+  /*
+   * WHY : ⚠ Assumptions: the transport's status is read into a local BEFORE the classification, and the
+   *       order is forced by the predicate's declared shape rather than chosen. `isTransientFailure`
+   *       narrows to `ApiRequestError`, so TypeScript computes the false branch of the test below as
+   *       `ApiRequestError | null` minus `ApiRequestError` -- that is, `null` -- and the status read that
+   *       followed it failed to compile with `Property 'status' does not exist on type 'never'`. Reading
+   *       the number first keeps it out of the narrowing entirely.
+   */
+  const transportStatus = requestFailure === null ? null : requestFailure.status;
+
+  if (isTransientFailure(requestFailure)) {
+    return { text: supplied ?? TRANSIENT_FAILURE_TRY_AGAIN, severity };
+  }
+
+  // WHY: Assumptions: the test is for a failure that carries NO HTTP status, which the transport uses
+  //      for the two conditions that never reached a service. The timed-out one is already answered
+  //      above as transient, so this arm is the dropped connection alone.
+  if (transportStatus === NO_TRANSPORT_STATUS) {
+    return { text: supplied ?? PERSISTENT_FAILURE_REPORT_IT, severity };
+  }
+
+  return { text: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED, severity };
+}
 
 /*
  * WHY : Refactoring Rationale: a second `SERVICE_FILTER_FIELDS` declaration stood here, identical in
@@ -822,6 +1418,28 @@ export function validateTypeFilter(value: string): string | null {
 }
 
 /**
+ * One outcome the row-description edit can report.
+ *
+ * Assumptions: two members because the reference records two things about a refused row and reads them
+ * separately -- the sentence it paints on the message line, and the flag that decides how the field
+ * itself renders. `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L133-L137 declares the flag with
+ * three values and L1366-L1368 and L1412-L1415 read different parts of it.
+ */
+interface RowDescriptionOutcome {
+  /** The verbatim sentence describing the outcome. */
+  readonly message: string;
+
+  /**
+   * Which refusal the field earned, absent when the outcome is not a field refusal.
+   *
+   * Assumptions: omitted rather than `null` when it does not apply, because
+   * `exactOptionalPropertyTypes` is enabled and `fieldRefusalRendering` reads an ABSENT state as "this
+   * field holds no refused value".
+   */
+  readonly state?: FieldValidationState | undefined;
+}
+
+/**
  * Validates an edited row description, and reports when it was not edited at all.
  *
  * Assumptions: the unchanged test comes first and short-circuits the rest.
@@ -843,12 +1461,27 @@ export function validateTypeFilter(value: string): string | null {
  * `LIT-ALL-ALPHANUM-FROM-X` - the 26 upper-case, 26 lower-case and 10 digit characters
  * declared at L65-L72 - to spaces and then requires the remainder to be empty, so a space
  * survives by being what everything else becomes.
+ * WHY : ⚠ Refactoring Rationale: the outcome is now an OBJECT carrying the sentence and, for a genuine
+ *       field refusal, which of the two refusals it is. It used to be the sentence alone, which left
+ *       both consumers deriving what they needed: the renderer decided blankness from whatever the
+ *       control held at paint time, and the writer decided whether the outcome blocks the write by
+ *       COMPARING the sentence against the no-changes text. The reference holds this as a flag rather
+ *       than as text -- `WS-ARRAY-DESCRIPTION-FLGS` at
+ *       `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L133-L137 -- and both consumers are reading
+ *       that flag, so it is carried once here rather than reconstructed twice.
+ *
+ *       Assumptions: the no-changes outcome carries NO state, which is the reference's own distinction
+ *       and not a convenience. L1072 sets a MESSAGE selector while L1078 and the edit at L1086 set
+ *       `INPUT-ERROR`; only the latter reddens the field at L1366-L1368 and only the blank arm marks it
+ *       at L1412-L1415. So an unchanged description is reported and the field is left alone.
  * @param {string} entry - The description as edited.
  * @param {string} stored - The description as last read from the service.
- * @returns {string | null} The verbatim sentence describing the outcome, or `null` when the
- *   entry is a valid change.
+ * @returns {RowDescriptionOutcome | null} The outcome, or `null` when the entry is a valid change.
  */
-export function validateRowDescription(entry: string, stored: string): string | null {
+export function validateRowDescription(
+  entry: string,
+  stored: string,
+): RowDescriptionOutcome | null {
   const trimmedEntry = entry.trim();
   const trimmedStored = stored.trim();
 
@@ -856,15 +1489,25 @@ export function validateRowDescription(entry: string, stored: string): string | 
     trimmedEntry.toUpperCase() === trimmedStored.toUpperCase() &&
     trimmedEntry.length === trimmedStored.length
   ) {
-    return LIST_STATUS.WS_MESG_NO_CHANGES_DETECTED.text;
+    return { message: LIST_STATUS.WS_MESG_NO_CHANGES_DETECTED.text };
   }
 
   if (trimmedEntry === '') {
-    return `${SHARED_MESSAGES.TRANSACTION_DESC}${FIELD_VALIDATION_SUFFIXES.MUST_BE_SUPPLIED}`;
+    // Assumptions: L1194 sets `FLG-ALPHNANUM-BLANK` on the not-supplied arm, which reaches the row flag
+    //   as `'B'` -- the value L1414 tests before writing the asterisk.
+    return {
+      message: `${SHARED_MESSAGES.TRANSACTION_DESC}${FIELD_VALIDATION_SUFFIXES.MUST_BE_SUPPLIED}`,
+      state: 'BLANK',
+    };
   }
 
   if (!/^[0-9A-Za-z ]+$/.test(entry.slice(0, DESCRIPTION_LENGTH))) {
-    return `${SHARED_MESSAGES.TRANSACTION_DESC}${FIELD_VALIDATION_SUFFIXES.CAN_HAVE_NUMBERS_OR_ALPHABETS_ONLY}`;
+    // Assumptions: L1221 sets `FLG-ALPHNANUM-NOT-OK` on the non-alphanumeric arm, which reaches the row
+    //   flag as `'0'` -- reddened at L1367 and deliberately NOT marked.
+    return {
+      message: `${SHARED_MESSAGES.TRANSACTION_DESC}${FIELD_VALIDATION_SUFFIXES.CAN_HAVE_NUMBERS_OR_ALPHABETS_ONLY}`,
+      state: 'NOT_OK',
+    };
   }
 
   return null;
@@ -1002,6 +1645,35 @@ export function describeFailure(failure: unknown, code: RowActionCode): BandMess
       : { text: MAINTENANCE_STATUS.DATA_WAS_CHANGED_BEFORE_UPDATE.text, severity: 'error' };
   }
 
+  /*
+   * WHY : ⚠ Refactoring Rationale: a write that never reached the service no longer borrows a Db2 arm's
+   *       sentence. `'Record delete failed'` and `'Update of record failed'` are the replacements for
+   *       the diagnostics `COTRTLIC.cbl` composes when the TABLE refuses the work, and a throttle, a
+   *       gateway failure, a timeout or a dropped connection did not get that far -- reporting either
+   *       of them sends the operator, and whoever they call, to look for a database failure that never
+   *       happened. A service's own sentence is preferred over both classifications for the reason
+   *       {@link describeBrowseFailure} records at the same arm, and the two arms below stay exactly as
+   *       they were for the condition they were transcribed for.
+   *       Assumptions: 500 is deliberately NOT in the transient set -- `ui/src/api/client.ts` excludes
+   *       it as the status a service answers for a defect it has already recorded -- so the Db2
+   *       replacements remain the sentence for the condition they belong to.
+   */
+  if (isApiRequestError(failure)) {
+    const message = failure.problem.message;
+    const supplied = message !== null && message.trim() !== '' ? message : null;
+    // WHY : Assumptions: the status is read before the classification for the reason
+    //       {@link describeBrowseFailure} records at the same pair of arms -- the predicate narrows to
+    //       the type its argument already has, so the false branch is `never` and a member read there
+    //       does not compile.
+    const status = failure.status;
+    if (isTransientFailure(failure)) {
+      return { text: supplied ?? TRANSIENT_FAILURE_TRY_AGAIN, severity: 'error' };
+    }
+    if (status === NO_TRANSPORT_STATUS) {
+      return { text: supplied ?? PERSISTENT_FAILURE_REPORT_IT, severity: 'error' };
+    }
+  }
+
   return code === REF_TYPE_ROW_ACTION_CODES.delete
     ? { text: MAINTENANCE_STATUS.RECORD_DELETE_FAILED.text, severity: 'error' }
     : { text: MAINTENANCE_STATUS.TABLE_UPDATE_FAILED.text, severity: 'error' };
@@ -1049,6 +1721,27 @@ export default function RefTypeListScreen(): ReactElement {
   const [actionCodes, setActionCodes] = useState<Readonly<Record<string, string>>>({});
   const [descriptionDrafts, setDescriptionDrafts] = useState<Readonly<Record<string, string>>>({});
   const [committedRows, setCommittedRows] = useState<Readonly<Record<string, TransactionType>>>({});
+  /*
+   * WHY : ⚠ Refactoring Rationale: the keys of rows this screen has DELETED, held only until the
+   *       browse delivers a page that no longer carries them. This closes a contradiction the
+   *       destructive review names directly -- no success may be announced while a value that
+   *       contradicts it is on display. `usePagedQuery`'s `reset` documents at
+   *       `ui/src/hooks/usePagedQuery.ts` that the rows on display are RETAINED while its refresh is
+   *       outstanding, which is right for a refresh of the same query and wrong for exactly one
+   *       caller: a delete. So the row the operator had just destroyed stayed listed, under the
+   *       band's `'Transaction Type deleted successfully'`, for the whole duration of the re-read --
+   *       and an operator who believed the message and not the grid was reading a row that no
+   *       longer existed.
+   *       Alternatives Considered: withholding the success sentence until the refresh settles.
+   *       Rejected because it inverts the risk: the delete HAS committed by then, and an operator
+   *       shown nothing is an operator who presses again -- which is the sequential duplicate
+   *       `withoutConcurrentDuplicate` in `ui/src/api/client.ts` explicitly cannot close.
+   *       Alternatives Considered: removing the row locally INSTEAD of re-reading, which is what the
+   *       comment on the delete path rejects. Still rejected, and this is not that: the page is
+   *       re-read exactly as before, and this list only suppresses a row the service has already
+   *       confirmed gone from the page still being displayed while that read is in flight.
+   */
+  const [removedKeys, setRemovedKeys] = useState<readonly string[]>(NO_REMOVED_KEYS);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [updateCompleted, setUpdateCompleted] = useState(false);
   const [band, setBand] = useState<BandMessage | null>(null);
@@ -1114,19 +1807,50 @@ export default function RefTypeListScreen(): ReactElement {
   //      refreshes the version so a second update is not refused as stale.
   const rows: readonly TransactionType[] = useMemo(
     /**
-     * Merges locally committed rows over the page the browse delivered.
+     * Merges locally committed rows over the page the browse delivered, less any row deleted.
      * @returns {readonly TransactionType[]} The page as it should display.
      */
     (): readonly TransactionType[] =>
-      browse.items.map(
-        /**
-         * Replaces a browse row with its locally committed successor, when there is one.
-         * @param {TransactionType} row - The row as the browse delivered it.
-         * @returns {TransactionType} The committed row if this key was updated, else the row.
-         */
-        (row: TransactionType): TransactionType => committedRows[row.typeCd] ?? row,
-      ),
-    [browse.items, committedRows],
+      browse.items
+        .filter(
+          /**
+           * Drops a row this screen has deleted but the retained page still carries.
+           * @param {TransactionType} row - The row as the browse delivered it.
+           * @returns {boolean} Whether the row still exists as far as this screen knows.
+           */
+          (row: TransactionType): boolean => !removedKeys.includes(row.typeCd),
+        )
+        .map(
+          /**
+           * Replaces a browse row with its locally committed successor, when there is one.
+           * @param {TransactionType} row - The row as the browse delivered it.
+           * @returns {TransactionType} The committed row if this key was updated, else the row.
+           */
+          (row: TransactionType): TransactionType => committedRows[row.typeCd] ?? row,
+        ),
+    [browse.items, committedRows, removedKeys],
+  );
+
+  useEffect(
+    /**
+     * Forgets every tombstone once the browse has delivered a page.
+     *
+     * ⚠ WHY : Assumptions: a delivered page is the only thing that can retire a tombstone, and it
+     *       retires all of them. A page the service has just composed is authoritative about which
+     *       rows exist, so a key still suppressed after it arrived would hide a row the service says
+     *       is there -- which is the mirror of the defect this closes, and the reachable case is a
+     *       code deleted and then created again through the maintenance screen.
+     *       Assumptions: a FAILED refresh does not retire anything, and does not need to be excluded
+     *       here: `usePagedQuery`'s `browse-failed` transition returns `{...state}` with the same
+     *       `items` array, so this dependency does not change and the effect does not run. The row
+     *       stays suppressed, which is correct -- the delete committed whether the refresh reached
+     *       the service or not.
+     * @returns {void} Nothing; the tombstone list is reset to its shared empty value.
+     */
+    (): void => {
+      setRemovedKeys(NO_REMOVED_KEYS);
+    },
+    [browse.items],
   );
 
   const selection = useMemo(
@@ -1159,12 +1883,152 @@ export default function RefTypeListScreen(): ReactElement {
 
   /**
    * Abandons any unconfirmed request and the edits that belonged to it.
+   *
+   * Assumptions: this deliberately leaves the message band and the typed action codes alone, and both
+   * omissions are load-bearing. {@link submit} calls it on three arms AFTER writing a refusal to the
+   * band -- a rejected type filter, a refused action selection and a no-change comparison -- so
+   * clearing the band here would erase the sentence that explains why the request was dropped. And a
+   * filter change clears the action codes itself, because a code typed beside a row of the previous
+   * result set names a row that may not be in the next one; the other arms leave the operator's typed
+   * characters in place so they can correct one rather than retype all of them.
    * @returns {void} State is updated in place.
    */
   function clearPendingAction(): void {
     setPendingAction(null);
     setUpdateCompleted(false);
   }
+
+  /**
+   * Withdraws an armed request the way an operator who dismissed its confirmation means it.
+   *
+   * ⚠ Refactoring Rationale: this is separate from {@link clearPendingAction} because a withdrawal
+   * has to clear THREE things and that function may only clear one. A browser measurement of the
+   * previous revision recorded exactly what the difference costs: after Escape disarmed a delete, the
+   * armed row's action cell still held the typed `D` and the band still read
+   * `'Delete HIGHLIGHTED row ? Press F10 to confirm'` -- a prompt naming a key over a row that was
+   * provably no longer armed, with no `DELETE` issued and all six rows intact. So the screen's state
+   * and the screen's sentence disagreed, and the sentence was the more visible of the two. Clearing
+   * the band inside {@link clearPendingAction} instead is not available: three of {@link submit}'s
+   * arms write a refusal to the band and then call it, and they would lose their own sentence.
+   *
+   * Assumptions: only the WITHDRAWN row's entry is cleared, not every row's. The reduction that arms
+   * a request refuses more than one action outright -- `'Please select only 1 action'` -- so exactly
+   * one cell can be non-blank when a request exists, and clearing by key says that rather than
+   * relying on it. It is also the reference's own granularity: `2200-SETUP-ARRAY-ATTRIBS`
+   * L1391-L1398 blanks `SELECT(I)` for the one row it finished with and leaves the array alone.
+   *
+   * Assumptions: the band is cleared to `null` rather than assigned a cancellation sentence, so
+   * {@link deriveBand} falls through to the standing instruction the reference shows when no message
+   * has been chosen -- `2500-SETUP-MESSAGE` L1550-L1552 sets `WS-INFORM-REC-ACTIONS` in exactly that
+   * state. Authoring a "cancelled" sentence would invent operator-visible text this program has none
+   * of: `COTRTLIC` declares no cancellation message at all, and the one that exists on the sibling
+   * maintenance screen belongs to that program's PF12 arm.
+   * @param {string} typeCd - Key of the row whose request is being withdrawn.
+   * @returns {void} State is updated in place.
+   */
+  function withdrawPendingAction(typeCd: string): void {
+    clearPendingAction();
+    setBand(null);
+    setActionCodes(
+      /**
+       * Drops the withdrawn row's typed action code, leaving every other row's entry alone.
+       * @param {Readonly<Record<string, string>>} current - Entries as they stand.
+       * @returns {Readonly<Record<string, string>>} Those entries without the withdrawn row's.
+       */
+      (current: Readonly<Record<string, string>>): Readonly<Record<string, string>> => {
+        const next = { ...current };
+        delete next[typeCd];
+        return next;
+      },
+    );
+  }
+
+  /*
+   * WHY : ⚠️ Assumptions: the armed row is resolved from the page ON DISPLAY rather than carried in the
+   *       pending request, so the dialogue can only ever name a record the operator can see. The
+   *       request holds the key alone, and the description it would have had to carry is editable in
+   *       the grid -- a snapshot taken when the row was armed would name a value the row no longer
+   *       shows. Resolving it here also means the dialogue closes by itself if the page moves out from
+   *       under an armed request, which is the same answer `COTRTLIC.cbl` L674 gives an unconfirmable
+   *       PF10: it turns the key back into ENTER rather than guessing.
+   * WHY : Assumptions: `null` is both "nothing armed" and "an update is armed". Only a delete is
+   *       confirmed through a dialogue -- an update's second press is the save key and the reference
+   *       prompts for it on row 21 rather than gating it -- so the update code deliberately resolves to
+   *       no dialogue at all.
+   */
+  const armedDelete =
+    pendingAction === null || pendingAction.code !== REF_TYPE_ROW_ACTION_CODES.delete
+      ? null
+      : (rows.find(
+          /**
+           * Finds the row the armed delete names, as the page stands now.
+           * @param {TransactionType} row - A row of the current page.
+           * @returns {boolean} Whether this row carries the armed key.
+           */
+          (row: TransactionType): boolean => row.typeCd === pendingAction.typeCd,
+        ) ?? null);
+
+  /*
+   * WHY : ⚠ Assumptions: the confirming key's risk is read from the ARMED REQUEST, and the default is
+   *       the one its own legend declares. `F10=Save` is what `COTRTLI.bms` L332-L336 paints, so with
+   *       nothing armed -- the state in which L666-L678 turns the key back into ENTER -- the key is
+   *       classified by what its label says it does. With a delete armed it removes a row from
+   *       `CARDDEMO.TRANSACTION_TYPE`, which is the strongest classification the bar has, and the
+   *       emphasis follows the request rather than the legend text, which never changes.
+   */
+  const armedDeleteRisk: PfKeyRisk = armedDelete === null ? 'mutating' : 'destructive';
+
+  /**
+   * Withdraws the armed delete, from either of the dialogue's two dismissal routes.
+   *
+   * Assumptions: the guard is present because a dismissal can be delivered after the row has left the
+   * page -- the dialogue closes on that transition, and the design system raises its close handler as
+   * it goes -- so the key may no longer be resolvable. There is nothing to withdraw in that case,
+   * because {@link armedDelete} is already `null` and the surface is already gone.
+   * @returns {void} State is updated in place.
+   */
+  function withdrawArmedDelete(): void {
+    if (armedDelete === null) {
+      return;
+    }
+    withdrawPendingAction(armedDelete.typeCd);
+  }
+
+  /*
+   * WHY : ⚠️ Assumptions: the record is named with the mapset's OWN column headings and the row's own
+   *       values, and nothing here is authored. `REF_TYPE_LIST_LABELS.typeColumn` and
+   *       `descriptionColumn` are transcribed from `COTRTLI.bms` L108-L119, which is the same
+   *       vocabulary the grid behind the dialogue paints -- so the operator checks the record against
+   *       the words they were already reading. Trade-offs: `selectColumn`'s four-space pad is the only
+   *       label on this screen that needs trimming for an accessible name, and neither of these two
+   *       carries one, so both are used exactly as declared.
+   * WHY : Assumptions: the key is rendered in the fixed-pitch face and the description is not, which
+   *       is the distinction `TYPOGRAPHY_TOKENS.fixedPitchData` records -- a two-character numeric key
+   *       is column data and a fifty-character description is proportional text with nothing to align
+   *       against.
+   * WHY : Assumptions: an empty list is returned when nothing is armed rather than the dialogue being
+   *       rendered conditionally, because `open` already answers whether the surface exists. The design
+   *       system keeps a closed dialogue's content unmounted, so the empty list is never rendered.
+   */
+  const confirmationRecordItems: DescriptionsProps['items'] =
+    armedDelete === null
+      ? []
+      : [
+          {
+            key: 'typeCd',
+            label: REF_TYPE_LIST_LABELS.typeColumn,
+            children: (
+              <Typography.Text style={{ fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] }}>
+                {armedDelete.typeCd}
+              </Typography.Text>
+            ),
+          },
+          {
+            key: 'description',
+            label: REF_TYPE_LIST_LABELS.descriptionColumn,
+            children: <Typography.Text>{armedDelete.description}</Typography.Text>,
+          },
+        ];
 
   /**
    * Validates the entries, applies a changed filter, and turns a selected action into a
@@ -1247,16 +2111,20 @@ export default function RefTypeListScreen(): ReactElement {
 
     if (selection.code === REF_TYPE_ROW_ACTION_CODES.update) {
       const edited = descriptionDrafts[selectedRow.typeCd] ?? selectedRow.description;
-      const descriptionError = validateRowDescription(edited, selectedRow.description);
+      const descriptionOutcome = validateRowDescription(edited, selectedRow.description);
 
-      if (descriptionError !== null) {
+      if (descriptionOutcome !== null) {
         // WHY: Assumptions: the first fault of a turn is the only one shown. Both composed
         //      sentences are written under `IF WS-RETURN-MSG-OFF` -- L1195 and L1222 -- so a
         //      later edit cannot overwrite an earlier message. The single band plus a single
         //      per-field error reproduces that; concatenating faults or listing them would
         //      not.
-        setFieldErrors({ ...NO_FIELD_ERRORS, description: descriptionError });
-        setBand({ text: descriptionError, severity: 'error' });
+        setFieldErrors({
+          ...NO_FIELD_ERRORS,
+          description: descriptionOutcome.message,
+          descriptionState: descriptionOutcome.state ?? null,
+        });
+        setBand({ text: descriptionOutcome.message, severity: 'error' });
         // WHY: Assumptions: the request stays pending through a failed edit so the cell stays
         //      open for correction. L1356-L1368 keeps the description unprotected and merely
         //      adds the red attribute while the row's validity flag is unset, rather than
@@ -1375,9 +2243,18 @@ export default function RefTypeListScreen(): ReactElement {
       //      input error that the dispatch at L699 turns back at the door. So the two outcomes
       //      this validator can report are separated here by which of them the reference would
       //      have let through.
-      if (outcome !== null && outcome !== LIST_STATUS.WS_MESG_NO_CHANGES_DETECTED.text) {
-        setFieldErrors({ ...NO_FIELD_ERRORS, description: outcome });
-        setBand({ text: outcome, severity: 'error' });
+      // WHY : Refactoring Rationale: the gate reads the outcome's STATE where it compared the outcome's
+      //       text against the no-changes sentence. The two are equivalent today -- that sentence is the
+      //       only outcome carrying no state -- and the state is what the reference actually branches
+      //       on, so a later sentence added to the message selector cannot be mistaken for an input
+      //       error by a string that happens not to match.
+      if (outcome !== null && outcome.state !== undefined) {
+        setFieldErrors({
+          ...NO_FIELD_ERRORS,
+          description: outcome.message,
+          descriptionState: outcome.state,
+        });
+        setBand({ text: outcome.message, severity: 'error' });
         setPendingAction({
           code: REF_TYPE_ROW_ACTION_CODES.update,
           typeCd: target.typeCd,
@@ -1408,13 +2285,25 @@ export default function RefTypeListScreen(): ReactElement {
         setActionCodes({});
         setPendingAction(null);
         setUpdateCompleted(false);
+
+        // WHY : ⚠ Refactoring Rationale: the row is suppressed from the page BEFORE the success
+        //       sentence is written, and this ordering is the whole of the fix. `browse.reset()`
+        //       below refreshes the page but `usePagedQuery` retains the rows on display while that
+        //       read is outstanding -- documented at its own `reset` -- so the deleted row stayed
+        //       listed underneath `'Transaction Type deleted successfully'` until the refresh
+        //       landed. The destructive review forbids exactly that: a success announced while a
+        //       value contradicting it is on display. See {@link NO_REMOVED_KEYS} and the tombstone
+        //       state for the alternatives weighed.
+        setRemovedKeys([request.typeCd]);
         setBand({ text: LIST_STATUS.WS_INFORM_DELETE_SUCCESS.text, severity: 'success' });
 
-        // WHY: Alternatives Considered: merging the deletion locally, as the update path
-        //      merges its result. Rejected because the row no longer exists, so the page has
-        //      one fewer member and the cursor that addressed it addresses nothing -- and the
+        // WHY: Alternatives Considered: merging the deletion locally INSTEAD of re-reading, as the
+        //      update path merges its result. Rejected because the row no longer exists, so the page
+        //      has one fewer member and the cursor that addressed it addresses nothing -- and the
         //      seventh slot would stay blank until something re-read. Re-reading is the only
-        //      display that can be correct here. Trade-offs: it returns the browse to its
+        //      display that can be correct here. The tombstone set above is not that: it suppresses
+        //      the deleted row only for as long as this re-read is in flight, and the page the
+        //      service composes is what retires it. Trade-offs: it returns the browse to its
         //      first page, which the reference does not do -- L1391-L1398 blanks the action
         //      cell and leaves the operator where they were. That is registered as
         //      divergence **D-13** in `docs/architecture/cobol-to-service-traceability.md`
@@ -1423,7 +2312,7 @@ export default function RefTypeListScreen(): ReactElement {
         //      its edge, and a delete can remove exactly that row -- leaving the cursor that
         //      identified the page addressing nothing. A screen that guessed a neighbouring
         //      cursor would be inventing a browse position rather than restoring one.
-        browse.reset();
+        browse.reset().then(ignoreSettledBrowseTurn, ignoreSettledBrowseTurn);
         return;
       }
 
@@ -1489,7 +2378,7 @@ export default function RefTypeListScreen(): ReactElement {
     setLastPageShown(false);
     clearTurnState();
 
-    if (!browse.hasPrev) {
+    if (BACKWARD_EXHAUSTED.includes(browse.boundary)) {
       setBand({ text: LIST_MESSAGES.NO_PREVIOUS_PAGES_TO_DISPLAY, severity: 'error' });
       return;
     }
@@ -1497,7 +2386,7 @@ export default function RefTypeListScreen(): ReactElement {
     setActionCodes({});
     setDescriptionDrafts({});
     clearPendingAction();
-    browse.prevPage();
+    browse.prevPage().then(ignoreSettledBrowseTurn, ignoreSettledBrowseTurn);
   }
 
   /**
@@ -1516,7 +2405,7 @@ export default function RefTypeListScreen(): ReactElement {
   function pageForward(): void {
     clearTurnState();
 
-    if (!browse.hasNext) {
+    if (FORWARD_EXHAUSTED.includes(browse.boundary)) {
       if (lastPageShown) {
         setBand({ text: LIST_MESSAGES.NO_MORE_PAGES_TO_DISPLAY, severity: 'error' });
         return;
@@ -1529,7 +2418,7 @@ export default function RefTypeListScreen(): ReactElement {
     setActionCodes({});
     setDescriptionDrafts({});
     clearPendingAction();
-    browse.nextPage();
+    browse.nextPage().then(ignoreSettledBrowseTurn, ignoreSettledBrowseTurn);
   }
 
   /**
@@ -1634,6 +2523,30 @@ export default function RefTypeListScreen(): ReactElement {
    * {@link commit} already reduces every failure to a band message and the key-handler
    * contract is synchronous. Re-throwing would reach the application error boundary and
    * replace a screen carrying a usable message with a blank one.
+   *
+   * ⚠ WHY : Alternatives Considered: `isConfirmingAnswer` from `ui/src/api/client.ts`, which every
+   *       screen collecting a `Y`/`N` character answers its confirmation through. It does not apply
+   *       here and the absence is recorded so it does not read as an omission: this screen's
+   *       confirmation is not a character an operator types. `app/app-transaction-type-db2/cbl/`
+   *       `COTRTLIC.cbl` L1195-L1200 arms the request and L666-L678 requires a SECOND deliberate PF10
+   *       to commit it, and neither `COTRTLI.bms` nor the symbolic map declares a confirmation field
+   *       at all -- so there is no answer to classify. Sending one would also mean inventing a member
+   *       the published contracts for these two operations do not carry.
+   *
+   * ⚠ WHY : Alternatives Considered: `withoutConcurrentDuplicate`, wrapped around the deletion here.
+   *       Rejected as a second guard over the same key: `deleteTransactionType` in
+   *       `ui/src/api/reference.ts` already wraps itself in it, keyed on the method and target, which
+   *       is the layer that composes the target and therefore the layer that can key on it. Wrapping
+   *       again in the screen would add a second in-flight map that agrees with the first by
+   *       coincidence.
+   *
+   * ⚠ WHY : Alternatives Considered: retaining this outcome with `retainOutcome` so a screen the
+   *       operator moved to could collect it with `claimRetainedOutcome` and
+   *       `subscribeToRetainedOutcomes`. It has nothing to carry on this screen, because the operator
+   *       cannot leave while it is outstanding: every entry in the key map below is built with
+   *       `disabled: committing`, so the exit key, the transfer key, both paging keys and ENTER are
+   *       all withdrawn for the duration of a write. A retained outcome answers the case of a screen
+   *       that unmounted mid-write, and this screen has no such case.
    * @returns {void} The commit runs to completion in the background.
    */
   function requestCommit(): void {
@@ -1725,56 +2638,95 @@ export default function RefTypeListScreen(): ReactElement {
    * @returns {PfKeyHandlerMap} Handlers for every attention identifier this screen answers.
    */
   function buildPfKeyHandlers(): PfKeyHandlerMap {
-    const handlers: Partial<
-      Record<CicsAid, { onInvoke: () => void; disabled?: boolean; label?: string }>
-    > = {};
+    const handlers: Partial<Record<CicsAid, PfKeyHandlerEntry>> = {};
     const accepted: readonly CicsAid[] = ['ENTER', 'PFK02', 'PFK03', 'PFK07', 'PFK08', 'PFK10'];
 
     for (const aid of CICS_AIDS) {
       if (!accepted.includes(aid)) {
-        handlers[aid] = { onInvoke: submit, disabled: committing };
+        // WHY: Assumptions: a coerced identifier carries the same risk as the key it is coerced TO.
+        //      L585-L587 turns every unlisted attention identifier into ENTER, and ENTER on this
+        //      screen validates and arms without writing, so the classification travels with the
+        //      coercion. None of these entries carries a label, so the bar renders none of them and
+        //      the classification is a statement of intent rather than a painted emphasis.
+        handlers[aid] = { onInvoke: submit, disabled: committing, risk: 'read-only' };
       }
     }
 
     return {
       ...handlers,
-      ENTER: { onInvoke: submit, action: 'submit', disabled: committing },
+      // WHY: Assumptions: ENTER is classified `read-only` because it writes NOTHING on this screen.
+      //      `2000-DECIDE-ACTION` reads the typed action characters and ARMS a request --
+      //      L1550-L1555 then prompts for the confirming key -- so the mutation is PF10's and the
+      //      advisory sentences say so in as many words: `'Press F10 to confirm'` and
+      //      `'Press F10 to save'`.
+      ENTER: { onInvoke: submit, action: 'submit', disabled: committing, risk: 'read-only' },
       PFK02: {
         onInvoke: openAddScreen,
         action: 'screen-defined',
         disabled: committing,
         label: REF_TYPE_LIST_KEY_LABELS.PFK02,
+        // WHY: Assumptions: `F2=Add` is `read-only` HERE, which reads like a contradiction and is
+        //      not. The key transfers control to the maintenance screen with a fresh entry --
+        //      L630-L652 -- and that screen is where a record is composed and written. Nothing is
+        //      inserted by pressing it, so classifying it as mutating would paint a leaving key in
+        //      the emphasis reserved for a key that changes stored data.
+        risk: 'read-only',
       },
       PFK03: {
         onInvoke: exitScreen,
         action: 'back',
         disabled: committing,
         label: REF_TYPE_LIST_KEY_LABELS.PFK03,
+        risk: 'read-only',
       },
       PFK07: {
         onInvoke: pageBackward,
         action: 'page-backward',
         disabled: committing,
         label: REF_TYPE_LIST_KEY_LABELS.PFK07,
+        risk: 'read-only',
       },
       PFK08: {
         onInvoke: pageForward,
         action: 'page-forward',
         disabled: committing,
         label: REF_TYPE_LIST_KEY_LABELS.PFK08,
+        risk: 'read-only',
       },
-      // WHY: Assumptions: the semantic action is `save` because that is what PF10 does here,
-      //      and the shared bar decides button emphasis from the identifier rather than from
-      //      this action. Trade-offs: PF10 therefore renders with default emphasis where PF5
-      //      would render as primary on other screens. That is accepted rather than worked
-      //      around: `ui/src/layout/PfKeyBar.tsx` owns the emphasis rule and documents its
-      //      pairing, so changing it belongs in that module and not in a screen reaching past
-      //      its contract.
+      // WHY : ⚠ Refactoring Rationale: the emphasis this key renders with is now DECLARED rather than
+      //       inherited, and the trade-off recorded here is withdrawn because the mechanism it
+      //       described has been replaced. It said the bar decides emphasis from the identifier, so
+      //       PF10 rendered with default emphasis where PF5 renders as primary elsewhere, and that
+      //       changing it belonged in the bar. `ui/src/layout/usePfKeys.ts` now carries
+      //       {@link PfKeyRisk} on a handler and `PfKeyBar` paints from it, which is exactly the
+      //       screen-owned statement that was missing -- the same identifier is a save on one mapset
+      //       and a delete on another, so only the screen can say which.
+      // WHY : ⚠ Assumptions: the classification is DYNAMIC, and this is the whole reason the risk is
+      //       taken from what the action DOES rather than from which key carries it. `F10=Save` is
+      //       the legend `COTRTLI.bms` L332-L336 paints, and it is verbatim on the control whatever
+      //       happens; but the key commits whichever request is armed, and L666-L678 admits it only
+      //       while one IS armed. So with a delete armed it destroys a row and renders in the
+      //       destructive emphasis, and with an update armed it rewrites a description and renders in
+      //       the mutating one. Classifying it as mutating unconditionally would paint the row
+      //       deletion in the same emphasis as a description edit.
       PFK10: {
         onInvoke: requestCommit,
         action: 'save',
-        disabled: committing,
+        // WHY : ⚠ Refactoring Rationale: this key is `busy` where it was `disabled`, and the two are
+        //       not interchangeable. A disabled key is reported as unavailable and rendered
+        //       unavailable -- `ui/src/layout/usePfKeys.ts` classifies it with the baseline's
+        //       invalid-key text before the busy test is reached -- but PF10 during its own commit is
+        //       not an invalid key: it is a VALID key pressed early, which the terminal answered by
+        //       inhibiting the keyboard and saying nothing. `busy` is the member that reproduces
+        //       that: the control stays present, enabled, focusable and named, carries the design
+        //       system's own progress affordance, and the second press is declined silently.
+        //       Assumptions: the other five keys stay `disabled`, deliberately. They are not the
+        //       outstanding turn -- they are different actions, and a screen with a write in flight
+        //       genuinely cannot page, transfer or exit -- so `disabled` is the honest classification
+        //       for them and `busy` would be a claim that each of them is waiting on an answer.
+        busy: committing,
         label: REF_TYPE_LIST_KEY_LABELS.PFK10,
+        risk: armedDeleteRisk,
       },
     };
   }
@@ -1942,7 +2894,7 @@ export default function RefTypeListScreen(): ReactElement {
     }
 
     if (browse.isFailed) {
-      return { text: SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED, severity: 'error' };
+      return describeBrowseFailure(browse.error, browse.failure);
     }
 
     if (browse.isLoading) {
@@ -1963,11 +2915,72 @@ export default function RefTypeListScreen(): ReactElement {
   const displayedBand = deriveBand();
 
   /*
-   * WHY : Refactoring Rationale: the title band, the row-23 message line and the row-24 legend are
+   * WHY : ⚠️ Assumptions: exactly ONE of the two lines carries text on any turn, because
+   *       `2500-SETUP-MESSAGE` at `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L1504-L1555 is a
+   *       single `EVALUATE TRUE` whose first true arm wins -- so the program chooses one sentence per
+   *       turn and sends it to the field its own catalogue names. The other line is published EMPTY
+   *       rather than omitted, which is what reserves its height: `COTRTLI.bms` paints both fields on
+   *       every send, so a line that appeared and disappeared with its content would move the grid
+   *       above it.
+   * WHY : ⚠️ Trade-offs: the advisory member carries no severity, so the band renders it with the
+   *       channel default of `neutral`. That is `INFOMSG`'s declared `COLOR=NEUTRAL`, which the mapset
+   *       states unconditionally -- the field has ONE appearance whatever sentence occupies it -- so
+   *       forwarding this screen's `'info'` and `'success'` severities would paint two colours the
+   *       reference does not have. The severity stays on the outcome line, where `COLOR=RED` is
+   *       likewise unconditional and the band's own default already matches it.
+   */
+  const informationLine = bandChannelFor(displayedBand.text) === 'information';
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the grid names WHY it has no rows, where it used to show the design
+   *       system's own `No data`. That default was measured on a refused visit: with the browse answered
+   *       403, the row-23 band read `'You are not authorized to access this function...'` and the grid
+   *       body underneath it read `No data` -- so the screen said "you may not see this list" and "this
+   *       list is empty" at the same time, and the second one is the larger and more central of the two.
+   *       An operator acting on it would report missing reference data rather than a missing group
+   *       claim. The same contradiction stood behind every other empty state: a filtered miss, a
+   *       genuine fault and a first read that has not answered yet all showed the identical two words.
+   *
+   *       Assumptions: the placeholder is the SAME sentence the outcome line carries, read from the
+   *       same value, so the two can never disagree. Composing a second sentence here was the
+   *       alternative and is what rule T8 exists to prevent -- the reference declares no placeholder
+   *       text at all, because a 3270 simply paints its seven grid rows blank, so any wording invented
+   *       for this position would be uncatalogued operator-visible text. Repeating the catalogued
+   *       sentence keeps the screen inside the catalogue.
+   *
+   *       Assumptions: only an OUTCOME sentence is repeated here, never an advisory one, which is why
+   *       the channel decides rather than the text alone. The five advisory sentences are standing
+   *       guidance and progress -- `'Type U to update, D to delete any record'` and the delete
+   *       prompt -- and none of them answers why the grid has no rows; the completed-delete sentence
+   *       comes closest and still does not, because what the grid is waiting for at that moment is the
+   *       refresh. So an advisory turn leaves the grid silent and its sentence stands in the reserved
+   *       advisory line alone, which is also where the reference paints it.
+   *
+   *       Assumptions: an outstanding first read shows the authored progress sentence instead. The
+   *       grid carries the design system's own loading overlay while `browse.isLoading`, and behind it
+   *       the placeholder was still asserting emptiness about a read that had not answered -- so this
+   *       is the one empty state whose honest answer is neither a refusal nor a count.
+   *
+   *       Trade-offs: the sentence appears twice on the glass when the grid is empty, once in the
+   *       reserved band and once in the grid body. That is accepted deliberately: the band is a
+   *       fixed-height line at the foot of the frame and the placeholder is where an operator's
+   *       attention already is, and a duplicate reason is strictly better than a contradictory one.
+   *       The empty string is passed for the states that must stay silent -- a 401, where the guard is
+   *       already swapping this screen for the sign-on screen, so any text here would flash for one
+   *       frame.
+   */
+  const gridPlaceholder = browse.isLoading
+    ? REQUEST_IN_PROGRESS
+    : informationLine
+      ? ''
+      : displayedBand.text;
+
+  /*
+   * WHY : Refactoring Rationale: the title band, BOTH message lines and the row-24 legend are
    *       DELEGATED to the one `AppShell` that `ui/src/App.tsx` mounts, where this screen composed all
    *       three itself. Per-screen composition is what the tree did before the shell was wired in, and
    *       keeping it afterwards would render a second title band, a second message line and a second
-   *       named legend region on this screen. Everything the mapset paints between rows 4 and 21 -- the
+   *       named legend region on this screen. Everything the mapset paints between rows 4 and 20 -- the
    *       heading and page ordinal, the two filters, the grid and the add row -- stays here.
    * WHY : ⚠️ Assumptions: delegating `pfKeys` hands the shell the bindings to RENDER and leaves
    *       this screen owning the keyboard; an activation of a rendered legend control is forwarded
@@ -1987,9 +3000,10 @@ export default function RefTypeListScreen(): ReactElement {
     },
     now: paintedAt,
     message: {
-      text: displayedBand.text,
+      text: informationLine ? '' : displayedBand.text,
       severity: displayedBand.severity,
       mapset: REF_TYPE_LIST_MAPSET,
+      information: { text: informationLine ? displayedBand.text : null },
     },
     pfKeys: { keys: bindings, onInvoke: invoke, legendColor: 'TURQUOISE' },
   });
@@ -2049,11 +3063,13 @@ export default function RefTypeListScreen(): ReactElement {
    * `FLG-PROTECT-SELECT-ROWS-YES` is set, and L1371 moves `DFHBMFSE` in for a populated row --
    * so availability follows the row and the flag, not the operator.
    *
-   * Assumptions: the confirmation is the design system's `Popconfirm` anchored to this cell,
-   * with `okType="danger"`. The migration plan maps the terminal's re-key-to-confirm convention
-   * onto that component, and anchoring it to the row it acts on is what makes the reference's
-   * `Delete HIGHLIGHTED row ?` refer to something visible. Confirming calls the same
-   * {@link commit} PF10 dispatches, so the two routes cannot diverge.
+   * ⚠ Refactoring Rationale: the confirmation is NOT rendered here any more. It was the design
+   * system's `Popconfirm`, anchored to this cell so that the reference's `Delete HIGHLIGHTED row ?`
+   * referred to something visible; it is now one screen-level `Modal` which names the record in its
+   * own body, for the reasons recorded at that element. The cell is left as the input the mapset
+   * declares it to be, and nothing about arming a request changes: the same {@link commit} PF10
+   * dispatches is what the dialogue's accept calls, so the two routes still cannot diverge.
+   *
    * Assumptions: the cell is addressed by its row's KEY rather than by the whole row, because
    * the key is all it needs -- the entry, the error flag, the accessible name and the pending
    * comparison are every one of them looked up by it. The column is bound to `typeCd` for the
@@ -2093,10 +3109,32 @@ export default function RefTypeListScreen(): ReactElement {
             hasHint: false,
             invalid: inError,
           })}
+          {...busyProps(committing)}
           aria-label={`${REF_TYPE_LIST_LABELS.selectColumn.trim()} ${typeCd}`}
+          /*
+           * WHY : ⚠ Refactoring Rationale: `busyProps` is spread beside `disabled` and not instead of
+           *       it, because the two answer different questions. `disabled` says the cell cannot be
+           *       typed into; `aria-busy` says WHY -- a write this row armed is still outstanding.
+           *       Without the second, a screen-reader operator heard a control simply stop answering
+           *       mid-turn, which is indistinguishable from the screen having broken.
+           * WHY : Alternatives Considered: `unavailableProps` from `ui/src/layout/fieldHelp.tsx`, which
+           *       keeps a control focusable and marks it `aria-disabled` with a RENDERED reason.
+           *       Rejected on both halves of its contract. It needs a catalogued reason to point at,
+           *       and `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` paints none for a cell it has
+           *       protected -- `2200-SETUP-ARRAY-ATTRIBS` L1329-L1373 moves an attribute and says
+           *       nothing. And keeping the cell focusable would contradict the transcription: a
+           *       protected 3270 field is skipped by the cursor, so tabbing into one here would offer
+           *       the operator a field the reference does not let them reach. Native `disabled` already
+           *       exposes the unavailable state to assistive technology, so nothing is withheld.
+           */
           disabled={actionCellsDisabled}
           id={controlId}
           maxLength={ACTION_CODE_LENGTH}
+          /*
+           * WHY : Assumptions: a FLOOR and not a width -- {@link actionCellWidthStyle} records why this
+           *       one column takes a minimum where every other control on the screen takes a maximum.
+           */
+          style={actionCellWidthStyle(cssVar)}
           onChange={
             /**
              * Records the action code typed beside this row.
@@ -2126,46 +3164,34 @@ export default function RefTypeListScreen(): ReactElement {
       </Form.Item>
     );
 
-    if (pendingAction === null || pendingAction.code !== REF_TYPE_ROW_ACTION_CODES.delete) {
-      return cell;
-    }
-
-    if (pendingAction.typeCd !== typeCd) {
-      return cell;
-    }
-
-    return (
-      // WHY: Trade-offs: `okType="danger"` is kept exactly as the migration plan's component
-      //      mapping prescribes, even though this design-system major renders it as an OUTLINED
-      //      dangerous button -- measured in a browser as red text and a red border on a white
-      //      ground rather than a solid red fill. A solid fill would take `danger` and `primary`
-      //      passed through the button's own props, which is a heavier visual treatment than the
-      //      mapping asks for; design-system compliance outranks that preference. The affordance
-      //      still does not rest on colour alone, which is what accessibility requires here: the
-      //      title is the reference's own `Delete HIGHLIGHTED row ?` sentence and the row it acts
-      //      on is de-emphasised at the same time, so the destructive sense is carried by text
-      //      and by position as well as by the error colour.
-      <Popconfirm
-        // WHY: Assumptions: the OK control is DISABLED as well as loading, and the CANCEL control is
-        //      what the guard below is actually for. Measured in this suite: antd's `Button` returns
-        //      early from its own click handler while `loading` is set, so the OK button was already
-        //      inert during a commit -- `disabled` adds nothing to that except making the
-        //      unavailability explicit to assistive technology, which a busy spinner does not state.
-        //      Cancel carries no loading state, so it stayed clickable: cancelling mid-write cleared
-        //      the pending request while the DELETE was outstanding, and the settlement then wrote its
-        //      success sentence for a request the operator had just withdrawn. `whenIdle` on both
-        //      handlers is what closes that, and it does not depend on a component internal that could
-        //      change.
-        okButtonProps={{ disabled: committing, loading: committing }}
-        okType="danger"
-        onConfirm={whenIdle(requestCommit)}
-        onCancel={whenIdle(clearPendingAction)}
-        open
-        title={LIST_STATUS.WS_INFORM_DELETE.text}
-      >
-        {cell}
-      </Popconfirm>
-    );
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the cell is returned BARE. Two things that used to wrap it while
+     *       its row was armed are gone together: the design system's `Popconfirm`, and the `Flex`
+     *       container whose only purpose was to give that overlay a DOM anchor to align against. The
+     *       confirmation is now one screen-level `Modal` -- see the render below -- and a modal surface
+     *       is anchored to the VIEWPORT rather than to a trigger, so there is no anchor left to resolve
+     *       and nothing for a wrapper to supply.
+     *
+     *       What the anchoring wrapper was for is worth keeping on the record, because retiring it
+     *       looks like a regression and is not. The overlay mounted at
+     *       `inset: -1000vh auto auto -1000vw` -- roughly (-12800, -9000) in a browser -- because its
+     *       child was `Form.Item`, which `ui/node_modules/antd/lib/form/FormItem/index.js` declares as
+     *       a plain function component with no `forwardRef` and no `nativeElement`; `getDOM` at
+     *       `ui/node_modules/@rc-component/util/lib/Dom/findDOMNode.js` L18-L26 therefore resolved no
+     *       target, the guard at `@rc-component/trigger/lib/hooks/useAlign.js` L102 turned every
+     *       alignment back, and `useOffsetStyle.js` L7-L15 left the pre-align sentinel in place. The
+     *       `Flex` fixed that by being a `forwardRef` over a real element. The modal removes the whole
+     *       class of failure instead of repairing one instance of it: with no target to resolve, there
+     *       is no state in which a resolution can fail.
+     *
+     *       Alternatives Considered: keeping the anchored overlay and adding the dialog semantics to
+     *       it. There is no path -- `ui/node_modules/@rc-component/tooltip/lib/Popup.js` hardcodes
+     *       `role: 'tooltip'` on the surface with no prop that overrides it, and an attribute set by
+     *       hand on the trigger cannot give the surface a focus trap, focus restoration or
+     *       `aria-modal`. Those four properties are exactly what the safety review asked for, so the
+     *       primitive had to change rather than its wiring.
+     */
+    return cell;
   }
 
   /**
@@ -2201,29 +3227,88 @@ export default function RefTypeListScreen(): ReactElement {
     }
 
     const entry = descriptionDrafts[row.typeCd] ?? stored;
-    const blank = entry.trim() === '';
     const editorId = descriptionEditorId(row.typeCd);
+    /*
+     * WHY : ⚠ Refactoring Rationale: how a refused editor renders is taken from
+     *       `ui/src/layout/fieldHelp.tsx`, and it is driven by the state the TURN produced rather than
+     *       by what the control holds right now. Both halves changed. The marker used to appear the
+     *       moment the operator emptied the cell, before any key had been pressed, where the reference
+     *       writes it while re-sending the map after its edit ran -- `2300-SCREEN-ARRAY-INIT` at
+     *       `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L1412-L1415, under `IF
+     *       CHANGES-HAVE-OCCURRED`. And the refusal reddened the cell's BORDER only, through the
+     *       control's `status`, where L1366-L1368 moves `DFHRED` into the field's colour attribute --
+     *       which is the value's own colour and not a box around it.
+     *
+     *       Assumptions: the shared helper answers both from one state, so the copybook's asymmetry is
+     *       enforced in one place: `app/cpy/CSSETATY.cpy` L18-L22 colours either refused state and
+     *       L23-L26 marks the blank one alone.
+     */
+    const descriptionRefusal = fieldRefusalRendering(
+      fieldErrors.descriptionState ?? undefined,
+      cssVar,
+    );
+    /*
+     * WHY : ⚠ Refactoring Rationale: whether the FIELD is marked is asked of the turn's refusal state
+     *       and no longer of whether a sentence is held, because the two are not the same question and
+     *       answering them alike marked a field that nothing was wrong with. Measured: arming an update
+     *       without editing the description reports `WS-MESG-NO-CHANGES-DETECTED`, and the editor came
+     *       back carrying `aria-invalid="true"` and an error description -- so a screen reader
+     *       announced a fifty-character field holding the value it was given as invalid, and the
+     *       operator's only route out was to change data they had not intended to change.
+     *
+     *       Assumptions: the reference separates these two outcomes explicitly.
+     *       `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` L1072 sets a MESSAGE selector for the
+     *       no-changes turn, while L1078 and L1086 set `INPUT-ERROR`; only the latter reaches the row
+     *       flag that L1366-L1368 reddens. So a no-changes turn is reported on the message line and the
+     *       field is left exactly as it was.
+     *
+     *       Assumptions: the sentence itself still reaches the operator -- {@link deriveBand} publishes
+     *       it on row 23 -- so nothing is withheld, it is simply not attributed to the field.
+     */
+    const descriptionRefused = fieldErrors.descriptionState !== null;
+    const descriptionRefusalText = descriptionRefused ? fieldErrors.description : null;
 
     return (
       <Form.Item
         help={
-          fieldErrors.description === null
+          descriptionRefusalText === null
             ? undefined
-            : fieldErrorHelp(editorId, fieldErrors.description)
+            : fieldErrorHelp(editorId, descriptionRefusalText)
         }
-        noStyle={fieldErrors.description === null}
-        validateStatus={fieldErrors.description === null ? '' : 'error'}
+        noStyle={descriptionRefusalText === null}
+        validateStatus={descriptionRefused ? 'error' : ''}
       >
         <Input
           {...fieldAriaProps(editorId, {
-            hasError: fieldErrors.description !== null,
+            hasError: descriptionRefusalText !== null,
             hasHint: false,
-            invalid: fieldErrors.description !== null,
+            invalid: descriptionRefused,
           })}
+          {...busyProps(committing)}
           aria-label={`${REF_TYPE_LIST_LABELS.descriptionColumn} ${row.typeCd}`}
           autoFocus
           id={editorId}
           maxLength={DESCRIPTION_LENGTH}
+          /*
+           * WHY : Assumptions: the declared width is a CEILING on the control, so the fifty-character
+           *       field stops at fifty characters' worth of box while the column's own share decides how
+           *       much of the row it occupies. `TR_DESCRIPTION` is `VARCHAR(50)` at
+           *       `app/app-transaction-type-db2/ddl/TRNTYPE.ddl` L3 and `TRAN-TYPE-DESC` is `PIC X(50)`
+           *       at `app/cpy/CVTRA03Y.cpy` L6.
+           *       Assumptions: it goes on the ROOT rather than on `styles.input`, because with a suffix
+           *       always present the design system puts `style` on the affix wrapper -- and the wrapper
+           *       is the bordered box a width belongs to, just as the colour belongs to the input.
+           */
+          /*
+           * WHY : ⚠️ Refactoring Rationale: the marker slot is declared to the measure. With a suffix
+           *       always present the design system sizes the affix WRAPPER, whose space the value and
+           *       the slot then share, so a maximum computed for the value alone leaves the value short
+           *       by whatever the slot takes. A sibling screen's two-character key showed that as an
+           *       unreadable record identity; this field is wide enough that the container binds first,
+           *       so the allowance is declared for correctness of the measure rather than for a visible
+           *       change here.
+           */
+          style={copybookFieldWidthStyle(DESCRIPTION_LENGTH, cssVar, BLANK_FIELD_MARKER_CHARACTERS)}
           onChange={
             /**
              * Records the edited description for this row.
@@ -2247,27 +3332,24 @@ export default function RefTypeListScreen(): ReactElement {
               );
             }
           }
-          status={fieldErrors.description === null ? '' : 'error'}
-          suffix={
-            blank ? (
-              /*
-               * WHY : Refactoring Rationale: the marker is `aria-hidden`, which it was not. It is a
-               *       DECORATION standing in for the `'*'` the terminal wrote into the field itself
-               *       (`2300-SCREEN-ARRAY-INIT` L1412-L1415), and it sits inside the input's own suffix
-               *       -- so without this a reader announced a lone asterisk as part of the control it
-               *       had just been told was invalid, saying the same thing twice in a form the
-               *       operator cannot act on. The refusal reaches them through `aria-describedby`
-               *       above, in words. This matches the treatment
-               *       `ui/src/screens/accountUpdate/index.tsx` applies to the same marker.
-               */
-              <Typography.Text
-                aria-hidden="true"
-                style={{ color: cssVar[BMS_TEXT_COLOR_TOKENS.RED] }}
-              >
-                {FIELD_ERROR_TOKENS.blankMarker}
-              </Typography.Text>
-            ) : null
-          }
+          status={descriptionRefused ? 'error' : ''}
+          /*
+           * WHY : ⚠ Assumptions: the refusal colour goes on `styles.input` and NOT on `style`, because
+           *       with a suffix present -- which is now every turn, per
+           *       {@link MARKER_SLOT_UNOCCUPIED} -- `@rc-component/input` puts `style` on the affix
+           *       WRAPPER (`BaseInput.js` L124, L137-L142) and `styles.input` on the input itself
+           *       (`Input.js` L171). `.ant-input` carries `color: token.colorText` of its own
+           *       (`antd/lib/input/style/index.js` L74, L322), so a colour on the wrapper is overridden
+           *       on the very element whose text it was meant to change.
+           */
+          styles={{ input: descriptionRefusal.style }}
+          /*
+           * WHY : Assumptions: the slot is occupied on EVERY turn, marker or not. The reason is
+           *       recorded on {@link MARKER_SLOT_UNOCCUPIED}: a suffix that comes and goes replaces the
+           *       input element, and this editor's `autoFocus` was concealing that rather than
+           *       preventing it.
+           */
+          suffix={descriptionRefusal.suffix ?? MARKER_SLOT_UNOCCUPIED}
           value={entry}
         />
       </Form.Item>
@@ -2309,6 +3391,11 @@ export default function RefTypeListScreen(): ReactElement {
         render:
           /**
            * Renders the row's action cell.
+           *
+           * Assumptions: the ROW is no longer forwarded, and its absence is deliberate. It was
+           * carried so the per-row confirmation could name the record it would remove; that
+           * confirmation is now one screen-level dialogue which resolves the armed row from the page
+           * itself, so a second route to the same row would be a second source of truth for it.
            * @param {string} typeCd - Key of the row this cell belongs to.
            * @returns {ReactElement} The cell's control.
            */
@@ -2332,6 +3419,7 @@ export default function RefTypeListScreen(): ReactElement {
           (typeCd: string, row: TransactionType): ReactElement => (
             <Typography.Text
               style={{
+                ...UNBREAKABLE_VALUE_STYLE,
                 color: isAwaitingConfirmation(row)
                   ? cssVar[BMS_TEXT_COLOR_TOKENS.NEUTRAL]
                   : cssVar[BMS_TEXT_COLOR_TOKENS.DEFAULT],
@@ -2341,6 +3429,19 @@ export default function RefTypeListScreen(): ReactElement {
               {typeCd}
             </Typography.Text>
           ),
+        /*
+         * WHY : Assumptions: the HEADING carries the same refusal to break as the value beneath it,
+         *       through the header cell rather than through `title`, because the design system renders
+         *       `title` inside a cell it owns. Measured at 375 pixels this heading rendered one letter
+         *       per line; it is a single word from the mapset's row-10 literals at
+         *       `app/app-transaction-type-db2/bms/COTRTLI.bms` L108-L119 and the terminal never broke it.
+         */
+        onHeaderCell:
+          /**
+           * Keeps the key column's heading on one line.
+           * @returns {{ style: CSSProperties }} The heading cell's style.
+           */
+          (): { style: CSSProperties } => ({ style: UNBREAKABLE_VALUE_STYLE }),
         title: REF_TYPE_LIST_LABELS.typeColumn,
         width: COLUMN_WIDTH_SHARES.typeCd,
       },
@@ -2364,6 +3465,31 @@ export default function RefTypeListScreen(): ReactElement {
 
   return (
     <Flex vertical gap="large">
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: this screen now ANNOUNCES that a turn is outstanding, where
+       *       every busy state it had was visual or attribute-only -- the grid's spinner, and
+       *       `aria-busy` on the filter and the action cells. Two comments in this file recorded the
+       *       reason it did not: `busyAnnouncement` requires a SENTENCE, and neither
+       *       `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` nor the catalogue carried one for a
+       *       request in flight, so any wording would have been invented operator text. That is no
+       *       longer true -- `ui/src/messages/messages.ts` registers `REQUEST_IN_PROGRESS` as an
+       *       authored operator sentence, width-checked like every other -- so the objection is
+       *       withdrawn and both comments are corrected where they stand.
+       *
+       * WHY : ⚠️ Assumptions: the region announces the SAME sentence the grid's placeholder shows while
+       *       a read is outstanding, which is the standard pairing rather than a duplication: the
+       *       placeholder is visible and is announced by nothing, and this region is announced and
+       *       visible to nobody. Publishing the sentence through the message bands instead was the
+       *       alternative and is refused -- those two lines carry the reference's own two message
+       *       fields, and a progress sentence is neither an outcome nor standing guidance, so it would
+       *       displace a sentence the program did paint.
+       *
+       * WHY : Assumptions: BOTH outstanding turns raise it -- a write and a read -- because an
+       *       operator waiting on either has the same question. That includes the opening read, which
+       *       is a request this screen makes on the operator's behalf, and the placeholder says the
+       *       same thing at the same moment, so the two agree.
+       */}
+      {busyAnnouncement(committing || browse.isLoading ? REQUEST_IN_PROGRESS : undefined)}
       {/*
        * Assumptions: the heading and the page number share row 4 in the mapset -- the heading at
        * `POS=(4,28)` and `Page ` with `PAGENO` at `POS=(4,70)` and `POS=(4,76)` -- so they are
@@ -2458,6 +3584,33 @@ export default function RefTypeListScreen(): ReactElement {
                 hasHint: false,
                 invalid: typeFilterError !== null,
               })}
+              /*
+               * WHY : ⚠ Refactoring Rationale: the control an operator submits the browse FROM now states
+               *       that the browse is outstanding, and nothing on this path did. `browse.isLoading`
+               *       reached the grid's spinner alone, so the field the Enter was pressed in carried no
+               *       indication at all -- which is exactly what produces a second and third identical
+               *       submission of the same filter.
+               * WHY : Alternatives Considered: `disabled` on this control while the read runs, which would
+               *       be the stronger signal. Rejected because it would forbid the correction this screen
+               *       deliberately allows -- retyping a different type code while the first browse is still
+               *       outstanding -- so an operator who mistyped would have to wait out a read they no
+               *       longer want.
+               * WHY : ⚠ Refactoring Rationale: `busyAnnouncement` from `ui/src/layout/fieldHelp.tsx` IS
+               *       paired with this now, at the top of this screen's body, and the objection recorded
+               *       here is withdrawn. It said the helper requires a sentence and that neither
+               *       `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` nor the catalogue carried one for a
+               *       read in flight, so every candidate wording would have been invented operator text.
+               *       `ui/src/messages/messages.ts` now registers `REQUEST_IN_PROGRESS`, so the sentence
+               *       is catalogued and rule T8 has something to point at. `aria-busy` stays on this
+               *       control regardless: it says THIS FIELD is waiting, which a screen-level
+               *       announcement cannot say.
+               * WHY : Assumptions: the announcement does not become a third message authority, which was
+               *       the other objection and the one that still holds in substance. It is published
+               *       through the live region rather than through either of the reference's two message
+               *       rows -- 21 and 23 of `app/app-transaction-type-db2/bms/COTRTLI.bms` -- so nothing
+               *       the program paints is displaced by something it does not.
+               */
+              {...busyProps(browse.isLoading)}
               aria-labelledby={TYPE_FILTER_LABEL_ID}
               autoFocus
               id={TYPE_FILTER_INPUT_ID}
@@ -2476,6 +3629,18 @@ export default function RefTypeListScreen(): ReactElement {
                 }
               }
               status={typeFilterError === null ? '' : 'error'}
+              /*
+               * WHY : ⚠ Refactoring Rationale: the two-character filter was rendered at whatever width
+               *       its container gave it, which a rendering review measured across this application
+               *       as one- and two-character inputs 201 pixels wide -- and on this screen it is the
+               *       control the operator submits the browse from, sitting beside a fifty-character
+               *       field of identical size. A field eight times wider than the data it can hold
+               *       states that more may be typed into it than `TRTYPEIN LENGTH=2` at
+               *       `app/app-transaction-type-db2/bms/COTRTLI.bms` accepts.
+               *       Assumptions: a CEILING rather than a fixed width, so a phone-width viewport still
+               *       shrinks it instead of forcing the page sideways -- design gap G1's trade for size.
+               */
+              style={copybookFieldWidthStyle(TYPE_CODE_LENGTH, cssVar)}
               value={typeFilterDraft}
             />
           </Space.Compact>
@@ -2504,6 +3669,7 @@ export default function RefTypeListScreen(): ReactElement {
               hasHint: false,
               invalid: descriptionFilterError !== null,
             })}
+            {...busyProps(browse.isLoading)}
             aria-labelledby={DESCRIPTION_FILTER_LABEL_ID}
             id={DESCRIPTION_FILTER_INPUT_ID}
             maxLength={DESCRIPTION_LENGTH}
@@ -2520,6 +3686,14 @@ export default function RefTypeListScreen(): ReactElement {
               }
             }
             status={descriptionFilterError === null ? '' : 'error'}
+            /*
+             * WHY : Assumptions: the same ceiling the row editor takes, from the same declared width --
+             *       `TRDESC LENGTH=50` at `app/app-transaction-type-db2/bms/COTRTLI.bms` and
+             *       `TR_DESCRIPTION VARCHAR(50)` at `ddl/TRNTYPE.ddl` L3. Both filters are sized from
+             *       their declared widths so the pair states the difference between them, which is the
+             *       whole point of sizing either.
+             */
+            style={copybookFieldWidthStyle(DESCRIPTION_LENGTH, cssVar)}
             value={descriptionFilterDraft}
           />
         </Form.Item>
@@ -2536,7 +3710,67 @@ export default function RefTypeListScreen(): ReactElement {
       <Table<TransactionType>
         columns={buildColumns()}
         dataSource={rows}
+        /*
+         * WHY : Assumptions: only `emptyText` is overridden, so every other piece of the grid's
+         *       localisation -- the sort tooltips, the filter controls' own labels -- stays with the
+         *       design system. Replacing the whole locale object would silently blank those.
+         */
+        locale={{ emptyText: gridPlaceholder }}
         loading={browse.isLoading}
+        /*
+         * WHY : ⚠ Purpose: `onRow` gives each row the affordance it did not have -- see
+         *       {@link ROW_AFFORDANCE_STYLE} for the measurement.
+         * WHY : ⚠ Assumptions: a click places the CURSOR in that row's action cell and types nothing
+         *       into it. The reference separates choosing a row from acting on it, and the separation is
+         *       load-bearing here more than anywhere: `2000-DECIDE-ACTION` at
+         *       `app/app-transaction-type-db2/cbl/COTRTLIC.cbl` reads the action characters the operator
+         *       typed and only then acts, so a mis-aimed click costs a cursor move. Writing `'U'` into
+         *       the cell on a click would put the operator one Enter away from an update they did not
+         *       ask for, and `'D'` one Enter away from a deletion.
+         * WHY : ⚠ Assumptions: NO `tabIndex` is put on the row, and the absence is deliberate. Every row
+         *       already carries a focusable, named control in its leading column, so a keyboard route
+         *       through the rows exists -- seven stops, each announcing `Sel` with the row's own key --
+         *       and a focusable row would double each of those with an element that has no accessible
+         *       name. This matches the treatment the user and authorization browses record for the same
+         *       measurement.
+         */
+        onRow={
+          /**
+           * Makes a row's static area put the cursor in that row's action cell.
+           * @param {TransactionType} row - The type the row lists.
+           * @returns {{ onClick: (event: ReactMouseEvent<HTMLElement>) => void; style: CSSProperties }}
+           *   The row's handler and style.
+           */
+          (
+            row: TransactionType,
+          ): {
+            onClick: (event: ReactMouseEvent<HTMLElement>) => void;
+            style: CSSProperties;
+          } => ({
+            /**
+             * Places the cursor in the clicked row's action cell, changing no value.
+             *
+             * Alternatives Considered: keeping a registry of control references, as the user browse
+             * does. Rejected because {@link actionCellId} already publishes each cell's identifier for
+             * its label association, so a second registry of the same elements would be a second
+             * source of truth for one fact.
+             * @param {ReactMouseEvent<HTMLElement>} event - The click delivered to the row.
+             * @returns {void} Nothing; focus moves as a side effect.
+             */
+            onClick: (event: ReactMouseEvent<HTMLElement>): void => {
+              // WHY : ⚠ Assumptions: a click that belongs to a control inside the row is LEFT to that
+              //       control. See {@link landedOnSelfHandlingControl} for the measurement -- without
+              //       this the row took the click away from the description editor and every keystroke
+              //       after it went into the action cell.
+              if (landedOnSelfHandlingControl(event.target)) {
+                return;
+              }
+
+              document.getElementById(actionCellId(row.typeCd))?.focus();
+            },
+            style: ROW_AFFORDANCE_STYLE,
+          })
+        }
         pagination={false}
         rowKey={
           /**
@@ -2554,6 +3788,15 @@ export default function RefTypeListScreen(): ReactElement {
          *      action column came to measure wider than the fifty-character description. Fixing
          *      the layout makes the mapset-derived shares authoritative.
          */
+        /*
+         * WHY : ⚠ Assumptions: a horizontal extent is declared so the shares above have a floor to
+         *       resolve against, and the design system gives the grid its own scrolling region below it.
+         *       {@link tableMinimumMeasure} records the measurement this answers: with no extent
+         *       declared, a 375-pixel viewport squeezed the eight-cell key column to about eleven pixels
+         *       of content, which wrapped a two-character key and stacked its heading one letter per
+         *       line in a 121-pixel row -- and that row is what pushed the function-key bar off screen.
+         */
+        scroll={{ x: tableMinimumMeasure(cssVar) }}
         tableLayout="fixed"
       />
       {/*
@@ -2608,14 +3851,175 @@ export default function RefTypeListScreen(): ReactElement {
         <Col flex={COLUMN_WIDTH_SHARES.description} />
       </Row>
       {/*
-       * Refactoring Rationale: the key legend that used to close this body, and the message line above
-       * the grid, are delegated to the shell in the `useShellSlot` call above. One delegated band still
-       * carries BOTH of the mapset's message fields: `INFOMSG` on row 21 and `ERRMSG` on row 23 are
-       * separate fields, but the program blanks the informational one at the start of every send (L1320)
-       * and its message precedence at L1504-L1555 chooses one sentence per turn, so a single line shows
-       * what an operator would have read. The 75-character content contract is still enforced from the
-       * mapset name, which travels with the delegation.
+       * Refactoring Rationale: the key legend that used to close this body is delegated to the shell in
+       * the `useShellSlot` call above, and so are BOTH of the mapset's message lines -- `INFOMSG` on row
+       * 21 and `ERRMSG` on row 23, each on its own channel. The routing rule and the measurement behind
+       * it are recorded at that call.
        */}
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the destructive confirmation is a `Modal` where it was an
+       *       anchored `Popconfirm`, and it is mounted ONCE here where it was mounted per armed row
+       *       inside the action cell. Both halves are deliberate.
+       *
+       *       The primitive changed because a `Popconfirm` cannot be a dialogue at this package
+       *       version. Its overlay is the tooltip primitive, and
+       *       `ui/node_modules/@rc-component/tooltip/lib/Popup.js` writes `role: 'tooltip'` onto the
+       *       surface with no prop that overrides it -- so an accessibility sweep found the app's
+       *       destructive confirmations announced as tooltips, carrying no `aria-modal`, transferring
+       *       no focus, and leaving Tab to walk the page BEHIND them. `Modal` renders through the
+       *       dialog primitive, which sets `role="dialog"`, `aria-modal="true"` and `aria-labelledby`
+       *       from the title at `ui/node_modules/@rc-component/dialog/lib/Dialog/Content/Panel.js`
+       *       L113-L115, locks focus inside itself while open, and restores focus on close. Those four
+       *       properties are the whole of what the review asked for and none of them was reachable
+       *       from the old primitive.
+       *
+       *       It is mounted once because a modal is anchored to the viewport, so it no longer needs to
+       *       be beside the thing it is about. Per-row mounting existed only so the overlay had a
+       *       trigger to align against; one instance driven by the pending request is the same surface
+       *       with one less way to be wrong, and it cannot render twice.
+       *
+       * WHY : ⚠️ Assumptions: everything the previous revision earned is carried across, and each piece
+       *       is listed so a later edit cannot drop one silently. It is CONTROLLED by the pending
+       *       request, so the keyboard path (`D` + ENTER) raises the same surface a pointer does and
+       *       the dialogue is on the glass the moment the row is armed. Its title is the reference's
+       *       own catalogued sentence, so the dialogue introduces no second wording. It NAMES the
+       *       record -- `'Delete HIGHLIGHTED row ?'` says which row only by highlight, which a pointer
+       *       operator who armed the wrong cell cannot check. Initial focus is on the DECLINING choice.
+       *       Escape withdraws. And nothing focuses anything after the dialogue opens.
+       *
+       * WHY : ⚠️ Assumptions: the record naming no longer travels through `aria-describedby` on the two
+       *       controls, and that is a consequence of the primitive rather than a reduction. The
+       *       description was needed because the old surface had no role at all, so an operator using
+       *       a screen reader heard `Cancel, button` and nothing else; a dialogue is announced by name
+       *       and its contents are read on open, so the same fact now reaches the same operator
+       *       through the surface's own semantics. Keeping both would state one thing twice, and the
+       *       one that depends on a hand-maintained identifier is the one that can rot.
+       *
+       * WHY : ⚠️ Trade-offs: the accept keeps the design system's default `OK` rather than taking the
+       *       confirming key's legend, which is what the sibling user-delete dialogue does. That
+       *       screen's key legend is `'F5=Delete'` and names the action; this screen's confirming key
+       *       is PF10, whose mapset legend reads `'F10=Save'` at
+       *       `app/app-transaction-type-db2/bms/COTRTLI.bms` L332-L336 -- so borrowing it would label
+       *       a destructive accept "Save". Neither `COTRTLI.bms` nor `COTRTLIC` declares a literal for
+       *       a dialogue accept, because a 3270 has no dialogue, so there is no verbatim string to
+       *       carry and rule T8 has nothing to preserve here. Authoring one was the other option and
+       *       was rejected: it would put an invented operator-visible string beside a title that is
+       *       transcribed, which is the inconsistency the verbatim rule exists to prevent.
+       *
+       * WHY : ⚠️ Assumptions: a bare Enter on arrival WITHDRAWS the request, and the reference answers
+       *       an ENTER during an armed delete by re-validating and re-arming it instead. This is a
+       *       documented divergence and it is now a stronger one than it was: the dialogue's focus
+       *       trap means focus is always inside it, `usePfKeys` defers ENTER to a focused `button`
+       *       through its own activation selector, and the focused button is Cancel -- so Enter can
+       *       never reach this screen's ENTER turn while a delete is armed, where before the outcome
+       *       depended on where focus happened to be. The divergence is deliberate in that direction:
+       *       an unread keystroke leaves the row alone. `COTRTLIC.cbl` L666-L678 requires a SECOND
+       *       deliberate PF10 to commit, so a surface where one keystroke could commit would be less
+       *       careful than the terminal, and one where a keystroke declines is more so.
+       */}
+      <Modal
+        cancelButtonProps={{ autoFocus: true, 'aria-describedby': DELETE_CONFIRMATION_RECORD_ID }}
+        /*
+         * WHY : ⚠️ Refactoring Rationale: a withdrawn confirmation is DESTROYED rather than kept
+         *       hidden, because otherwise the `autoFocus` on the line above stops working after the
+         *       first opening. `autoFocus` is honoured by the platform when a control ENTERS the
+         *       document; the design system keeps a closed dialogue mounted at `display:none`, so a
+         *       re-opening re-shows controls that never left and no mount re-applies the attribute.
+         *       A browser pass on the sibling authorization screen measured the consequence -- focus
+         *       on `Cancel` on the first open, and on the dialogue's container element on every
+         *       later one -- which on a DELETE means the operator is no longer placed on the answer
+         *       that walks away. This screen arms the same dialogue once per row, so a second
+         *       opening is the normal case rather than the exception.
+         *       Trade-offs: one extra mount per confirmation, and the withdrawal still fades:
+         *       `@rc-component/dialog/lib/Dialog/Content/index.js` passes the flag as the motion's
+         *       `removeOnLeave`, so removal happens when the leave animation completes.
+         */
+        destroyOnHidden
+        /*
+         * WHY : Assumptions: the accept carries `danger` on top of the default primary type rather
+         *       than the legacy `okType="danger"` this surface used before. `convertLegacyProps` maps
+         *       that operand to `danger` with the DEFAULT variant, which renders the destructive
+         *       control as the quieter and smaller of the two buttons -- emphasis inverted against
+         *       risk, which is the defect a rendering review recorded on four screens at once. The
+         *       pair renders the solid dangerous variant instead.
+         * WHY : Assumptions: `disabled` accompanies `loading` and is not redundant. The design
+         *       system's `Button` returns early from its own click handler while loading, so the
+         *       accept was already inert during a commit; `disabled` is what states that
+         *       unavailability to assistive technology, which a spinner does not.
+         */
+        okButtonProps={{
+          danger: true,
+          'aria-describedby': DELETE_CONFIRMATION_RECORD_ID,
+          disabled: committing,
+          loading: committing,
+        }}
+        open={armedDelete !== null}
+        title={LIST_STATUS.WS_INFORM_DELETE.text}
+        /*
+         * WHY : ⚠️ Assumptions: BOTH handlers are wrapped in `whenIdle`. Neither control goes through
+         *       the key hook, so the `disabled: committing` declarations on the key map cannot cover
+         *       them, and cancel carries no loading state of its own -- so a cancel during an
+         *       outstanding `DELETE` used to clear the pending request while the write was still in
+         *       flight, after which the settlement wrote its success sentence for a request the
+         *       operator had just withdrawn. The same hazard reaches Escape, which routes through the
+         *       same handler.
+         */
+        onCancel={whenIdle(withdrawArmedDelete)}
+        onOk={whenIdle(requestCommit)}
+        footer={
+          /**
+           * Composes the footer so only the accept carries the destructive focus ring.
+           *
+           * Assumptions: the two stock controls are placed by hand rather than restyled in place,
+           * because the nested provider has to wrap ONE of them. Wrapping the whole dialogue would
+           * put the error-ramp ring around the cancel control as well, and a focus ring is a risk
+           * signal -- cancel is the one control on this surface that risks nothing.
+           * Assumptions: the `controls` members are typed as element-returning functions rather than
+           * as `ComponentType`, which is the name the design system's own types use. That name is not
+           * imported here and importing a type solely to mention it in a doc comment trades one lint
+           * failure for another, so the structural form is written instead -- it says the same thing
+           * and is checkable from what this module already imports.
+           * @param {ReactNode} _stockFooter - The stock pair, unused; both members are placed below.
+           * @param {{ OkBtn: () => ReactElement, CancelBtn: () => ReactElement }} controls - The stock
+           *   buttons, each of which reads this dialogue's own button props and handlers.
+           * @returns {ReactElement} Cancel first, then the destructive accept.
+           */
+          (_stockFooter: ReactNode, controls): ReactElement => (
+            <>
+              {/*
+               * WHY : Assumptions: cancel is rendered FIRST, which is both the stock order and the
+               *       safe one -- the first control a keyboard reaches is the one that changes
+               *       nothing.
+               */}
+              <controls.CancelBtn />
+              {/*
+               * WHY : Assumptions: the nested provider carries `destructiveFocusTheme` so the
+               *       accept's focus ring sits in the error ramp. `ui/src/theme/antdTheme.ts` records
+               *       the measurement: the destructive hover is 7.748:1 against the painted surface
+               *       and this ring is 10.718:1, so rest -> hover -> focus is strictly increasing,
+               *       where the global hue-neutral ring left the strongest signal missing at exactly
+               *       the moment of commitment. A nested provider MERGES per component name, so
+               *       nothing else about this control changes.
+               */}
+              <ConfigProvider theme={destructiveFocusTheme}>
+                <controls.OkBtn />
+              </ConfigProvider>
+            </>
+          )
+        }
+      >
+        {/*
+         * WHY : Assumptions: the rows are passed as `items` rather than as `Descriptions.Item`
+         *       children, which is the non-deprecated form at this package version and the form that
+         *       lets the pair be built from the armed row without a conditional in the tree.
+         */}
+        <Descriptions
+          column={CONFIRMATION_RECORD_COLUMNS}
+          id={DELETE_CONFIRMATION_RECORD_ID}
+          items={confirmationRecordItems}
+          size="small"
+        />
+      </Modal>
     </Flex>
   );
 }

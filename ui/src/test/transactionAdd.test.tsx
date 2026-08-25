@@ -93,13 +93,25 @@ import { CARDDEMO_USER_GROUP } from '../hooks/useAuth';
 import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, PRIMARY_ACTION_AIDS } from '../layout/PfKeyBar';
 import type { CicsAid } from '../layout/usePfKeys';
+// Assumptions: the acknowledgement is composed by the catalog's own TEMPLATE rather than written out
+// here, because its two literals meet with a space on each side -- `'Transaction added successfully. '`
+// and `' Your Tran ID is '` at `app/cbl/COTRN02C.cbl` L728-L732 -- so the rendered sentence carries TWO
+// spaces the eye does not see. A literal typed into this file would silently normalise one away and the
+// case would fail against a screen that was right.
+// Assumptions: the busy region is located by the identifier its own helper publishes, so this case
+//   cannot drift from the one place deciding the region's shape.
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import {
   COMMON_MESSAGES,
   INVALID_KEY_PRESSED,
   MESSAGE_BAND,
   MESSAGE_BAND_BY_MAPSET,
+  MESSAGE_TEMPLATES,
+  PERSISTENT_FAILURE_REPORT_IT,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
+  formatMessageTemplate,
 } from '../messages/messages';
 import { ROUTE_TABLE, TRANSACTION_ADD_PATH } from '../router';
 import type { RouteTableEntry } from '../router';
@@ -114,7 +126,7 @@ import {
   TransactionAddScreen,
 } from '../screens/transactionAdd';
 import type { TransactionAddField, TransactionAddValues } from '../screens/transactionAdd';
-import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
+import { FIELD_ERROR_TOKENS, TARGET_SIZE_AA_MINIMUM, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 import {
   apiError,
   expectMaxLength,
@@ -305,9 +317,12 @@ const WIRE_NEGATIVE_AMOUNT = '-1234.56';
  * and overwrites the keyed card number from the cross-reference at L209. A fixture filling both would
  * make every case a card case that happened to be addressed by account.
  *
- * Assumptions: the confirmation is blank, so an unmodified fixture submits the reference's PREVIEW turn
- * rather than a write. Every case that writes supplies the answer explicitly, which keeps a write
- * visible in the case that performs it.
+ * ⚠️ Assumptions: the confirmation is blank, so an unmodified fixture submits NOTHING at all -- a blank
+ * answer raises the screen's own asking surface and issues no request, which is
+ * `app/cbl/COTRN02C.cbl` L176-L181 answering `SPACES` and `LOW-VALUES` by re-displaying the screen.
+ * The note this replaces claimed a blank fixture "submits the reference's PREVIEW turn", which was true
+ * of the measured shape and is the defect that was removed. Every case that writes supplies the
+ * affirmative explicitly, which keeps a write visible in the case that performs it.
  */
 const A_COMPLETE_CAPTURE: TransactionAddValues = {
   accountId: ACCOUNT_ID,
@@ -327,11 +342,17 @@ const A_COMPLETE_CAPTURE: TransactionAddValues = {
 };
 
 /**
- * Builds the 200 answer an unconfirmed turn receives: the normalised amount and the resolved pair.
+ * Builds the 200 withheld-write answer: the normalised amount and the resolved pair.
+ *
+ * ⚠️ Assumptions: the turn that legitimately receives this is the COPY, not a blank-confirmation
+ * submit. A blank answer no longer reaches the wire at all, so where this outcome is armed on
+ * `addTransaction` it is a deliberately harmless answer for a call the case asserts never happens --
+ * arming it means a regression that DID call the operation fails on the assertion that names the
+ * defect rather than on an unhandled rejection somewhere else.
  *
  * Assumptions: `copied` is `null` because an ordinary capture copies nothing. The copy-last action is
  * the only turn whose answer carries the eleven recalled values, and it has its own cases; a default
- * carrying them would make every preview here look like a copy.
+ * carrying them would make every withheld answer here look like a copy.
  * @param {string} amount - The amount as the service normalised it, in its own monetary form.
  * @returns {TransactionAddOutcome} The withheld-write outcome.
  */
@@ -375,16 +396,24 @@ function createdOutcome(amount: string): TransactionAddOutcome {
  *
  * Assumptions: a real `ApiRequestError` and not a lookalike, for the reason recorded on its import: the
  * screen's failure classification reaches its refusal sentences only through an `instanceof` test.
+ * ⚠️ Assumptions: `aggregate` defaults to `null`, which is the document's own default and a real value
+ * rather than an absent one -- a refused turn may carry no summary line at all. It is supplied only by
+ * the rows whose subject is a sentence the SERVICE selects: `transaction-api.yaml` documents the 500 on
+ * the capture operation as carrying whichever of four verbatim sentences names the step that failed, and
+ * the screen cannot know which step that was, so a fixture asserting one of them has to put it in the
+ * document the way the service does.
  * @param {number} status - HTTP status the service answered with.
  * @param {readonly FieldError[]} fieldErrors - Per-field refusals the problem document attributes, in
  *   the order the service marked them, which is the order the screen marks its controls in.
+ * @param {string | null} [aggregate] - The document's summary line, or `null` when it carries none.
  * @returns {ApiRequestError} The failure a rejected promise carries.
  */
 function transportFailure(
   status: number,
   fieldErrors: readonly FieldError[] = [],
+  aggregate: string | null = null,
 ): ApiRequestError {
-  const problem: ApiError = apiError({ status, fieldErrors });
+  const problem: ApiError = apiError({ status, fieldErrors, message: aggregate });
   return new ApiRequestError('PROBLEM', status, problem, `refused with ${String(status)}`);
 }
 
@@ -475,6 +504,61 @@ async function expectBandSentence(sentence: string): Promise<void> {
 }
 
 /**
+ * Reads the antd alert variant the row-23 band currently renders, or `null` when it renders none.
+ *
+ * ⚠️ Purpose: an acknowledgement painted in the REFUSAL variant is a finding of its own, and it was
+ * measured on this screen: the band reported a successful capture in red while the user screens
+ * reported theirs in green. The sentence alone cannot see that, so the variant is read separately.
+ *
+ * Assumptions: the variant is read from the CLASS antd emits rather than from a prop, because a prop
+ * assertion passes for a band that resolves the prop and then renders something else.
+ *
+ * Assumptions: the alert is looked for INSIDE the band element, because `ui/src/layout/MessageBand.tsx`
+ * renders it as a child of the element carrying the band identifier -- a document-wide query would also
+ * match an alert a screen had composed for itself, which is a different defect.
+ * @returns {string | null} The variant suffix antd emitted, or `null` when the band holds no alert.
+ */
+function bandAlertVariant(): string | null {
+  for (const variant of ['error', 'success', 'info']) {
+    if (messageBand().querySelector(`.ant-alert-${variant}`) !== null) {
+      return variant;
+    }
+  }
+  return null;
+}
+
+/**
+ * Waits until the message band's own text is EXACTLY one sentence, space for space.
+ *
+ * ⚠️ Purpose: {@link expectBandSentence} cannot see a doubled space and never could.
+ * `toHaveTextContent` collapses runs of whitespace in the CANDIDATE before comparing, so a sentence
+ * carrying two spaces matches a band painting one -- and the acknowledgement this screen composes
+ * carries exactly that. `MESSAGE_TEMPLATES.TRANSACTION_ADDED_SUCCESSFULLY` joins a first literal ENDING
+ * in a space to a second BEGINNING with one, transcribed from the `STRING` statement at
+ * `app/cbl/COTRN02C.cbl` L728-L732, and the sentence reads as correct English without the second one --
+ * so a whitespace-tidying edit anywhere between the catalog and the band would be invisible to a reader
+ * and to any normalising matcher. Rule T8 makes the doubled space a contract, so it needs an assertion
+ * that compares raw `textContent`.
+ *
+ * Assumptions: the comparison is against the TRIMMED sentence, because several catalogued strings are
+ * padded to a declared `PIC X` width and the DOM drops trailing whitespace on display. Trimming removes
+ * only the padding at the ends; it cannot remove an interior double space, which is the whole point.
+ * @param {string} sentence - The composed sentence, taken from the catalog and never retyped.
+ * @returns {Promise<void>} Resolves once the band reads exactly that.
+ */
+async function expectBandToRead(sentence: string): Promise<void> {
+  await waitFor(
+    /**
+     * Asserts the band's exact text once it has settled.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(messageBand().textContent).toBe(sentence.trim());
+    },
+  );
+}
+
+/**
  * Locates the legend control that raises one attention identifier.
  *
  * ⚠️ Assumptions: the control is found by its `aria-keyshortcuts` attribute inside the legend's own
@@ -521,11 +605,7 @@ function legendControls(): readonly HTMLButtonElement[] {
  * @throws {Error} If the form is absent or renders a number of controls other than one.
  */
 function confirmationTrigger(): HTMLElement {
-  const form = document.querySelector('form');
-  if (form === null) {
-    throw new Error('the capture form is not rendered');
-  }
-  const buttons = within(form).getAllByRole('button');
+  const buttons = within(captureForm()).getAllByRole('button');
   const only = buttons[0];
   if (buttons.length !== 1 || only === undefined) {
     throw new Error(`the capture form renders ${String(buttons.length)} controls, expected one`);
@@ -546,6 +626,46 @@ function formItem(field: TransactionAddField): HTMLElement {
     throw new Error(`the control for ${field} is not inside a form item`);
   }
   return item;
+}
+
+/**
+ * Locates the capture form itself, which bounds every structural query this file makes.
+ *
+ * ⚠️ Assumptions: the form is the boundary rather than the document, because the screen is mounted
+ * inside the real application shell and the shell renders grid columns of its own -- the title band's
+ * are `ant-col-24 ant-col-md-6`. A census taken across the document would therefore report the shell's
+ * layout as this screen's, which is how the first draft of {@link laysTheFieldGridOutResponsively}
+ * failed: it read a shell column and judged the form by it.
+ * @returns {HTMLElement} The `<form>` element the screen renders.
+ * @throws {Error} If no form is rendered, which means the screen no longer composes one.
+ */
+function captureForm(): HTMLElement {
+  const form = document.querySelector('form');
+  if (!(form instanceof HTMLElement)) {
+    throw new Error('the capture form is not rendered');
+  }
+  return form;
+}
+
+/**
+ * Reports the grid column one field's control sits in, which carries the responsive span classes.
+ *
+ * ⚠️ Assumptions: the walk deliberately steps PAST the nearest column. antd's `Form.Item` renders its
+ * label and its control inside `Col` elements of its own -- `node_modules/antd/es/form/FormItemLabel.js`
+ * L90 and `FormItemInput.js` L121 -- so `control(field).closest('.ant-col')` returns the item's own
+ * control column, which carries no span class at all and would make every span assertion vacuous. The
+ * screen's grid column is the first `.ant-col` ABOVE the whole form item, which is what this returns.
+ * @param {TransactionAddField} field - Field whose grid column is wanted.
+ * @returns {HTMLElement} The `Col` the screen's own grid places that field in.
+ * @throws {Error} If the field is not inside a grid column, which means the screen stopped laying its
+ *   fields out through `Row`/`Col` and its arity can no longer collapse at a narrow width.
+ */
+function gridColumnOf(field: TransactionAddField): HTMLElement {
+  const column = formItem(field).parentElement?.closest('.ant-col');
+  if (!(column instanceof HTMLElement)) {
+    throw new Error(`the control for ${field} is not inside a grid column`);
+  }
+  return column;
 }
 
 /**
@@ -757,12 +877,20 @@ const SHAPE_REFUSALS = [
   },
   {
     /*
-     * WHY : Assumptions: this value is refused because it carries NO SIGN, not because its digits are
-     *       wrong, and the strictness is the reference's. `TRNAMTI(1:1) NOT EQUAL '-' AND '+'` at
-     *       `app/cbl/COTRN02C.cbl` L340 admits no third character in the first position, which is why
-     *       the mapset paints the hint `(-99999999.99)` beneath the field to tell the operator so.
+     * WHY : ⚠️ Assumptions: this value is refused for its THIRD decimal place, and it used to be
+     *       `1234.56` -- refused for carrying no sign -- which is the change this row records. The
+     *       reference does refuse an unsigned amount: `TRNAMTI(1:1) NOT EQUAL '-' AND '+'` at
+     *       `app/cbl/COTRN02C.cbl` L340 admits no third character in the first position. But the screen
+     *       now supplies the sign, because browser validation established that an operator had no
+     *       reachable spelling of a positive amount and the flow AAP section 0.9.4 lists as an acceptance
+     *       criterion could not be run at all. `canonicaliseKeyedAmount` carries the divergence and its
+     *       reasoning; `acceptsEveryKeyedAmountSpelling` walks what is now accepted.
+     * WHY : Assumptions: three decimal places is the right substitute because no normalisation can rescue
+     *       it. The field is `PIC +99999999.99` -- two decimal positions -- so a third is not a
+     *       presentation difference but a value the field cannot hold, and the reference refuses it at
+     *       L343 by testing `TRNAMTI(10:2)`.
      */
-    overrides: { amount: '1234.56' },
+    overrides: { amount: '1234.567' },
     field: 'amount',
     sentence: ADD_MESSAGES.AMOUNT_SHOULD_BE_IN_FORMAT_99999999_99,
     programLine: 345,
@@ -820,14 +948,14 @@ interface SurfacedDateVerdict {
 const SURFACED_DATE_VERDICTS = [
   {
     field: 'originDate',
-    keyed: '2024-02-31',
+    keyed: '1500-01-01',
     sentence: ADD_MESSAGES.ORIG_DATE_NOT_A_VALID_DATE,
     programLine: 401,
     utilityCallLine: 393,
   },
   {
     field: 'processDate',
-    keyed: '2024-02-30',
+    keyed: '1582-10-05',
     sentence: ADD_MESSAGES.PROC_DATE_NOT_A_VALID_DATE,
     programLine: 421,
     utilityCallLine: 413,
@@ -855,6 +983,18 @@ interface LookupRefusal {
   readonly sentence: string;
   /** One-based line of the `MOVE` that raises it in `app/cbl/COTRN02C.cbl`. */
   readonly programLine: number;
+  /**
+   * The summary line the service's own problem document carries, where the sentence is one only the
+   * service can choose.
+   *
+   * ⚠️ Assumptions: the two cross-reference sentences are supplied HERE rather than reconstructed by
+   * the screen, and that is a correction to what this table used to assert. They were once selected
+   * locally from which key field was populated, on a turn that was neither writing nor copying -- the
+   * unconfirmed preview, which no longer exists. Only the service knows whether a 500 came from the
+   * account read at `app/cbl/COTRN02C.cbl` L600, the card read at L633 or the write at L745, and
+   * `transaction-api.yaml` states that it says so in the document's `message`.
+   */
+  readonly aggregate: string | null;
 }
 
 /** The six refusals the two cross-reference reads and the transaction browse raise. */
@@ -865,6 +1005,7 @@ const LOOKUP_REFUSALS = [
     status: 404,
     sentence: SHARED_MESSAGES.ACCOUNT_ID_NOT_FOUND,
     programLine: 593,
+    aggregate: null,
   },
   {
     overrides: {},
@@ -872,6 +1013,7 @@ const LOOKUP_REFUSALS = [
     status: 500,
     sentence: ADD_MESSAGES.UNABLE_TO_LOOKUP_ACCT_IN_XREF_AIX_FILE,
     programLine: 600,
+    aggregate: ADD_MESSAGES.UNABLE_TO_LOOKUP_ACCT_IN_XREF_AIX_FILE,
   },
   {
     overrides: { accountId: '', cardNumber: CARD_NUMBER },
@@ -879,6 +1021,7 @@ const LOOKUP_REFUSALS = [
     status: 404,
     sentence: ADD_MESSAGES.CARD_NUMBER_NOT_FOUND,
     programLine: 626,
+    aggregate: null,
   },
   {
     overrides: { accountId: '', cardNumber: CARD_NUMBER },
@@ -886,6 +1029,7 @@ const LOOKUP_REFUSALS = [
     status: 500,
     sentence: ADD_MESSAGES.UNABLE_TO_LOOKUP_CARD_NUM_IN_XREF_FILE,
     programLine: 633,
+    aggregate: ADD_MESSAGES.UNABLE_TO_LOOKUP_CARD_NUM_IN_XREF_FILE,
   },
   {
     overrides: {},
@@ -893,6 +1037,7 @@ const LOOKUP_REFUSALS = [
     status: 404,
     sentence: SHARED_MESSAGES.TRANSACTION_ID_NOT_FOUND,
     programLine: 657,
+    aggregate: null,
   },
   {
     overrides: {},
@@ -900,6 +1045,7 @@ const LOOKUP_REFUSALS = [
     status: 500,
     sentence: SHARED_MESSAGES.UNABLE_TO_LOOKUP_TRANSACTION,
     programLine: 664,
+    aggregate: null,
   },
 ] as const satisfies readonly LookupRefusal[];
 
@@ -1001,14 +1147,26 @@ const UNBOUND_KEYS = [
  * worth asserting is that the screen sends NOTHING beyond these members, which a member-wise check
  * cannot express.
  *
- * Assumptions: `confirmation` is absent because the fixture's answer is blank and the request builder
- * omits the member unless the keyed character is one the contract admits. The case that writes asserts
- * its presence separately.
+ * ⚠️ Refactoring Rationale: this set now names the CONFIRMED body, and it used to name an unconfirmed
+ * one. The note it replaces recorded `confirmation` as absent "because the fixture's answer is blank and
+ * the request builder omits the member unless the keyed character is one the contract admits" -- which
+ * described the only body the screen used to send on Enter, and is the body browser validation caught on
+ * the write endpoint with no confirmation surface ever having been visible. A capture now reaches the
+ * wire only for an affirmative answer, so `confirmation` is always present on it.
+ *
+ * ⚠️ Assumptions: `confirmationToken` is present too, because the case using this set reaches its
+ * affirmative through a preview -- the copy turn, which is the one turn that legitimately answers 200 --
+ * and the screen's request builder attaches the token whenever the screen holds one. A capture confirmed
+ * without a preview behind it carries eleven members rather than twelve, which is the shape
+ * `stillValidatesAndSendsTheFullCaptureBody` in
+ * `ui/src/screens/transactionAdd/transactionAddTurns.test.tsx` asserts.
  */
-const CAPTURE_BODY_MEMBERS = [
+const CONFIRMED_CAPTURE_BODY_MEMBERS = [
   'accountId',
   'amount',
   'categoryCode',
+  'confirmation',
+  'confirmationToken',
   'description',
   'merchantCity',
   'merchantId',
@@ -1128,19 +1286,118 @@ async function mountWithACompleteCapture(): Promise<Awaited<ReturnType<typeof re
 }
 
 /**
+ * Keys the affirmative into the confirmation control, so the next Enter dispatches in ONE turn.
+ *
+ * ⚠️ Purpose: the screen sends a turn ONLY for a confirming answer. A blank confirmation raises the
+ * asking surface locally and issues nothing, and an answer that is neither confirming nor declining is
+ * refused locally -- which is `app/cbl/COTRN02C.cbl` L176-L187, where both arms re-display the screen
+ * without touching a file. So a case whose subject is what reaches the service has to give an answer
+ * first, and the cheapest faithful way to give one is to key it: the reference reaches
+ * `ADD-TRANSACTION` at L189-L191 from a keyed `'Y'` exactly as it does from any other route to that arm.
+ *
+ * ⚠️ Trade-offs: keying the answer rather than walking the surface. The surface route costs an overlay
+ * open, an animation and a pointer click per dispatch, and the cases that use this helper walk tables of
+ * up to six rows with two dispatches each. Their subject is the request body or the response handling,
+ * not the route the answer arrived by -- which is why the route itself is asserted separately, and
+ * exhaustively, by {@link submitsTheCaptureFromBothPaths}, {@link walkConfirmationSentences},
+ * {@link routesEverySubmitPathThroughTheOneGate} and
+ * {@link declinesFromEveryRouteWithoutARequest}.
+ * @returns {void} Completion is the updated control.
+ */
+function keyTheAffirmative(): void {
+  setField('confirmation', CONFIRMING_ANSWER);
+}
+
+/**
+ * Presses Enter on a blank confirmation and answers the surface that raises, affirmatively.
+ *
+ * ⚠️ Purpose: this is the whole gate, walked end to end -- the route an operator who never keys into the
+ * confirmation field takes. It asserts the middle of it as well as the ends: after Enter the surface
+ * stands and NOTHING has been dispatched, which is the property browser validation found missing when
+ * the footer legend's Enter put a `confirmation`-less body on `POST /api/v1/transactions` with no
+ * surface having ever been visible.
+ * @param {Awaited<ReturnType<typeof renderInAppShell>>['user']} user - The operator driving the screen.
+ * @returns {Promise<void>} Resolves once the affirmative has been given.
+ */
+async function confirmThroughTheAsk(
+  user: Awaited<ReturnType<typeof renderInAppShell>>['user'],
+): Promise<void> {
+  await pressPfKey(user, 'ENTER');
+  await waitFor(confirmationIsRaised);
+  expect(addTransaction).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: CONFIRMING_ANSWER }));
+  await waitFor(confirmationIsWithdrawn);
+}
+
+/**
+ * Asserts an in-flight capture is ANNOUNCED and not only disabled.
+ *
+ * ⚠️ Purpose: this screen reports an in-flight turn thoroughly and VISUALLY -- every control and
+ * every key binding carries `disabled` while a request is outstanding -- and announced none of it. A
+ * disabled control reads to an assistive technology as unavailable with no reason given, and the reason
+ * is the entire message: the turn is running, so wait rather than re-key.
+ *
+ * ⚠️ Assumptions: the region is asserted PRESENT AND EMPTY before the turn as well as populated
+ * during it. A live region must be in the accessibility tree before its content changes for the change
+ * to be announced at all, so a screen rendering it only while busy would lose the transition into the
+ * busy state -- the one that matters -- and a case asserting only the populated state would pass
+ * against it.
+ *
+ * Assumptions: the answer is held so the busy window is observable at all. An already-resolved promise
+ * settles in a microtask that falls between this case's own awaits, leaving no render in which the
+ * screen is busy; the held promise puts the assertion inside that window and the release closes it.
+ * @returns {Promise<void>} Resolves once both states have been observed.
+ */
+async function announcesAnOutstandingCapture(): Promise<void> {
+  let release: ((outcome: TransactionAddOutcome) => void) | undefined;
+  vi.mocked(addTransaction).mockReturnValueOnce(
+    new Promise<TransactionAddOutcome>(
+      /**
+       * Captures the settler so this case controls when the turn finishes.
+       * @param {(outcome: TransactionAddOutcome) => void} resolve - Settles the held capture.
+       * @returns {void} Nothing; the settler is captured as a side effect.
+       */
+      (resolve): void => {
+        release = resolve;
+      },
+    ),
+  );
+  const { user } = await mountWithACompleteCapture();
+
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
+
+  keyTheAffirmative();
+  await pressPfKey(user, 'ENTER');
+
+  await waitFor(
+    /**
+     * Asserts the announcement once the turn is in flight.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+    },
+  );
+
+  release?.(createdOutcome(WIRE_NEGATIVE_AMOUNT));
+
+  await waitFor(
+    /**
+     * Asserts the announcement has emptied once the turn has settled.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
+    },
+  );
+}
+
+/**
  * Asserts the capture operation has been dispatched exactly once.
  * @returns {void} Nothing; the expectation throws until it holds.
  */
 function captureDispatchedOnce(): void {
   expect(addTransaction).toHaveBeenCalledTimes(1);
-}
-
-/**
- * Asserts the capture operation has been dispatched exactly twice, once per activation path.
- * @returns {void} Nothing; the expectation throws until it holds.
- */
-function captureDispatchedTwice(): void {
-  expect(addTransaction).toHaveBeenCalledTimes(2);
 }
 
 /**
@@ -1248,21 +1505,37 @@ async function walkBrowserRefusals(rows: readonly RefusedTurn[]): Promise<void> 
 /**
  * Walks the two calendar verdicts, asserting each is SURFACED rather than recomputed here.
  *
- * ⚠️ Assumptions: the date-edit rules are NOT re-implemented and no assertion below decides whether a
- * date is real. `app/cbl/COTRN02C.cbl` calls the date utility `CSUTLDTC` at L393 for the originating date
- * and L413 for the processing date, and the migrated equivalent is
- * `com.carddemo.common.validation.DateEditValidator`, server-side. The browser can only check SHAPE, so
- * `2024-02-31` reaches the service and the verdict comes back as a field error.
+ * ⚠️ Assumptions: the keyed dates are REAL dates that are merely very old, and that choice is the whole
+ * point of this walk. `app/cbl/COTRN02C.cbl` calls `CSUTLDTC` at L393 and L413 and refuses the date
+ * unless the severity is `'0000'` or the message number is `'2513'`, and `app/cbl/CSUTLDTC.cbl` L66 and
+ * L137-L138 identify `2513` as `FC-UNSUPP-RANGE` -- a real date the utility cannot compute a day number
+ * for. Which dates fall in that range is a property of the utility's implementation, a browser cannot
+ * know it, and a local guess at it could refuse a date the reference accepts. So the RANGE half stays at
+ * `com.carddemo.common.validation.DateEditValidator` and these two rows prove it is still asked.
+ *
+ * ⚠️ Assumptions: an IMPOSSIBLE date is deliberately NOT used here, and this row list previously carried
+ * `2024-02-31` and `2024-02-30`, which is why it no longer does. Those are refused locally now, by
+ * `namesARealCalendarDate` in the screen module, because no tolerance can reach them: an impossible date draws
+ * `FC-BAD-DATE-VALUE` or `FC-INVALID-MONTH` -- `app/cbl/CSUTLDTC.cbl` L64 and L67 -- never `2513`.
+ * `refusesAnImpossibleCalendarDateLocally` walks that half.
  *
  * Assumptions: the request having been DISPATCHED is asserted first, and that is the half of this walk
- * that proves the delegation. A shaped date the browser refused would put the same sentence on the same
- * field with no round trip at all, so without it the walk would pass against a screen that had copied
- * the calendar rules into the browser -- which is exactly what must not happen, because a second copy is
- * a second place for the leap-year handling to drift.
+ * that proves the delegation survived. A screen that had copied the utility's range rule into the browser
+ * would put the same sentence on the same field with no round trip at all, and that copy is the one that
+ * could diverge.
  * @returns {Promise<void>} Resolves once both verdicts have been checked.
  */
 async function walkSurfacedDateVerdicts(): Promise<void> {
   const { user } = await mountWithACompleteCapture();
+  /*
+   * WHY : ⚠️ Assumptions: the affirmative is keyed, because the range verdict now arrives on the
+   *       CONFIRMING turn -- the only turn this screen sends. The reference reaches it one turn earlier,
+   *       at L389-L427 ahead of the confirmation, and that ordering difference is recorded as a
+   *       deliberate trade-off on `requestSubmit`: no read operation in this tree resolves the key pair
+   *       and mints the confirmation token, so the alternative was a `confirmation`-less body on the
+   *       write endpoint before the operator had been asked anything.
+   */
+  keyTheAffirmative();
 
   for (const verdict of SURFACED_DATE_VERDICTS) {
     vi.mocked(addTransaction).mockClear();
@@ -1293,12 +1566,26 @@ async function walkSurfacedDateVerdicts(): Promise<void> {
  */
 async function walkLookupRefusals(): Promise<void> {
   const { user } = await mountWithACompleteCapture();
+  /*
+   * WHY : Assumptions: the affirmative is keyed once for the whole table, for both the capture rows and
+   *       the copy rows. A copy pressed with a `'Y'` already in the field copies and writes in one turn,
+   *       which is exactly what the reference's fall-through at `app/cbl/COTRN02C.cbl` L495 does with
+   *       `CONFIRMI` as it stands, so keying it changes which arm the copy reaches and not whether the
+   *       copy happens.
+   */
+  keyTheAffirmative();
 
   for (const row of LOOKUP_REFUSALS) {
     vi.mocked(addTransaction).mockClear();
     vi.mocked(copyLastTransaction).mockClear();
     const dispatched = row.copying ? copyLastTransaction : addTransaction;
-    vi.mocked(dispatched).mockRejectedValue(transportFailure(row.status));
+    /*
+     * WHY : Assumptions: the copy row's 500 supplies NO summary line, deliberately, so this table
+     *       exercises both halves of the selection: the two capture rows read the sentence off the
+     *       document the way the service supplies it, and the copy row falls through to the browse's
+     *       own sentence, which is the arm reached when the document names nothing.
+     */
+    vi.mocked(dispatched).mockRejectedValue(transportFailure(row.status, [], row.aggregate));
     applyOverrides(row.overrides);
 
     await pressPfKey(user, row.copying ? 'PFK05' : 'ENTER');
@@ -1310,20 +1597,53 @@ async function walkLookupRefusals(): Promise<void> {
 }
 
 /**
- * Walks the two sentences a withheld write produces, chosen by the confirmation character.
+ * Walks the two sentences a withheld write produces, and asserts NEITHER costs a request.
+ *
+ * ⚠️ Refactoring Rationale: both arms are LOCAL, and this walk used to prove the opposite. The blank arm
+ * sent a `confirmation`-less capture and read its question off the answer, and the invalid arm sent the
+ * same body on the ground that the service decides which non-answer it is -- so the two rows measured
+ * two requests between them, on a screen whose reference makes neither. `app/cbl/COTRN02C.cbl` L176-L181
+ * answers `SPACES` with three `MOVE`s and a `SEND-TRNADD-SCREEN`, and L182-L187 answers everything else
+ * the same way with a different sentence; no arm of that `EVALUATE` but `'Y'`/`'y'` touches a file.
+ *
+ * ⚠️ Assumptions: the blank row's sentence is looked for ANYWHERE in the document rather than in the
+ * band, and that is the one place these two rows differ. Blank raises the asking surface, whose title IS
+ * the sentence, and the band is emptied as it opens so the same verbatim string is not on the screen
+ * twice at once. The invalid row does not raise a surface -- the reference refuses rather than asks -- so
+ * its sentence is in the band, on its control, with the control marked.
  * @returns {Promise<void>} Resolves once both sentences have been checked.
  */
 async function walkConfirmationSentences(): Promise<void> {
-  vi.mocked(addTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
   const { user } = await mountWithACompleteCapture();
 
-  for (const answer of CONFIRMATION_SENTENCES) {
-    setField('confirmation', answer.keyed);
+  const asking = CONFIRMATION_SENTENCES[0];
+  const refusing = CONFIRMATION_SENTENCES[1];
+  expect({ asking: asking?.programLine, refusing: refusing?.programLine }).toEqual({
+    asking: 178,
+    refusing: 184,
+  });
 
-    await pressPfKey(user, 'ENTER');
+  setField('confirmation', asking?.keyed ?? '');
+  await pressPfKey(user, 'ENTER');
+  await waitFor(confirmationIsRaised);
+  expect(document.body).toHaveTextContent(asking?.sentence ?? '');
+  await user.keyboard('{Escape}');
+  await waitFor(confirmationIsWithdrawn);
 
-    await expectBandSentence(answer.sentence);
-  }
+  setField('confirmation', refusing?.keyed ?? '');
+  await pressPfKey(user, 'ENTER');
+  await expectBandSentence(refusing?.sentence ?? '');
+  expect(confirmationSurfaceIsOpen()).toBe(false);
+  expect(isMarkedRefused('confirmation')).toBe(true);
+  /*
+   * WHY : Assumptions: no asterisk. `app/cpy/CSSETATY.cpy` L23-L25 nests the `MOVE '*'` inside the blank
+   *       test, and this control is not blank -- it holds a character the reference rejects, so it earns
+   *       the colour and not the marker.
+   */
+  expect(formItem('confirmation').textContent ?? '').not.toContain(FIELD_ERROR_TOKENS.blankMarker);
+
+  expect(addTransaction).not.toHaveBeenCalled();
+  expect(copyLastTransaction).not.toHaveBeenCalled();
 }
 
 /**
@@ -1479,6 +1799,7 @@ async function marksOnlyTheFieldsTheResponseNames(): Promise<void> {
     transportFailure(400, [fieldError('amount', refused)]),
   );
   const { user } = await mountWithACompleteCapture();
+  keyTheAffirmative();
 
   await pressPfKey(user, 'ENTER');
 
@@ -1510,18 +1831,29 @@ async function marksOnlyTheFieldsTheResponseNames(): Promise<void> {
  * Assumptions: the body's member set is compared EXACTLY, which makes this a disclosure check as well:
  * the screen sends the members the contract declares and nothing else.
  *
- * Assumptions: the displayed value is re-read AFTER the answer lands, because the screen re-renders the
- * amount through its own mask from the service's monetary form -- so this asserts the round trip
- * preserves the leading minus rather than merely that the control accepted it. A screen that dropped the
- * sign would turn a credit into a debit of the same magnitude, which no field-level rule would report.
+ * ⚠️ Assumptions: the ROUND TRIP is exercised through the copy turn and the outbound leg through the
+ * capture, because those are the two turns that exist. A capture is sent only for a confirming answer
+ * and is answered 201, and the screen clears on a write; the copy turn is the one that legitimately
+ * answers 200 with the service's own monetary form, which the screen re-renders through its mask. So the
+ * copy leg is what asserts the sign survives a service round trip -- a screen that dropped the leading
+ * minus would turn a credit into a debit of the same magnitude, and no field-level rule would report it.
  * @returns {Promise<void>} Resolves once the dispatched body and the displayed value are checked.
  */
 async function keepsMoneyInExactFixedPoint(): Promise<void> {
-  vi.mocked(addTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
+  vi.mocked(addTransaction).mockResolvedValue(createdOutcome(WIRE_NEGATIVE_AMOUNT));
+  vi.mocked(copyLastTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
   const { user } = await mountWithACompleteCapture();
   expect(typeof valueOf('amount')).toBe('string');
   expect(valueOf('amount')).toBe(KEYED_NEGATIVE_AMOUNT);
 
+  await pressPfKey(user, 'PFK05');
+
+  await waitFor(copyDispatchedOnce);
+  await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
+  expect(typeof valueOf('amount')).toBe('string');
+  expect(valueOf('amount')).toBe(KEYED_NEGATIVE_AMOUNT);
+
+  keyTheAffirmative();
   await pressPfKey(user, 'ENTER');
 
   await waitFor(captureDispatchedOnce);
@@ -1529,11 +1861,7 @@ async function keepsMoneyInExactFixedPoint(): Promise<void> {
   expect(body).toBeDefined();
   expect(typeof body?.amount).toBe('string');
   expect(body?.amount).toBe(WIRE_NEGATIVE_AMOUNT);
-  expect(Object.keys(body ?? {}).sort()).toEqual(CAPTURE_BODY_MEMBERS);
-
-  await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
-  expect(typeof valueOf('amount')).toBe('string');
-  expect(valueOf('amount')).toBe(KEYED_NEGATIVE_AMOUNT);
+  expect(Object.keys(body ?? {}).sort()).toEqual(CONFIRMED_CAPTURE_BODY_MEMBERS);
 }
 
 /**
@@ -1628,18 +1956,54 @@ async function rendersTheDeclaredKeyEmphasis(): Promise<void> {
  */
 
 /**
- * Asserts Enter submits the capture, from the keyboard and from the legend control.
+ * Asserts Enter ASKS before it writes, from the keyboard and from the legend control.
+ *
+ * ⚠️ Purpose: this case is the acceptance test for the measured defect. Browser validation filled all
+ * twelve fields, left the in-form confirmation control EMPTY, activated ONLY the footer legend's
+ * `ENTER=Continue`, and recorded `POST /api/v1/transactions` at t0+3212ms carrying a body with no
+ * `confirmation` member -- while a read-only `MutationObserver` watching for the overlay reported
+ * `popEverVisible === false`. The pointer control on the same filled form asked first and issued
+ * nothing until answered. One screen, one action, two confirmation idioms, and only one of them asked.
+ *
+ * ⚠️ Assumptions: the assertion is that NOTHING is dispatched, on EITHER route, until the affirmative is
+ * given, and it is asserted before the answer rather than only counted after it. A case that only
+ * counted dispatches at the end would pass against a screen that sent a preview and then asked, which
+ * is exactly the shape being removed -- the count would be one either way.
+ *
+ * ⚠️ Assumptions: BOTH routes are walked, because the defect was a property of the route. The keyboard
+ * and the legend control reach the same binding through `usePfKeys`, but they reached different code
+ * before the gate was unified, and a case exercising one of them is how the shipped version passed its
+ * own suite.
+ *
+ * Assumptions: the fixture is the CREATED answer and not a preview, because a confirming turn that is
+ * answered 200 contradicts the contract -- `transaction-api.yaml` makes 201 the written outcome -- and
+ * the screen reports that combination as a failed write rather than as a question.
  * @returns {Promise<void>} Resolves once both paths have been checked.
  */
 async function submitsTheCaptureFromBothPaths(): Promise<void> {
-  vi.mocked(addTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
+  vi.mocked(addTransaction).mockResolvedValue(createdOutcome(WIRE_NEGATIVE_AMOUNT));
   const { user } = await mountWithACompleteCapture();
 
   await pressPfKey(user, 'ENTER');
-  await waitFor(captureDispatchedOnce);
+  await waitFor(confirmationIsRaised);
+  expect(addTransaction).not.toHaveBeenCalled();
+  await user.keyboard('{Escape}');
+  await waitFor(confirmationIsWithdrawn);
+  expect(addTransaction).not.toHaveBeenCalled();
 
   await user.click(legendControl('Enter'));
-  await waitFor(captureDispatchedTwice);
+  await waitFor(confirmationIsRaised);
+  expect(addTransaction).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole('button', { name: CONFIRMING_ANSWER }));
+  await waitFor(captureDispatchedOnce);
+  /*
+   * WHY : ⚠️ Assumptions: the dispatched body carries the affirmative, which is the other half of the
+   *       defect. The measured request omitted the member entirely, because `buildCreateRequest`
+   *       attaches it only for the four letters the contract admits -- so the service was asked to write
+   *       and answered that it would rather be asked, and the operator was never asked at all.
+   */
+  expect(vi.mocked(addTransaction).mock.calls[0]?.[0]?.confirmation).toBe(CONFIRMING_ANSWER);
   expect(copyLastTransaction).not.toHaveBeenCalled();
 }
 
@@ -1729,12 +2093,15 @@ async function recallsTheLastTransactionFromBothPaths(): Promise<void> {
  * GATE: the reference writes nothing until `CONFIRMI` carries a confirming answer, so the surface that
  * asks the question must not itself commit anything.
  *
- * ⚠️ Assumptions: a DECLINED confirmation still reaches the service, and asserting otherwise would
- * assert against the reference. `app/cbl/COTRN02C.cbl` L173-L176 answers a declining or blank character
- * by re-sending the screen with `Confirm to add this transaction...`, and the migrated turn is the one
- * that resolves the key pair and re-renders the amount, so the request is the mechanism by which the
- * operator is asked again. What the gate guarantees is narrower and is what this case asserts: no
- * dispatch carries a confirming answer until one is given, so nothing is written.
+ * ⚠️ Assumptions: a DECLINED confirmation reaches the service NOT AT ALL, and the earlier shape of this
+ * case asserted only that no dispatch carried a confirming answer -- which a dispatch carrying `'N'`
+ * satisfies. Browser validation then measured exactly that dispatch: one `POST /api/v1/transactions`
+ * per decline, carrying `"confirmation":"N"`, answered 200 with nothing written and reported to the
+ * operator as `Unable to Add Transaction...`. The reference admits no such turn. `app/cbl/COTRN02C.cbl`
+ * L173-L181 answers `'N'`, `'n'`, `SPACES` and `LOW-VALUES` by moving `Confirm to add this
+ * transaction...` into `WS-MESSAGE`, moving `-1` into `CONFIRML` and performing `SEND-TRNADD-SCREEN` --
+ * three moves and a send, with no file access of any kind -- and only the `'Y'`/`'y'` arm at L189-L191
+ * performs `ADD-TRANSACTION`. So the assertion is absolute: zero calls.
  *
  * Assumptions: the two answer controls are located by the characters the mapset's own `(Y/N)` hint names,
  * derived from the constant the screen publishes rather than retyped.
@@ -1757,9 +2124,16 @@ async function gatesTheWriteOnAConfirmingAnswer(): Promise<void> {
   await user.click(screen.getByRole('button', { name: DECLINING_ANSWER }));
 
   await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
-  for (const call of vi.mocked(addTransaction).mock.calls) {
-    expect(call[0]?.confirmation).not.toBe(CONFIRMING_ANSWER);
-  }
+  expect(addTransaction).not.toHaveBeenCalled();
+  expect(copyLastTransaction).not.toHaveBeenCalled();
+  /*
+   * WHY : Assumptions: the confirmation control is left BLANK by the decline, not carrying the character
+   *       the declining control stands for. The operator answered an overlay; they did not key into this
+   *       field, and the measured shape stamped `'N'` into it -- which left the next Enter submitting an
+   *       answer nobody gave. Blank and `'N'` take the same arm of the reference's `EVALUATE` at
+   *       L173-L181, so nothing about the reference's behaviour requires the character to be written.
+   */
+  expect(valueOf('confirmation')).toBe('');
 
   vi.mocked(addTransaction).mockClear();
   vi.mocked(addTransaction).mockResolvedValue(createdOutcome(WIRE_NEGATIVE_AMOUNT));
@@ -1769,6 +2143,757 @@ async function gatesTheWriteOnAConfirmingAnswer(): Promise<void> {
 
   await waitFor(captureDispatchedOnce);
   expect(vi.mocked(addTransaction).mock.calls[0]?.[0]?.confirmation).toBe(CONFIRMING_ANSWER);
+}
+
+/**
+ * Asserts the field grid is a responsive `Row`/`Col` grid whose arity collapses, and the rule a `Divider`.
+ *
+ * ⚠️ Purpose: a responsive sweep measured the arities `[2,3,1,3,2,2,1]` holding at EVERY width, because
+ * each field wrapper carried `flex: 1 1 0` -- a zero flex-basis makes every column fit, so `wrap` had
+ * nothing to act on. At 375 the three-up rows gave 114-pixel columns, about eight monospace characters
+ * for the amount and both dates, whose declared widths are twelve, ten and ten. The same sweep measured
+ * the seventy-hyphen rule spanning x54 to x640 -- about 586 pixels short of the content edge -- and
+ * wrapping onto two ragged lines at 375 and 576.
+ *
+ * ⚠️ Assumptions: the collapse is asserted through the design system's own BREAKPOINT CLASSES rather than
+ * by measuring a width, because jsdom computes no layout: every element reports a zero rectangle, so a
+ * width assertion here would pass against any markup at all. `ant-col-xs-24` is the class antd emits for
+ * `xs={24}`, and its presence on a field's column is exactly the statement "one field per row on a
+ * phone".
+ *
+ * ⚠️ Assumptions: the census walks THIS SCREEN'S FOURTEEN FIELDS rather than every `.ant-col` in the
+ * document, and the narrower form is the correct one rather than a weaker one. The screen is mounted
+ * inside the real shell, the shell lays its own title band out on the same grid, and a document-wide
+ * census read one of those columns -- `ant-col-24 ant-col-md-6` -- and failed the form for it. Iterating
+ * the declared field map instead covers every column this screen owns, in a list that cannot fall behind
+ * the screen: a fifteenth field appears in `TRANSACTION_ADD_FIELD_WIDTHS` the moment it is added, so it
+ * is checked without this case being edited.
+ *
+ * Assumptions: the amount is checked for `ant-col-md-8` specifically. It is the field the sweep found
+ * unreadable, and its column is the one that has to be three-up only from the medium breakpoint upward.
+ *
+ * Assumptions: exactly one `.ant-divider` is expected, counted INSIDE the form for the same reason the
+ * column census is. The mapset paints one rule, at row 8, and a second would be a section boundary the
+ * source does not have.
+ * @returns {Promise<void>} Resolves once the grid classes and the rule have been checked.
+ */
+async function laysTheFieldGridOutResponsively(): Promise<void> {
+  await mountCaptureScreen();
+
+  for (const field of Object.keys(TRANSACTION_ADD_FIELD_WIDTHS) as TransactionAddField[]) {
+    /*
+     * WHY : Assumptions: the containment is evaluated HERE and compared as a boolean, rather than being
+     *       expressed with `expect.stringContaining`. That matcher is typed `any`, so putting it in an
+     *       object literal either propagates `any` into the comparison or needs an assertion the
+     *       compiler then judges redundant -- two lint rules that cannot both be satisfied through it.
+     *       The row's identity, which is what makes a walked failure diagnosable, is preserved either
+     *       way.
+     */
+    expect({
+      field,
+      carriesTheMobileSpan: gridColumnOf(field).className.includes('ant-col-xs-24'),
+    }).toEqual({ field, carriesTheMobileSpan: true });
+  }
+
+  expect(gridColumnOf('amount').className).toContain('ant-col-md-8');
+  expect(captureForm().querySelectorAll('.ant-divider')).toHaveLength(1);
+}
+
+/**
+ * Asserts a refusal the screen cannot attribute still reaches the operator, and moves no cursor.
+ *
+ * ⚠️ Purpose: this is the worst error-handling outcome browser validation found. A conforming 400 whose
+ * two `fieldErrors` named fields belonging to another screen produced a band reading
+ * `Please fix the highlighted fields` over a form with nothing highlighted --
+ * `.ant-form-item-has-error` count 0, no `[aria-invalid]` anywhere, no asterisk -- and NEITHER refusal
+ * sentence appeared anywhere in the document, so the reason for the rejection was unavailable through
+ * any surface. The cursor was then moved to `Enter Acct #`, asserting a problem with a field the service
+ * had not mentioned.
+ *
+ * ⚠️ Assumptions: the document carries a summary line as well as the field entry, and the case asserts the
+ * band shows the FIELD's sentence and NOT the summary. That inversion is the fix: a summary line is
+ * written to be read beside highlights, and with none rendered it is not merely unhelpful but false,
+ * whereas the field sentence states what was actually wrong.
+ *
+ * Assumptions: the foreign field's sentence is taken from the catalog rather than typed here, so this
+ * case introduces no user-visible string of its own; `userId` is used as the foreign field because it is
+ * the one the measured envelope named.
+ *
+ * Assumptions: the cursor is asserted to be exactly where it was, by identity, rather than merely not on
+ * the account field. Any move at all would be a move to an innocent control.
+ * @returns {Promise<void>} Resolves once the band, the highlight census and the cursor are checked.
+ */
+async function surfacesARefusalItCannotAttribute(): Promise<void> {
+  const foreignSentence = SHARED_MESSAGES.USER_ID_CAN_NOT_BE_EMPTY;
+  const summaryLine = SHARED_MESSAGES.UNEXPECTED_DATA_SCENARIO;
+  vi.mocked(addTransaction).mockRejectedValue(
+    new ApiRequestError(
+      'PROBLEM',
+      400,
+      apiError({
+        status: 400,
+        message: summaryLine,
+        fieldErrors: [fieldError('userId', foreignSentence)],
+      }),
+      'refused with 400',
+    ),
+  );
+  const { user } = await mountWithACompleteCapture();
+  keyTheAffirmative();
+  await user.click(control('merchantId'));
+  const cursorBefore = document.activeElement;
+
+  await pressPfKey(user, 'ENTER');
+
+  await expectBandSentence(foreignSentence);
+  expect(messageBand().textContent ?? '').not.toContain(summaryLine);
+  expect(document.querySelectorAll('.ant-form-item-has-error')).toHaveLength(0);
+  expect(document.activeElement).toBe(cursorBefore);
+}
+
+/**
+ * Asserts an answer the CLIENT could not interpret is not reported as a failed write.
+ *
+ * ⚠️ Purpose: `ui/src/api/client.ts` normalises every transport failure into an `ApiRequestError`
+ * before it reaches a screen, so the only rejection that can arrive as something else is a resource
+ * function's own contract check -- `requireTransactionAddPreview` raising `RangeError` when a 200 body
+ * carries a confirmation token that does not match the shape the client enforces, for instance. That is a
+ * SUCCESSFUL exchange whose answer the client refused to read, and the screen cannot know whether the
+ * service wrote anything.
+ *
+ * ⚠️ Assumptions: reporting it with the reference's own `Unable to Add Transaction...` is WRONG and
+ * that is what this case pins. Browser validation hit exactly this path -- a fixture returning a
+ * non-conforming token -- and read the write's failure sentence off the band, which tells the operator a
+ * write failed when the client never got far enough to know one had been attempted. The reference has no
+ * arm for "the region answered with something it cannot parse": a 3270 terminal either receives a map or
+ * times out. So neither of its two sentences is available, and the authored
+ * {@link PERSISTENT_FAILURE_REPORT_IT} is what the operator gets.
+ *
+ * ⚠️ Assumptions: no control is marked and the cursor is NOT sent to the ADDRESSING KEY, which is
+ * where the arm this replaces sent it. No field was refused -- the answer was unreadable, not wrong --
+ * so every field the screen could move to is an innocent one, and landing the cursor on `Enter Acct #`
+ * asserts a refusal the service never made. The cursor is asserted as \"not the addressing key\" rather
+ * than as \"exactly where it was\", because the operator's last action was answering the surface and the
+ * overlay's own withdrawal decides where focus returns to; the screen's obligation is to not move it,
+ * which is what the negative names.
+ * @returns {Promise<void>} Resolves once the sentence and the cursor have been checked.
+ */
+async function reportsAnUnreadableAnswerWithoutBlamingTheWrite(): Promise<void> {
+  vi.mocked(addTransaction).mockRejectedValue(
+    new RangeError('transaction add preview carries a malformed confirmation token'),
+  );
+  const { user } = await mountWithACompleteCapture();
+
+  await confirmThroughTheAsk(user);
+
+  await waitFor(captureDispatchedOnce);
+  await expectBandSentence(PERSISTENT_FAILURE_REPORT_IT);
+  expect(messageBand().textContent ?? '').not.toContain(ADD_MESSAGES.UNABLE_TO_ADD_TRANSACTION);
+  expect(messageBand().textContent ?? '').not.toContain(
+    SHARED_MESSAGES.UNABLE_TO_LOOKUP_TRANSACTION,
+  );
+  expect(document.querySelectorAll('.ant-form-item-has-error')).toHaveLength(0);
+  expect(document.activeElement).not.toBe(control('accountId'));
+}
+
+/**
+ * Asserts every refusal the response names is rendered on its control, with its accessibility wiring.
+ *
+ * ⚠️ Assumptions: `aria-invalid` and `aria-describedby` are asserted on the CONTROL and the sentence
+ * inside the `Form.Item`, because a border colour is not a refusal. WCAG 1.4.1 forbids colour as the sole
+ * carrier of information, and browser validation found this screen carrying no `[aria-invalid]` at all on
+ * a refused turn -- so an operator using assistive technology had nothing.
+ *
+ * ⚠️ Assumptions: the asterisk is asserted PRESENT on the entry the response marked `BLANK` and ABSENT on
+ * the one it marked `NOT_OK`. `app/cpy/CSSETATY.cpy` nests its `MOVE '*'` inside the blank test at
+ * L23-L25, so the marker distinguishes a never-supplied field from a rejected value, and rendering it on
+ * both would erase the distinction the copybook draws.
+ *
+ * Assumptions: the response is allowed to mark a field `BLANK` that carries a value locally, and the
+ * fixture does exactly that. The service's emptiness rule and this screen's are independent -- the
+ * contract declares the state as a member precisely so the screen renders what the SERVICE decided -- so
+ * the rendering obligation is what is under test here, not whether the two rules agree.
+ *
+ * Assumptions: the cursor lands on the FIRST entry the document lists, not on the addressing key. The
+ * reference moves it to the field it refused, and with several refused the first is the one an operator
+ * works from.
+ * @returns {Promise<void>} Resolves once both refusals, their wiring and the cursor are checked.
+ */
+async function rendersEveryNamedRefusalWithItsWiring(): Promise<void> {
+  const blankSentence = ADD_MESSAGES.SOURCE_CAN_NOT_BE_EMPTY;
+  const refusedSentence = ADD_MESSAGES.MERCHANT_ID_MUST_BE_NUMERIC;
+  vi.mocked(addTransaction).mockRejectedValue(
+    transportFailure(400, [
+      fieldError('source', blankSentence, 'BLANK'),
+      fieldError('merchantId', refusedSentence),
+    ]),
+  );
+  const { user } = await mountWithACompleteCapture();
+  keyTheAffirmative();
+
+  await pressPfKey(user, 'ENTER');
+
+  await expectBandSentence(blankSentence);
+  for (const [field, sentence] of [
+    ['source', blankSentence],
+    ['merchantId', refusedSentence],
+  ] as const) {
+    expect({ field, marked: isMarkedRefused(field) }).toEqual({ field, marked: true });
+    expect({
+      field,
+      carriesTheSentence: (formItem(field).textContent ?? '').includes(sentence),
+    }).toEqual({ field, carriesTheSentence: true });
+    expect({ field, invalid: control(field).getAttribute('aria-invalid') }).toEqual({
+      field,
+      invalid: 'true',
+    });
+    expect({
+      field,
+      describedByItsOwnHelp: (control(field).getAttribute('aria-describedby') ?? '').includes(
+        control(field).id,
+      ),
+    }).toEqual({ field, describedByItsOwnHelp: true });
+  }
+
+  expect(formItem('source').textContent ?? '').toContain(FIELD_ERROR_TOKENS.blankMarker);
+  expect(formItem('merchantId').textContent ?? '').not.toContain(FIELD_ERROR_TOKENS.blankMarker);
+  await waitFor(
+    /** Asserts the cursor reached the first entry the document listed. */
+    (): void => {
+      expect(document.activeElement).toBe(control('source'));
+    },
+  );
+}
+
+/** The human spellings of one hundred dollars an operator would actually type. */
+const KEYED_AMOUNT_SPELLINGS = ['100', '100.00', '+100.00', '00000100.00', '+00000100.00'] as const;
+
+/** The reference's own field rendering of those spellings, through `PIC +99999999.99`. */
+const CANONICAL_KEYED_AMOUNT = '+00000100.00';
+
+/** The contract's monetary form of the same amount, which carries no sign and no leading zeros. */
+const WIRE_CANONICAL_AMOUNT = '100.00';
+
+/**
+ * Asserts every human spelling of an amount is accepted and re-rendered into the field's own form.
+ *
+ * ⚠️ Purpose: this case exists because the flow AAP section 0.9.4 lists as an acceptance criterion could
+ * not be run. Browser validation drove eighteen spellings through this control and only `-` plus exactly
+ * eight digits plus `.` plus two decimals was accepted, so `100.00` and `123.45` were refused with
+ * `Amount should be in format -99999999.99` and the tester concluded that no positive amount could be
+ * entered at all. `hasBaselineAmountShape` does admit `'+'` -- `app/cbl/COTRN02C.cbl` L340 tests
+ * `TRNAMTI(1:1) NOT EQUAL '-' AND '+'` -- so the literal claim is wrong, but `+00000100.00` is not a
+ * form anybody types, and the practical effect was as reported.
+ *
+ * ⚠️ Assumptions: the acceptance is proved through BOTH routes, and the second is the one that would have
+ * been missed. The normaliser fires on blur, and pressing Enter with the caret still in the amount fires
+ * no blur at all, so a screen normalising only on blur would still refuse the operator who types and
+ * reaches straight for Enter. The first leg of each row leaves the field; the second does not.
+ *
+ * Assumptions: the wire value is asserted as a STRING, and as the contract's own form rather than the
+ * field's. The screen holds `+99999999.99` while `transaction-api.yaml` declares
+ * `^-?[0-9]{1,9}\.[0-9]{2}$`, so `+00000100.00` on the screen must reach the service as `100.00`; the
+ * conversion is a rule of the contract and not a cosmetic difference.
+ * @returns {Promise<void>} Resolves once every spelling has been checked on both routes.
+ */
+async function acceptsEveryKeyedAmountSpelling(): Promise<void> {
+  /*
+   * WHY : ⚠️ Assumptions: the turn is armed to be REFUSED, so one filled screen serves all five rows and
+   *       both of each row's legs. A written capture clears every control -- `INITIALIZE-ALL-FIELDS` at
+   *       `app/cbl/COTRN02C.cbl` L725 -- and a refused turn re-displays the populated map, which is what
+   *       lets the second leg key a spelling into a field that still holds one. The subject is what the
+   *       control DISPLAYS and what the body CARRIES, and both are observable whichever way the turn
+   *       settled.
+   */
+  vi.mocked(addTransaction).mockRejectedValue(transportFailure(500));
+  const { user } = await mountWithACompleteCapture();
+  keyTheAffirmative();
+
+  for (const spelling of KEYED_AMOUNT_SPELLINGS) {
+    vi.mocked(addTransaction).mockClear();
+    /*
+     * WHY : ⚠️ Assumptions: the control is FOCUSED before the value is placed in it, because a blur event
+     *       is only dispatched for an element that had focus. `setField` fires a change and nothing else,
+     *       so without this click the leg meant to prove the blur normaliser would prove nothing: the
+     *       field would simply never be left.
+     */
+    await user.click(control('amount'));
+    setField('amount', spelling);
+    await user.click(control('merchantId'));
+    expect({ spelling, displayed: valueOf('amount') }).toEqual({
+      spelling,
+      displayed: CANONICAL_KEYED_AMOUNT,
+    });
+
+    await pressPfKey(user, 'ENTER');
+    await waitFor(captureDispatchedOnce);
+    const blurred = vi.mocked(addTransaction).mock.calls[0]?.[0];
+    expect({ spelling, amount: blurred?.amount }).toEqual({
+      spelling,
+      amount: WIRE_CANONICAL_AMOUNT,
+    });
+    await expectBandSentence(ADD_MESSAGES.UNABLE_TO_ADD_TRANSACTION);
+
+    vi.mocked(addTransaction).mockClear();
+    setField('amount', spelling);
+    await pressPfKey(user, 'ENTER');
+    await waitFor(captureDispatchedOnce);
+    const unblurred = vi.mocked(addTransaction).mock.calls[0]?.[0];
+    expect({ spelling, amount: unblurred?.amount }).toEqual({
+      spelling,
+      amount: WIRE_CANONICAL_AMOUNT,
+    });
+    expect({ spelling, displayed: valueOf('amount') }).toEqual({
+      spelling,
+      displayed: CANONICAL_KEYED_AMOUNT,
+    });
+  }
+
+  setField('amount', A_COMPLETE_CAPTURE.amount);
+}
+
+/**
+ * Asserts an amount that is not an amount is still refused, and refused against what was typed.
+ *
+ * ⚠️ Assumptions: the normaliser must not become a way to accept anything. A value it cannot read leaves
+ * it UNCHANGED, so the field still holds what the operator typed and
+ * `Amount should be in format -99999999.99` still names it -- which is the sentence
+ * `app/cbl/COTRN02C.cbl` L346 raises. A normaliser that coerced an unreadable value into `+00000000.00`
+ * would post a zero-dollar transaction for an operator who mistyped.
+ *
+ * Assumptions: nine integer digits are in this list. The field is `PIC +99999999.99` -- eight integer
+ * positions -- so `100000000.00` needs a ninth the mask has no position for, and it must be refused
+ * rather than truncated into a hundredth of itself.
+ * @returns {Promise<void>} Resolves once every unreadable spelling has been checked.
+ */
+async function refusesAnAmountThatIsNotAnAmount(): Promise<void> {
+  const { user } = await mountWithACompleteCapture();
+
+  for (const spelling of ['abc', '1.234', '100000000.00', '1.2.3', '-', '+', '-.']) {
+    vi.mocked(addTransaction).mockClear();
+    await user.click(control('amount'));
+    setField('amount', spelling);
+    await user.click(control('merchantId'));
+
+    await pressPfKey(user, 'ENTER');
+
+    await expectBandSentence(ADD_MESSAGES.AMOUNT_SHOULD_BE_IN_FORMAT_99999999_99);
+    expect({ spelling, dispatched: vi.mocked(addTransaction).mock.calls.length }).toEqual({
+      spelling,
+      dispatched: 0,
+    });
+    expect({ spelling, displayed: valueOf('amount') }).toEqual({ spelling, displayed: spelling });
+    expect({ spelling, marked: isMarkedRefused('amount') }).toEqual({ spelling, marked: true });
+  }
+
+  setField('amount', A_COMPLETE_CAPTURE.amount);
+}
+
+/** Dates whose shape is right and which name no day that exists, with the field each is keyed into. */
+const IMPOSSIBLE_CALENDAR_DATES = [
+  { field: 'originDate', keyed: '2022-13-45', sentence: ADD_MESSAGES.ORIG_DATE_NOT_A_VALID_DATE },
+  { field: 'originDate', keyed: '2024-02-30', sentence: ADD_MESSAGES.ORIG_DATE_NOT_A_VALID_DATE },
+  { field: 'originDate', keyed: '1900-02-29', sentence: ADD_MESSAGES.ORIG_DATE_NOT_A_VALID_DATE },
+  { field: 'originDate', keyed: '2022-04-31', sentence: ADD_MESSAGES.ORIG_DATE_NOT_A_VALID_DATE },
+  { field: 'originDate', keyed: '2022-00-10', sentence: ADD_MESSAGES.ORIG_DATE_NOT_A_VALID_DATE },
+  { field: 'processDate', keyed: '2022-13-45', sentence: ADD_MESSAGES.PROC_DATE_NOT_A_VALID_DATE },
+  { field: 'processDate', keyed: '2023-02-29', sentence: ADD_MESSAGES.PROC_DATE_NOT_A_VALID_DATE },
+] as const satisfies readonly {
+  readonly field: TransactionAddField;
+  readonly keyed: string;
+  readonly sentence: string;
+}[];
+
+/**
+ * Asserts a shape-valid date that names no real day is refused locally, with no request.
+ *
+ * ⚠️ Purpose: browser validation keyed `2022-13-45` into the originating date and observed NOTHING -- no
+ * band, no marked field -- and watched the value reach the service as `"originDate":"2022-13-45"` for a
+ * 200. Only the field's shape had ever been checked, and the sentence
+ * `Orig Date - Not a valid date...` that `app/cbl/COTRN02C.cbl` L401 raises was unreachable from any
+ * input.
+ *
+ * ⚠️ Assumptions: `1900-02-29` and `2023-02-29` are in the list, and they are the rows that matter most.
+ * A divisible-by-four leap test accepts the first and a missing leap test accepts neither -- so between
+ * them they pin the full Gregorian rule that the reference's own callable service applies, rather than
+ * the shorthand.
+ *
+ * Assumptions: zero requests is asserted per row. The refusal is local precisely because it cannot
+ * diverge from the reference, so a round trip here would be a round trip the reference does not need.
+ * @returns {Promise<void>} Resolves once every impossible date has been checked.
+ */
+async function refusesAnImpossibleCalendarDateLocally(): Promise<void> {
+  const { user } = await mountWithACompleteCapture();
+
+  for (const row of IMPOSSIBLE_CALENDAR_DATES) {
+    vi.mocked(addTransaction).mockClear();
+    setField(row.field, row.keyed);
+
+    await pressPfKey(user, 'ENTER');
+
+    await expectBandSentence(row.sentence);
+    expect({ keyed: row.keyed, dispatched: vi.mocked(addTransaction).mock.calls.length }).toEqual({
+      keyed: row.keyed,
+      dispatched: 0,
+    });
+    expect({ keyed: row.keyed, marked: isMarkedRefused(row.field) }).toEqual({
+      keyed: row.keyed,
+      marked: true,
+    });
+    setField(row.field, A_COMPLETE_CAPTURE[row.field]);
+  }
+}
+
+/**
+ * Asserts a real date is NOT refused locally, so the local rule cannot have overreached.
+ *
+ * ⚠️ Assumptions: `2024-02-29`, `2000-02-29` and `1500-01-01` are all admitted by the local rule. The
+ * first two are leap days a wrong century rule would reject; the third is a real date the reference
+ * itself may refuse for being outside the utility's supported range, and it must still be DISPATCHED --
+ * because `2513` is the one complaint L389-L427 tolerates, and only the service can say whether it
+ * applies. A local rule that refused it would refuse a date the reference can accept.
+ *
+ * ⚠️ Assumptions: the turn is armed to be REFUSED, and that is what lets one filled screen serve all
+ * five rows. A written capture clears every control -- the reference performs `INITIALIZE-ALL-FIELDS` at
+ * `app/cbl/COTRN02C.cbl` L725 before it composes its acknowledgement -- so a row answered 201 would
+ * leave the next row with nothing to send. A refused turn re-displays the populated map, which is the
+ * state every other arm of the program leaves the screen in. The subject is what was SENT, and the spy
+ * records that whichever way the turn settled.
+ * @returns {Promise<void>} Resolves once every real date has been shown to reach the service.
+ */
+async function dispatchesEveryRealCalendarDate(): Promise<void> {
+  vi.mocked(addTransaction).mockRejectedValue(transportFailure(500));
+  const { user } = await mountWithACompleteCapture();
+  keyTheAffirmative();
+
+  for (const keyed of ['2024-02-29', '2000-02-29', '1500-01-01', '2022-12-31', '2022-01-01']) {
+    vi.mocked(addTransaction).mockClear();
+    setField('originDate', keyed);
+
+    await pressPfKey(user, 'ENTER');
+
+    await waitFor(captureDispatchedOnce);
+    const body = vi.mocked(addTransaction).mock.calls[0]?.[0];
+    expect({ keyed, sent: body?.originDate }).toEqual({ keyed, sent: keyed });
+  }
+
+  setField('originDate', A_COMPLETE_CAPTURE.originDate);
+}
+
+/**
+ * Reports whether a confirmation surface is currently displayed.
+ *
+ * ⚠️ Assumptions: the surface is located by antd's own overlay class rather than by a role, and the
+ * hidden and leaving states are filtered out. A `Popconfirm` keeps its overlay MOUNTED after it closes
+ * and marks it `ant-popover-hidden`, so a role query would keep finding the two answer controls after a
+ * withdrawal and every "the surface is gone" assertion would pass vacuously.
+ * `ui/src/screens/transactionAdd/transactionAddTurns.test.tsx` reads the same class for the same reason,
+ * so this is the tree's established way of asking the question rather than a second convention.
+ * @returns {boolean} `true` while a confirmation surface stands.
+ */
+function confirmationSurfaceIsOpen(): boolean {
+  return [...document.querySelectorAll('.ant-popover')].some(
+    /**
+     * Reports whether one overlay node is displayed rather than hidden or animating out.
+     * @param {Element} node - The candidate overlay.
+     * @returns {boolean} `true` when it is on screen.
+     */
+    (node: Element): boolean =>
+      !node.className.includes('ant-popover-hidden') && !node.className.includes('-leave'),
+  );
+}
+
+/** Asserts no confirmation surface stands, for use inside a `waitFor`. */
+function confirmationIsWithdrawn(): void {
+  expect(confirmationSurfaceIsOpen()).toBe(false);
+}
+
+/** Asserts a confirmation surface stands, for use inside a `waitFor`. */
+function confirmationIsRaised(): void {
+  expect(confirmationSurfaceIsOpen()).toBe(true);
+}
+
+/**
+ * ⚠️ Asserts the anchor is brought onto the display BEFORE the confirmation surface is raised.
+ *
+ * ⚠️ Purpose: close a browser-measured defect that no request-shape or focus case can see. The overlay
+ * is anchored to the in-content control at the very foot of a form long enough to overflow the screen
+ * body, and a turn taken from the function-key legend needs no scrolling to reach that control -- so
+ * with the body unscrolled the anchor sat at `top: 934.67` in a 900-pixel display and the overlay,
+ * which the design system flips above an anchor it cannot fit below, landed at `bottom: 923`. Twenty
+ * three pixels past the foot of the display, with the lower eleven pixels of BOTH answers cut off; they
+ * stayed clickable by a single pixel. The same overlay raised while the anchor was in view measured
+ * `bottom: 892`, fully inside, so the anchor's position is the whole of the defect.
+ *
+ * ⚠️ Assumptions: what is asserted is that the scroll happens in the SAME synchronous turn as the
+ * request to open, and the spy records whether a surface already stood when it ran because that is the
+ * observable which distinguishes it. Three negative controls established the exact boundary of the
+ * claim, and the middle one narrowed it. Removing the scroll altogether fails here -- `expected [] to
+ * deeply equal [ false ]`. DEFERRING it to a later task fails here too -- `expected [ true ] to deeply
+ * equal [ false ]` -- and that is the hazard worth guarding, because the overlay measures its anchor on
+ * the commit and a scroll arriving after the commit positions it against where the anchor used to be.
+ * But merely swapping the two statements within the handler PASSES, and on inspection it should: a
+ * synchronous scroll reflows immediately while a state update only schedules a render, so both orders
+ * complete before React commits and before the overlay measures anything. So this case does NOT claim
+ * that one line precedes the other, and an earlier draft of this paragraph did claim it and was wrong.
+ *
+ * ⚠️ Assumptions: this is the strongest form available in this runner and it is deliberately NOT a
+ * geometry check. jsdom performs no layout, lays out no scrollport and -- as `ui/src/test/setup.ts`
+ * records -- does not implement this method at all, so the rectangle the fix delivers is measurable
+ * only in a real browser and is verified there. What is falsifiable here is that the screen asks, and
+ * asks first.
+ *
+ * Assumptions: BOTH routes to the gate are exercised. The legend route is the one that carried the
+ * defect, and the pointer route is asserted alongside it because the two routes running through one
+ * function is this screen's own stated contract -- a fix applied to one of them would be a second
+ * divergence between them, which is the class of defect this gate already had once.
+ * @returns {Promise<void>} Resolves once both routes have been asserted.
+ */
+async function bringsTheAnchorIntoViewBeforeAsking(): Promise<void> {
+  const { user } = await mountWithACompleteCapture();
+  const surfaceStoodWhenScrolled: boolean[] = [];
+  const scrolled = vi.spyOn(confirmationTrigger(), 'scrollIntoView').mockImplementation(
+    /**
+     * Records whether a surface already stood at the moment the anchor was scrolled.
+     * @returns {void} Nothing; the recording is the observable.
+     */
+    (): void => {
+      surfaceStoodWhenScrolled.push(confirmationSurfaceIsOpen());
+    },
+  );
+
+  for (const route of ['legend', 'pointer']) {
+    surfaceStoodWhenScrolled.length = 0;
+    if (route === 'legend') {
+      await user.click(legendControl('Enter'));
+    } else {
+      await user.click(confirmationTrigger());
+    }
+    await waitFor(confirmationIsRaised);
+
+    expect(
+      surfaceStoodWhenScrolled,
+      `the ${route} route must bring the anchor into view exactly once, before the surface stands`,
+    ).toEqual([false]);
+    expect(
+      addTransaction,
+      `and asking must still cost no request on the ${route} route`,
+    ).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    await waitFor(confirmationIsWithdrawn);
+  }
+
+  scrolled.mockRestore();
+}
+
+/**
+ * Asserts the confirmation surface holds every structural term of its contract.
+ *
+ * ⚠️ Purpose: five separate rendering findings landed on this one surface, and none of them was a
+ * behaviour a request-shape case can see. The trigger was measured SOLID PRIMARY and bottom-right,
+ * making it the third emphasised control in a frame that already carries the legend's Enter and F5 and
+ * putting this screen's own action on the side no other screen puts one. The overlay's two answers were
+ * measured 28x22 and 26x22 device pixels, the smallest interactive controls anywhere in the
+ * application. And the overlay's title was a VERBATIM duplicate of the prompt beside the confirmation
+ * control, so one sentence stood on the screen twice and served as both the overlay's name and the
+ * input's accessible name -- heard twice in a row by anyone listening to it.
+ *
+ * ⚠️ Assumptions: every term is asserted STRUCTURALLY -- a class, an inline size, a focused element,
+ * two strings compared -- because jsdom performs no layout and every `getBoundingClientRect` answers
+ * zero. A case written against measured geometry here would pass against any implementation at all,
+ * which is worse than no case; the pixels belong to a browser pass.
+ *
+ * Assumptions: the trigger's leading-edge placement is asserted as the ABSENCE of an end-justification
+ * on the row that holds it. antd expresses `Flex`'s `justify` as an inline `justifyContent`, so a row
+ * that pushed its child to the trailing edge would carry `flex-end` there and this reads empty; that is
+ * the strongest claim available without layout.
+ *
+ * Assumptions: the target floor is read from `ui/src/theme/tokens.ts` rather than written here. That
+ * module records WCAG 2.2 AA as 24 CSS pixels and records separately why the 44-pixel AAA figure is not
+ * the one applied, so pinning a literal here would put a second, unexplained figure in the tree.
+ * @returns {Promise<void>} Resolves once the trigger, the two answers, the focus and the two sentences
+ *   have been checked.
+ */
+async function holdsTheConfirmationSurfaceToItsContract(): Promise<void> {
+  const { user } = await mountWithACompleteCapture();
+
+  const trigger = confirmationTrigger();
+  expect(trigger).toHaveClass('ant-btn-default');
+  expect(trigger).not.toHaveClass('ant-btn-primary');
+  const triggerRow = trigger.closest('.ant-flex');
+  expect(triggerRow).toBeInstanceOf(HTMLElement);
+  expect(triggerRow instanceof HTMLElement ? triggerRow.style.justifyContent : 'no row').toBe('');
+
+  await user.click(trigger);
+  await waitFor(confirmationIsRaised);
+
+  const answers = [
+    { name: DECLINING_ANSWER, control: screen.getByRole('button', { name: DECLINING_ANSWER }) },
+    { name: CONFIRMING_ANSWER, control: screen.getByRole('button', { name: CONFIRMING_ANSWER }) },
+  ];
+  for (const answer of answers) {
+    expect({
+      name: answer.name,
+      inline: answer.control.style.minInlineSize,
+      block: answer.control.style.minBlockSize,
+    }).toEqual({
+      name: answer.name,
+      inline: `${String(TARGET_SIZE_AA_MINIMUM)}px`,
+      block: `${String(TARGET_SIZE_AA_MINIMUM)}px`,
+    });
+  }
+
+  await waitFor(
+    /**
+     * Asserts the declining answer holds the cursor once the surface has settled.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(document.activeElement).toBe(answers[0]?.control);
+    },
+  );
+
+  /*
+   * WHY : ⚠️ Assumptions: the two sentences are compared as STRINGS as well as located in the
+   *       document. Asserting only that the title is present would pass against a surface titled with
+   *       the field's own prompt, which is exactly the measured defect -- the duplication is the
+   *       finding, so the inequality is what has to be asserted.
+   */
+  expect(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION).not.toBe(
+    TRANSACTION_ADD_FIELD_LABELS.confirmation,
+  );
+  expect(screen.getByText(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION)).toBeInTheDocument();
+  expect(control('confirmation')).toHaveAccessibleName(TRANSACTION_ADD_FIELD_LABELS.confirmation);
+}
+
+/**
+ * Asserts a decline issues NO request, by every route that can produce one.
+ *
+ * ⚠️ Purpose: this case exists because the defect it guards was live and the suite passed. Browser
+ * validation measured the declining control issuing one `POST /api/v1/transactions` carrying
+ * `"confirmation":"N"`, answered 200 with nothing written, and reported to the operator as
+ * `Unable to Add Transaction...` -- so an operator who successfully cancelled was told the add had
+ * FAILED. The oracle admits no turn at all on this arm: `app/cbl/COTRN02C.cbl` L173-L181 answers `'N'`,
+ * `'n'`, `SPACES` and `LOW-VALUES` with three `MOVE`s and a `SEND-TRNADD-SCREEN`, touching no file.
+ *
+ * ⚠️ Assumptions: all FOUR routes are walked rather than one, because the defect was a property of a
+ * route and not of the answer. A keyed `'N'` submitted with the ENTER key, the same answer submitted
+ * through the legend's own ENTER control, a clicked declining control on a raised surface and an
+ * `Escape` on a raised surface are four different entry points into the same arm, and a case covering
+ * one of them is exactly how the shipped version passed its own suite.
+ *
+ * ⚠️ Assumptions: the clicked declining control is walked HERE as well as in
+ * {@link gatesTheWriteOnAConfirmingAnswer}, and the overlap is deliberate rather than an oversight.
+ * That case's subject is the Y-versus-N gate -- it has to reach the confirming half to be about
+ * anything -- whereas this one's subject is that NO route produces a request, and the route the browser
+ * actually measured issuing one was this one. Leaving it out of the case named after the defect would
+ * mean the defect's own regression lived somewhere else, where a later edit narrowing that case's scope
+ * would silently remove it.
+ *
+ * Assumptions: the confirmation control is asserted BLANK after each decline. Blank and `'N'` take the
+ * same arm of the reference's `EVALUATE`, so returning the field to blank is faithful, and the measured
+ * shape stamped `'N'` into a control the operator never keyed into -- which left the next Enter
+ * carrying an answer nobody gave.
+ * @returns {Promise<void>} Resolves once all three routes have been walked.
+ */
+async function declinesFromEveryRouteWithoutARequest(): Promise<void> {
+  vi.mocked(addTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
+  const { user } = await mountWithACompleteCapture();
+
+  setField('confirmation', DECLINING_ANSWER);
+  await pressPfKey(user, 'ENTER');
+  await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
+  expect(addTransaction).not.toHaveBeenCalled();
+  expect(valueOf('confirmation')).toBe('');
+
+  setField('confirmation', DECLINING_ANSWER);
+  await user.click(legendControl('Enter'));
+  await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
+  expect(addTransaction).not.toHaveBeenCalled();
+  expect(valueOf('confirmation')).toBe('');
+
+  await user.click(confirmationTrigger());
+  await waitFor(confirmationIsRaised);
+  /*
+   * WHY : ⚠️ Assumptions: the declining control is located by the character the mapset's own `(Y/N)`
+   *       hint names, derived from the constant the screen publishes rather than retyped -- so the
+   *       control this leg clicks is the one an operator sees, and a screen that relabelled it would
+   *       fail here rather than pass against a stale literal.
+   */
+  await user.click(screen.getByRole('button', { name: DECLINING_ANSWER }));
+  await waitFor(confirmationIsWithdrawn);
+  await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
+  expect(addTransaction).not.toHaveBeenCalled();
+  expect(copyLastTransaction).not.toHaveBeenCalled();
+  expect(valueOf('confirmation')).toBe('');
+
+  await user.click(confirmationTrigger());
+  await waitFor(confirmationIsRaised);
+  await user.keyboard('{Escape}');
+  await waitFor(confirmationIsWithdrawn);
+  await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
+  expect(addTransaction).not.toHaveBeenCalled();
+  expect(copyLastTransaction).not.toHaveBeenCalled();
+  expect(valueOf('confirmation')).toBe('');
+}
+
+/**
+ * Asserts every submitting surface passes the same gate, in the reference's own order.
+ *
+ * ⚠️ Purpose: the second half of the same defect. Browser validation measured TWO independent submitting
+ * paths on this screen: the legend's Enter dispatched immediately with no confirmation surface at all,
+ * while the in-content control opened one whose answers each dispatched a turn of their own. A screen
+ * with two paths to a write has no gate, however correct either path looks on its own.
+ *
+ * ⚠️ Assumptions: the gate is proved by a REFUSABLE field rather than by counting requests on a valid
+ * one, because that is the order the reference fixes. `PROCESS-ENTER-KEY` performs
+ * `VALIDATE-INPUT-KEY-FIELDS` at `app/cbl/COTRN02C.cbl` L166 and `VALIDATE-INPUT-DATA-FIELDS` at L167
+ * and evaluates `CONFIRMI` only at L169, and each paragraph ends its turn with `SEND-TRNADD-SCREEN`, so
+ * the reference cannot reach any confirmation arm over a refusable field. A surface that opens anyway
+ * asks the operator to confirm a submission the screen already knows will be refused.
+ *
+ * Assumptions: the merchant identifier is the field made refusable, because its rule is the LAST one
+ * `dataFieldFailure` applies -- L430-L436 -- so reaching its sentence proves the whole chain ran rather
+ * than that the first check short-circuited.
+ *
+ * Assumptions: the final leg presses Enter while the surface stands and asserts nothing was written.
+ * A raised confirmation gives focus to its declining control, and the gate refuses a keystroke behind
+ * an open surface, so neither route can turn a reflex keypress into a write.
+ * @returns {Promise<void>} Resolves once all three surfaces and the raised-surface keystroke are checked.
+ */
+async function routesEverySubmitPathThroughTheOneGate(): Promise<void> {
+  vi.mocked(addTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
+  const { user } = await mountWithACompleteCapture();
+  setField('merchantId', 'ABC456789');
+
+  await pressPfKey(user, 'ENTER');
+  await expectBandSentence(ADD_MESSAGES.MERCHANT_ID_MUST_BE_NUMERIC);
+  expect(addTransaction).not.toHaveBeenCalled();
+
+  await user.click(legendControl('Enter'));
+  await expectBandSentence(ADD_MESSAGES.MERCHANT_ID_MUST_BE_NUMERIC);
+  expect(addTransaction).not.toHaveBeenCalled();
+
+  await user.click(confirmationTrigger());
+  await expectBandSentence(ADD_MESSAGES.MERCHANT_ID_MUST_BE_NUMERIC);
+  expect(confirmationSurfaceIsOpen()).toBe(false);
+  expect(addTransaction).not.toHaveBeenCalled();
+
+  setField('merchantId', A_COMPLETE_CAPTURE.merchantId);
+  await user.click(confirmationTrigger());
+  await waitFor(confirmationIsRaised);
+
+  await pressPfKey(user, 'ENTER');
+  expect(addTransaction).not.toHaveBeenCalled();
+  /*
+   * WHY : Assumptions: the band must NOT carry the unmapped-key sentence either. This screen binds Enter
+   *       -- `app/cbl/COTRN02C.cbl` L134 has a `DFHENTER` arm -- so reporting `invalid key` for a press
+   *       the screen merely declined to act on would state something the reference does not, and the
+   *       shared hook moves the cursor when it reports one, which would strand the operator outside a
+   *       surface that is still open.
+   */
+  bandCarriesNoUnmappedKeySentence();
 }
 
 /**
@@ -1821,14 +2946,46 @@ async function letsANonAdministrativeSessionCapture(): Promise<void> {
   expect(session.result.current.signedOn).toBe(true);
   expect(session.result.current.isAdmin).toBe(false);
 
-  vi.mocked(addTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
+  vi.mocked(addTransaction).mockResolvedValue(createdOutcome(WIRE_NEGATIVE_AMOUNT));
   const { user } = await mountWithACompleteCapture();
 
-  await pressPfKey(user, 'ENTER');
+  /*
+   * WHY : ⚠️ Assumptions: the capture is taken all the way to a WRITE, through the gate an operator who
+   *       never keys into the confirmation field goes through. AAP section 0.9.4 lists "transaction add"
+   *       among the flows that must work end to end, and a case that stopped at a question would not
+   *       have exercised the flow at all -- which is the state this case was in while the unconfirmed
+   *       turn existed, because a preview looked like a completed action from here.
+   */
+  await confirmThroughTheAsk(user);
 
   await waitFor(captureDispatchedOnce);
   expect(vi.mocked(addTransaction).mock.calls[0]?.[0]?.accountId).toBe(ACCOUNT_ID);
-  await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
+  const acknowledgement = formatMessageTemplate(MESSAGE_TEMPLATES.TRANSACTION_ADDED_SUCCESSFULLY, {
+    'TRAN-ID': '0000000000683581',
+  });
+  /*
+   * WHY : ⚠️ Assumptions: the acknowledgement is asserted through {@link expectBandToRead}, which
+   *       compares raw `textContent`, and the doubled space is then named on its own line. The sentence
+   *       joins `'Transaction added successfully. '` to `' Your Tran ID is '` -- two literals the
+   *       reference's `STRING` statement at `app/cbl/COTRN02C.cbl` L728-L732 declares that way -- so the
+   *       painted text carries TWO spaces where English wants one. A normalising matcher cannot tell the
+   *       two apart, so an assertion using one would pass against a screen that had tidied a contract
+   *       away.
+   */
+  await expectBandToRead(acknowledgement);
+  expect(acknowledgement).toBe(
+    'Transaction added successfully.  Your Tran ID is 0000000000683581.',
+  );
+  /*
+   * WHY : ⚠️ Assumptions: the VARIANT is asserted beside the sentence, because a review found this
+   *       screen reporting a successful capture through the refusal variant while the user screens
+   *       reported theirs through the success one -- the same event rendered two ways in one
+   *       application. The mapset gives this screen one message line and says nothing about colour, so
+   *       the variant is the migrated screen's own decision, and an acknowledgement is not a refusal.
+   *       The negative is asserted too: reading only for `success` would pass against a band that had
+   *       somehow rendered both.
+   */
+  expect(bandAlertVariant()).toBe('success');
   expect(session.result.current).not.toHaveProperty('accountId');
   expect(session.result.current).not.toHaveProperty('cardNumber');
 }
@@ -1849,11 +3006,19 @@ async function letsANonAdministrativeSessionCapture(): Promise<void> {
  * @returns {Promise<void>} Resolves once the read-back has been checked.
  */
 async function namesTheResolvedCardInReducedFormOnly(): Promise<void> {
-  vi.mocked(addTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
+  /*
+   * WHY : ⚠️ Assumptions: the resolved pair is obtained through the COPY turn, because that is the only
+   *       turn that answers with one. A capture is sent only for a confirming answer and is answered 201
+   *       with the written identifier, so the preview carrying `resolvedCardNumberMasked` reaches this
+   *       screen from `POST /api/v1/transactions/copy-last` -- which is the same turn
+   *       `ui/src/screens/transactionAdd/transactionAddTurns.test.tsx` reads the resolved pair from, so
+   *       this is the suite's established route to it rather than a second convention.
+   */
+  vi.mocked(copyLastTransaction).mockResolvedValue(previewOutcome(WIRE_NEGATIVE_AMOUNT));
   const { user } = await mountCaptureScreen();
   fillCapture({ ...A_COMPLETE_CAPTURE, accountId: '', cardNumber: CARD_NUMBER });
 
-  await pressPfKey(user, 'ENTER');
+  await pressPfKey(user, 'PFK05');
   await expectBandSentence(ADD_MESSAGES.CONFIRM_TO_ADD_THIS_TRANSACTION);
   await user.click(confirmationTrigger());
   await screen.findByRole('button', { name: CONFIRMING_ANSWER });
@@ -1877,6 +3042,7 @@ function declaredConstraintCases(): void {
     opensWithTheCursorInTheSingleInitialField,
   );
   it('renders the amount through the fixed-pitch token', rendersTheAmountThroughTheFixedPitchToken);
+  it('lays the field grid out responsively, rule included', laysTheFieldGridOutResponsively);
 }
 
 /**
@@ -1919,6 +3085,20 @@ function refusalCensusCases(): void {
     refusesEveryKeyItDoesNotBind,
   );
   it('marks only the fields the response names', marksOnlyTheFieldsTheResponseNames);
+  it(
+    'renders every named refusal with its accessibility wiring',
+    rendersEveryNamedRefusalWithItsWiring,
+  );
+  it('surfaces a refusal it cannot attribute, moving no cursor', surfacesARefusalItCannotAttribute);
+  it(
+    'reports an unreadable answer without blaming the write',
+    reportsAnUnreadableAnswerWithoutBlamingTheWrite,
+  );
+  it(
+    'refuses an impossible calendar date locally, line 401',
+    refusesAnImpossibleCalendarDateLocally,
+  );
+  it('dispatches every real calendar date, tolerance 2513', dispatchesEveryRealCalendarDate);
 }
 
 /**
@@ -1927,6 +3107,8 @@ function refusalCensusCases(): void {
  */
 function moneyCases(): void {
   it('keeps the amount an exact fixed-point string end to end', keepsMoneyInExactFixedPoint);
+  it('accepts every keyed spelling of an amount, line 383', acceptsEveryKeyedAmountSpelling);
+  it('refuses an amount that is not an amount, line 346', refusesAnAmountThatIsNotAnAmount);
 }
 
 /**
@@ -1939,6 +3121,7 @@ function functionKeyCases(): void {
     paintsTheFourDeclaredKeyDescriptors,
   );
   it('renders the declared emphasis on each key', rendersTheDeclaredKeyEmphasis);
+  it('announces an outstanding capture', announcesAnOutstandingCapture);
   it('submits the capture on Enter, by key and by legend control', submitsTheCaptureFromBothPaths);
   it(
     'leaves the screen on the back key, by key and by legend control',
@@ -1962,6 +3145,13 @@ function confirmationGateCases(): void {
   it(
     'raises the confirmation and writes only on a confirming answer',
     gatesTheWriteOnAConfirmingAnswer,
+  );
+  it('holds the confirmation surface to its contract', holdsTheConfirmationSurfaceToItsContract);
+  it('brings the anchor into view before asking', bringsTheAnchorIntoViewBeforeAsking);
+  it('declines from every route without any request', declinesFromEveryRouteWithoutARequest);
+  it(
+    'routes every submitting surface through the one gate',
+    routesEverySubmitPathThroughTheOneGate,
   );
 }
 

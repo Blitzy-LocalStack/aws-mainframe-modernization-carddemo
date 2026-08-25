@@ -57,7 +57,6 @@ import {
   Card,
   Col,
   Descriptions,
-  Divider,
   Flex,
   Form,
   Input,
@@ -71,6 +70,13 @@ import {
 } from 'antd';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
+/*
+ * WHY : Assumptions: the grid's gutter type is imported from the design system rather than restated
+ *       here, because it is a union the component owns -- a number, a per-screen-name record, or a pair
+ *       of either -- and a local restatement would silently stop matching the component the day the
+ *       union gained a member. Nothing is imported at runtime by this line.
+ */
+import type { RowProps } from 'antd';
 import { useNavigate } from 'react-router';
 
 import {
@@ -86,7 +92,15 @@ import type {
   CustomerDetail,
   SensitiveAccountUpdateRequest,
 } from '../../api/accounts';
-import { isApiRequestError } from '../../api/client';
+/*
+ * WHY : ⚠️ Assumptions: the TRANSIENCE predicate is imported beside the narrowing one, because the
+ *       transport module is where that classification belongs and it already performs it -- it marks a
+ *       timeout and the four retryable statuses transient and a network failure not. Re-deriving it
+ *       here from a status list would put a second, screen-local opinion beside the module's own, and
+ *       the screen that disagreed would tell an operator to try again for a failure repeating cannot
+ *       clear.
+ */
+import { isApiRequestError, isTransientFailure } from '../../api/client';
 import { applyMoneyEditMask, stripMoneyEditMask } from '../../format/money';
 /*
  * WHY : Assumptions: this ONE type is imported from the shapes module while every other shape on this
@@ -100,19 +114,38 @@ import { applyMoneyEditMask, stripMoneyEditMask } from '../../format/money';
 import type { FieldError } from '../../api/types';
 import { useShellSlot } from '../../layout/AppShell';
 
-import { MessageBand } from '../../layout/MessageBand';
+/*
+ * WHY : ⚠️ Refactoring Rationale: only the SEVERITY type is imported now. The component itself was
+ *       imported to paint this screen's row-22 line inside the form, and both message rows are
+ *       delegated to the frame's pinned zone as of the band-placement change recorded at the removal
+ *       site -- so importing the component would leave a dependency nothing renders, which is how a
+ *       withdrawn arrangement quietly comes back.
+ */
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
 import { useServerInstant } from '../../hooks/useServerInstant';
+/*
+ * WHY : ⚠️ Assumptions: the three AUTHORED sentences are imported from the same catalog as the
+ *       transcribed ones, and that is what keeps them lawful. Transformation rule T8 forbids a screen
+ *       from inventing operator wording; these three describe conditions the reference has no wording
+ *       for -- a request still outstanding, and a failure that never reached the service at all -- so
+ *       they are declared once in the catalog, registered and width-bounded there, and only published
+ *       here.
+ */
 import {
   ABEND_DATA_FIELDS,
   ACCOUNT_UPDATE_FIELD_LABELS,
   MESSAGE_TEMPLATES,
+  PERSISTENT_FAILURE_REPORT_IT,
+  REQUEST_IN_PROGRESS,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
   UNEXPECTED_ABEND_OCCURRED,
   UNEXPECTED_DATA_SCENARIO,
+  fitsDeclaredWidth,
   formatMessageTemplate,
+  normaliseForWire,
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
 import {
@@ -143,9 +176,16 @@ import { MAIN_MENU_ROUTE, navigateSafely } from '../../routes/navigation';
  *       largest -- keeping the twenty-four edits beside the rendering would bury them, and separating
  *       them is what lets the chain be exercised directly rather than only through a rendered screen.
  */
-import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import {
+  BLANK_FIELD_MARKER_CHARACTERS,
+  busyAnnouncement,
+  busyProps,
+  fieldAriaProps,
+  fieldErrorHelp,
+} from '../../layout/fieldHelp';
+import { copybookFieldWidthStyle } from '../../layout/recordLayout';
 import { UNPOPULATED_CUSTOMER } from '../accountView/index';
-import { ScreenTitle } from '../../layout/ScreenTitle';
+import { SECTION_HEADING_LEVEL, ScreenTitle } from '../../layout/ScreenTitle';
 
 /*
  * WHY : Assumptions: every user-visible SENTENCE on this screen resolves through
@@ -502,6 +542,20 @@ export type ChangeAction =
   | 'CHANGES_OKAYED_BUT_FAILED';
 
 /**
+ * The two attention identifiers whose arms perform this screen's record read.
+ *
+ * ⚠️ Purpose: name the OWNER of an outstanding read so a busy affordance can be attached to the one
+ * control responsible for it. `app/cbl/COACTUPC.cbl` reaches `9000-READ-ACCT` from two arms -- the
+ * fetch turn and the PF12 cancel turn at L2572 to L2580 -- and both land in one reader here, so
+ * without this the screen could only report that SOMETHING was outstanding.
+ *
+ * Assumptions: the members are AID names rather than turn names, so they compare directly against the
+ * keys of the handler map below and no translation table stands between the owner and the control it
+ * describes.
+ */
+type ReadTurnOwner = 'ENTER' | 'PFK12';
+
+/**
  * Every editable and displayed value the map carries, one member per named data field.
  *
  * Assumptions: forty-three members, which is the mapset's 54 named fields less the six shared
@@ -667,6 +721,194 @@ export const ACCOUNT_UPDATE_FIELD_WIDTHS = {
   eftAccountId: 10,
   primaryCardHolderIndicator: 1,
 } as const satisfies Record<AccountUpdateFieldName, number>;
+
+/**
+ * Decides whether a name the service used identifies a control this screen paints.
+ *
+ * Purpose: the service may name any field in its own request model, and this screen paints one
+ * mapset's worth of them. A name it does not paint has no control to mark and no words an operator on
+ * this screen can act on.
+ *
+ * Assumptions: membership is read from {@link ACCOUNT_UPDATE_FIELD_WIDTHS}, whose `satisfies` clause
+ * makes its keys exactly the form's fields -- so a field added to the form is a field this test knows
+ * about, with nothing to keep in step by hand. A separate list was the alternative and is precisely
+ * the thing that goes stale.
+ * @param {string} name - The field name as the response carried it.
+ * @returns {boolean} `true` when this screen paints a control for that name.
+ */
+export function isAccountUpdateField(name: string): name is AccountUpdateFieldName {
+  return Object.hasOwn(ACCOUNT_UPDATE_FIELD_WIDTHS, name);
+}
+
+/**
+ * Chooses the sentence a refusal carrying field errors should publish on the band.
+ *
+ * Purpose: publish a refusal the operator can act on, and never one about a field that is not on the
+ * screen in front of them.
+ *
+ * ⚠️ Refactoring Rationale: this used to be `const [first] = fieldErrors` at the call site, taking the
+ * array's first entry whatever it named. A browser review drove a refusal whose first entry named a
+ * field belonging to a different screen and measured the result: that sentence became this screen's
+ * only headline, naming a control the screen does not paint, with the on-screen field's own refusal
+ * present but unpromoted. The operator was shown a refusal they had no way to satisfy.
+ *
+ * Assumptions: the reference cannot reach that state, which is why filtering is a transcription rather
+ * than a policy. `1200-EDIT-MAP-INPUTS` composes `WS-RETURN-MSG` from its own per-field edits over the
+ * fields this mapset paints -- `app/cbl/COACTUPC.cbl` L484 onward -- so the sentence on its message
+ * line always names a field on its screen.
+ *
+ * Assumptions: entries naming fields off this screen stay in the array and continue to reach
+ * {@link indexFieldErrors}, where they match no control and mark nothing. Only the choice of HEADLINE
+ * is filtered, because dropping them would have this screen decide what the service may report and
+ * would lose a diagnostic that a later screen or a log may want.
+ *
+ * Alternatives Considered: publishing the problem-level message whenever any entry names an unpainted
+ * field. Rejected because it discards a perfectly actionable on-screen refusal -- the review's own case
+ * had one -- in favour of a generic sentence, which trades a wrong headline for an uninformative one.
+ * @param {readonly FieldError[]} fieldErrors - The field errors exactly as the response carried them.
+ * @param {string | null} problemMessage - The problem-level sentence, used when no entry is on screen.
+ * @returns {string | null} The sentence to publish, or `null` when there is none to publish.
+ */
+export function headlineForFieldErrors(
+  fieldErrors: readonly FieldError[],
+  problemMessage: string | null,
+): string | null {
+  const onScreen = fieldErrors.find(
+    /**
+     * Tests one entry for membership of this screen.
+     * @param {FieldError} candidate - The entry under test.
+     * @returns {boolean} `true` when this screen paints the field it names.
+     */
+    (candidate: FieldError): boolean => isAccountUpdateField(candidate.field),
+  );
+
+  return onScreen === undefined ? problemMessage : onScreen.message;
+}
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: the grid's HORIZONTAL gutter is resolved per screen name and is zero
+ *       below the medium breakpoint, where it used to be one number at every width. The design system
+ *       implements a gutter by giving the `Row` a NEGATIVE inline margin of half the gutter and each
+ *       `Col` a matching positive padding -- `node_modules/antd/lib/grid/row.js` sets
+ *       `rowStyle.marginInline` to `gutter / -2` -- so a `Row` laid out in a container exactly as wide
+ *       as the viewport hangs half a gutter past each edge. A responsive review measured exactly that
+ *       on this screen and nowhere else in the application: `documentElement.scrollWidth` 385 against
+ *       an `innerWidth` of 375, 586 against 576, 778 against 768, and zero overflow from 992 upward.
+ *       One ten-pixel pan then clipped the first character off every label -- `Update Account` read as
+ *       `pdate Account` and `Account Number :` as `ccount Number :` -- which is a functional loss and
+ *       not a cosmetic one, because the operator cannot see which field they are in.
+ * WHY : Assumptions: zero is the right value below that breakpoint rather than a smaller number,
+ *       because every `Col` in both grids is `xs={24}` -- a full row of its own -- so there is no pair
+ *       of side-by-side columns for a horizontal gutter to separate. It buys nothing at those widths
+ *       and its only effect is the escape.
+ * WHY : Assumptions: the VERTICAL gutter keeps the same spacing step at every width. Stacked
+ *       single-column fields need row separation more at a phone width than at a desktop one, and a
+ *       block-axis negative margin cannot be exposed by a horizontal scroll.
+ * WHY : Alternatives Considered: `overflow-x: hidden` on the content wrapper, which the review itself
+ *       suggested. Rejected on two counts. It belongs to `ui/src/layout/AppShell.tsx` rather than to a
+ *       screen, so a screen cannot apply it without reaching outside its own tree; and it HIDES the
+ *       escape rather than removing it, leaving the content laid out ten pixels wider than the viewport
+ *       with the overhanging column unreachable instead of merely invisible.
+ * WHY : Alternatives Considered: dropping the gutter entirely and spacing the columns with `Flex` gap
+ *       inside each `Col`. Rejected because the two-up arrangement from the medium breakpoint upward is
+ *       what the mapset's paired left/right fields become, and `Row`/`Col` is the design system's own
+ *       expression of it -- replacing it would hand-roll a grid the system already provides.
+ * WHY : Assumptions: this is the screen's own half of a two-layer remedy, and it is not made redundant
+ *       by the frame's. `AppShell` insets every zone by `paddingLG` and clamps the content column,
+ *       which absorbs a half-gutter that escapes; this removes the escape where it has nothing to buy.
+ *       Each holds on its own, so neither depends on the other's value staying where it is.
+ * WHY : Assumptions: only the three narrow screen names are stated, for the reason
+ *       `ui/src/layout/recordLayout.ts` gives for stating three: the design system resolves a
+ *       responsive gutter by walking its screen names widest-first and taking the first that both
+ *       matches and is present, so the value given at `md` also governs `lg`, `xl`, `xxl` and `xxxl`.
+ *       Naming those four as well would be four more places for one decision to be edited.
+ */
+
+/**
+ * Resolves the two-axis gutter both field grids on this screen are laid out with.
+ *
+ * Purpose: keep the horizontal gutter -- and therefore the negative inline margin the design system
+ * derives from it -- off the widths at which every column is full-width, so the grid cannot lay out
+ * wider than the viewport it is given.
+ *
+ * Assumptions: the caller passes the RESOLVED spacing step as a number rather than the token's
+ * `var(--...)` reference, because the gutter is a component prop the design system divides by two
+ * itself and it accepts a number. Reading the resolved member is safe for this one value precisely
+ * because it is never written into a style attribute, so nothing about today's spacing scale is baked
+ * into an element.
+ * @param {number} sectionGap - The spacing step from the token bridge's medium section gap.
+ * @returns {RowProps['gutter']} The horizontal gutter per screen name, paired with the vertical gutter.
+ */
+export function accountUpdateGridGutter(sectionGap: number): RowProps['gutter'] {
+  return [{ xs: 0, sm: 0, md: sectionGap }, sectionGap];
+}
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: entry is now measured against the field's DECLARED width in the two
+ *       units the record is stated in, where the control's `maxLength` was the only limit. A
+ *       responsive review reported an entry of `12345` into a three-wide telephone part arriving
+ *       truncated with nothing said about it, and `maxLength` is why: it stops the keystroke, which is
+ *       the right interaction, but it counts UTF-16 code units -- a unit that is neither of the units
+ *       a `PIC X(n)` field is declared in. It therefore lets through a value the record cannot hold
+ *       and refuses one it could, and in both directions the operator is told nothing. This measures
+ *       code points AND bytes, which is the check `fitsDeclaredWidth` exists for and which its own
+ *       contract says to run alongside `maxLength` rather than instead of it.
+ * WHY : ⚠️ Assumptions: the two measures differ, and the byte one usually binds. `firstName` is
+ *       `PIC X(25)` at `app/cpy-bms/COACTUP.CPY`, which is twenty-five BYTES on the record, so
+ *       twenty-five accented letters are twenty-five code points and fifty bytes -- a value
+ *       `maxLength` admits and the field cannot store. Conversely one astral character is a single
+ *       code point and two UTF-16 units, so `maxLength` counts it twice and refuses a character the
+ *       field has room for. Clamping on the record's own units removes both errors.
+ * WHY : ⚠️ Trade-offs: an over-long entry is CLAMPED rather than refused with a sentence, and the
+ *       reason is that no sentence exists to say it in. `COACTUPC` declares no over-length refusal --
+ *       a 3270 field of length n physically cannot hold n+1 characters, so the condition never arises
+ *       for it to report -- and the catalog is transcribed from the program, so stating one here would
+ *       mean authoring operator prose the reference never wrote. Clamping is the terminal's own
+ *       behaviour: the keyboard simply stops accepting into a full field. What is added on top is the
+ *       control being sized to its declared width, so the boundary the clamp enforces is visible
+ *       before it is reached rather than only afterwards.
+ * WHY : Alternatives Considered: marking the control and publishing a borrowed sentence from another
+ *       program's block -- `COTRN02C` has a family of `... can NOT be empty...` refusals and a browser
+ *       could be made to speak one. Rejected outright: every catalogued sentence records the program
+ *       and line it was transcribed from, and rendering one program's words on another program's
+ *       screen breaks that correspondence for the sake of filling a gap the reference does not have.
+ *       The gap is reported instead.
+ */
+
+/**
+ * Clamps one entry to a declared field width, measured as the record measures it.
+ *
+ * Purpose: keep the value the operator sees identical to the value the field can store, so nothing
+ * can be validated as acceptable and then be unstorable.
+ *
+ * Assumptions: the entry is normalised to Normalization Form C FIRST and the clamp then walks whole
+ * CODE POINTS, never UTF-16 units, so a surrogate pair is kept or dropped as one character and can
+ * never be cut in half into a lone surrogate -- which would be a value no byte measure could make
+ * sense of.
+ *
+ * Trade-offs: the fit is re-tested per candidate length rather than computed from a byte count in one
+ * step. That is a loop over at most the entry's own length, on a keystroke, and it buys the property
+ * that this function and the validator agree by CONSTRUCTION because they consult the same predicate
+ * -- where a byte arithmetic of its own here would be a second implementation of the same rule.
+ * @param {string} entry - The value the control reported, exactly as it arrived.
+ * @param {number} declaredWidth - The field's `PIC X(n)` width; a positive integer.
+ * @returns {string} The normalised entry, shortened by whole code points until it fits the width.
+ * @throws {RangeError} If `declaredWidth` is negative or not an integer, raised by the predicate.
+ */
+export function clampToDeclaredWidth(entry: string, declaredWidth: number): string {
+  const normalised = normaliseForWire(entry);
+  if (fitsDeclaredWidth(normalised, declaredWidth)) {
+    return normalised;
+  }
+
+  const codePoints = Array.from(normalised);
+  let kept = codePoints.length - 1;
+  while (kept > 0 && !fitsDeclaredWidth(codePoints.slice(0, kept).join(''), declaredWidth)) {
+    kept -= 1;
+  }
+
+  return codePoints.slice(0, kept).join('');
+}
 
 /** Matches a run of decimal digits, or nothing, used to reject a non-digit in a numeric-only part. */
 const NON_DIGITS = /[^0-9]/gu;
@@ -1497,8 +1739,17 @@ export interface SaveRejection {
   readonly statement: BandStatement;
   /** The field errors to mark controls with, empty when the rejection named none. */
   readonly fieldErrors: readonly FieldError[];
-  /** Whether the record must be re-read, which only the concurrency refusal requires. */
-  readonly reread: boolean;
+  /*
+   * WHY : ⚠️ Refactoring Rationale: this member states WHAT the rejection was where it used to state
+   *       what to do about it -- it was `reread`, and its one consumer re-read the record. A
+   *       responsive review then drove a refused save and measured the consequence: 42 of the 43
+   *       controls came back empty, so the operator's typed work was gone and the sentence asking them
+   *       to review a changed record stood over a blank form. Naming the OUTCOME leaves the remedy to
+   *       the caller, which is where the reference puts it -- `2000-DECIDE-ACTION` sets an action for
+   *       this outcome and nothing else, at `app/cbl/COACTUPC.cbl` L2610 to L2612.
+   */
+  /** Whether the refusal was the optimistic-concurrency one, which no other outcome is. */
+  readonly concurrency: boolean;
 }
 
 /*
@@ -1524,8 +1775,16 @@ export interface SaveRejection {
  * Assumptions: the four outcomes are `2000-DECIDE-ACTION`'s inner `EVALUATE` at
  * `app/cbl/COACTUPC.cbl` L2604 to L2614, transcribed. A lock that could not be taken sets the
  * lock-error action; a rewrite that was refused sets the write-failed action; a record another user
- * changed sets the screen BACK to showing details, because the reference re-reads and redisplays it
- * rather than leaving the operator on a dead edit; anything else is the committed action.
+ * changed sets the screen BACK to showing details; anything else is the committed action.
+ *
+ * ⚠️ Refactoring Rationale: the show-details arm no longer asks its caller to re-read, and the
+ * reference is the reason rather than a preference. Its concurrency arm at `app/cbl/COACTUPC.cbl`
+ * L2610 to L2612 does exactly two things -- `SET ACUP-SHOW-DETAILS TO TRUE` and move the changed-record
+ * sentence -- and performs NO read; the explicit `9000-READ-ACCT` in that same `EVALUATE` belongs to
+ * the PF12 arm at L2572 to L2580. The screen the reference then sends is painted by
+ * `3202-SHOW-ORIGINAL-VALUES`, which redisplays the `ACUP-OLD-*` before-image it captured at the read.
+ * So the reference neither re-reads on this outcome nor blanks the screen, and the re-read this arm
+ * used to request was a browser invention that emptied the form.
  *
  * Assumptions: the concurrency refusal is recognised through `isConflictFailure`, the predicate the
  * transport module exports, and never by comparing a status here. That module records why: a literal
@@ -1541,7 +1800,7 @@ export interface SaveRejection {
  * the catalog and are rendered when the service's own document supplies one.
  * @param {unknown} failure - The caught value from the update call, of unknown provenance.
  * @returns {SaveRejection} The action to move to, the sentence to render, any field errors and
- *   whether to re-read.
+ *   whether the refusal was the concurrency one.
  */
 export function classifySaveRejection(failure: unknown): SaveRejection {
   if (isConflictFailure(failure)) {
@@ -1552,23 +1811,35 @@ export function classifySaveRejection(failure: unknown): SaveRejection {
         severity: 'error',
       },
       fieldErrors: [],
-      reread: true,
+      concurrency: true,
     };
   }
   if (isApiRequestError(failure) && failure.problem.fieldErrors.length > 0) {
-    const [first] = failure.problem.fieldErrors;
-
     return {
       action: 'CHANGES_NOT_OK',
       statement: {
-        message: first === undefined ? failure.problem.message : first.message,
+        message: headlineForFieldErrors(failure.problem.fieldErrors, failure.problem.message),
         severity: 'error',
       },
       fieldErrors: failure.problem.fieldErrors,
-      reread: false,
+      concurrency: false,
     };
   }
 
+  /*
+   * WHY : ⚠️ Alternatives Considered: selecting the authored transient sentence here as well, the way
+   *       {@link readFailureMessage} now does for a read that never reached the service. DECLINED, and
+   *       the asymmetry is deliberate: a read that timed out changed nothing, so `Try again shortly`
+   *       is both true and safe, whereas a WRITE whose answer never arrived has an unknown outcome --
+   *       the service may have committed it -- and inviting a retry is inviting a second write of the
+   *       same record. The reference's own sentence for a refused rewrite is kept because it is the
+   *       conservative statement: the operator is told the update did not happen and is left to
+   *       re-read, which is what the following turn's Enter or F12 does.
+   * WHY : Trade-offs: an operator whose write timed out is told slightly less than the truth -- "did
+   *       not complete" would be more precise than "failed" -- and that cost is accepted against the
+   *       alternative, which is a duplicate money-affecting write. The service's own sentence still
+   *       wins whenever it supplies one.
+   */
   return {
     action: 'CHANGES_OKAYED_BUT_FAILED',
     statement: {
@@ -1579,7 +1850,7 @@ export function classifySaveRejection(failure: unknown): SaveRejection {
       severity: 'error',
     },
     fieldErrors: [],
-    reread: false,
+    concurrency: false,
   };
 }
 
@@ -1598,6 +1869,35 @@ export function classifySaveRejection(failure: unknown): SaveRejection {
 export function readFailureMessage(failure: unknown): string {
   if (isApiRequestError(failure) && failure.problem.message !== null) {
     return failure.problem.message;
+  }
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: a failure that never reached the service is reported as one, and it
+   *       used to be reported as a missing account. The transport module distinguishes four failures
+   *       and only `PROBLEM` is the service answering -- a timeout, a network failure and an
+   *       unreadable body all carry a SYNTHESISED document whose `message` is null, so they fell
+   *       through to the account-master sentence and told the operator their account does not exist
+   *       when what happened is that nothing answered. That is a false statement about their data, and
+   *       it sends them to check an identifier that was correct.
+   * WHY : ⚠️ Assumptions: the two authored sentences are selected on the module's own transience
+   *       classification rather than on a status list restated here, and the service's own sentence
+   *       still wins over both -- the branch above returns first. The order is the catalog's stated
+   *       one: a supplied sentence verbatim, then transient, then persistent.
+   * WHY : Trade-offs: the account-master sentence remains the fallback for a service document that
+   *       carries no message, which is the case it was written for. `ui/src/api/accounts.ts` records
+   *       that a missing account, a missing cross-reference row and a missing customer row are all
+   *       answered as one status, so a document-carrying refusal with no words is still most likely
+   *       that miss; only the no-answer cases are moved off it.
+   * WHY : Assumptions: the transient sentence INVITES a repeat and offers no control for one, and that
+   *       is deliberate rather than unfinished. A repeat control belongs behind `isRepeatableFailure`
+   *       and not behind transience -- the transport module records that the two differ precisely
+   *       where it matters, since a gateway failure on a write is transient and not repeatable -- and
+   *       this screen's repeat is a key the operator already has: Enter re-reads. Rendering a second
+   *       control for it would duplicate an advertised key, so nothing here consults that predicate and
+   *       anything added later must.
+   */
+  if (isApiRequestError(failure) && failure.kind !== 'PROBLEM') {
+    return isTransientFailure(failure) ? TRANSIENT_FAILURE_TRY_AGAIN : PERSISTENT_FAILURE_REPORT_IT;
   }
 
   return MESSAGES.DID_NOT_FIND_ACCT_IN_ACCTDAT.text;
@@ -1654,6 +1954,79 @@ const UNEXPECTED_DATA_SCENARIO_ABEND = {
 export function fieldDomId(field: AccountUpdateFieldName): string {
   return `carddemo-account-update-${field}`;
 }
+
+/**
+ * Composes the element identifier of one part group's painted caption.
+ *
+ * Purpose: give the caption an identifier so the group of parts beneath it can name itself by
+ * REFERENCE, which is what makes the painted words and the announced words provably the same words.
+ * @param {AccountUpdateFieldName} firstPart - The group's first part, which names the group.
+ * @returns {string} A per-group element identifier, stable across renders.
+ */
+export function groupCaptionDomId(firstPart: AccountUpdateFieldName): string {
+  return `${fieldDomId(firstPart)}-group-caption`;
+}
+
+/** The ARIA wiring one part group needs: a named group, and a caption bound to its first part. */
+export interface PartGroupAria {
+  /** Props for the group element, naming it by reference to the painted caption. */
+  readonly group: { readonly role: 'group'; readonly 'aria-labelledby': string };
+  /** The control the painted caption's `for` attribute resolves to. */
+  readonly captionFor: string;
+  /** Identifier carried by the caption itself. */
+  readonly captionId: string;
+}
+
+/**
+ * Wires one part group's caption to its parts, so the visible grouping is not semantically inert.
+ *
+ * Purpose: seven captions on this screen title a GROUP of two or three boxes rather than one box --
+ * the four dates, the national identifier and both telephone numbers -- and a browser accessibility
+ * audit reported all seven as labels with nothing associated. The parts were each individually named
+ * already; what was missing was the group.
+ *
+ * ⚠️ Assumptions: the group is named by `aria-labelledby` rather than by a copy of the caption text in
+ * an `aria-label`. Referencing the painted element means the announced name IS the painted caption
+ * and cannot drift from it, where a copy is a second string that a later edit can leave behind.
+ *
+ * ⚠️ Assumptions: the caption additionally takes a `for` pointing at the group's FIRST part. Two
+ * separate things are wrong with a caption that points at nothing and only one of them is the missing
+ * group: the audit's own finding is a label with no associated field, and a caption that cannot be
+ * clicked to reach a control is a pointer affordance every other label on this screen has. Pointing it
+ * at the first part gives it both, and costs the part nothing -- its own `aria-label` still supplies
+ * its accessible name, because an explicit name takes precedence over an associated label.
+ *
+ * Alternatives Considered: a `fieldset` with a `legend`, which the audit also admits. Rejected on two
+ * counts -- it is raw markup where the design system supplies the grouping element, which AAP section
+ * 0.3.2 forbids, and `legend` carries its own block layout that would break the caption out of the
+ * form item's own label column, changing the measured reading order to fix an announcement.
+ * @param {AccountUpdateFieldName} firstPart - The group's first part, which names the group.
+ * @returns {PartGroupAria} The group props, the caption's target and the caption's identifier.
+ */
+export function partGroupAria(firstPart: AccountUpdateFieldName): PartGroupAria {
+  const captionId = groupCaptionDomId(firstPart);
+
+  return {
+    group: { role: 'group', 'aria-labelledby': captionId },
+    captionFor: fieldDomId(firstPart),
+    captionId,
+  };
+}
+
+/*
+ * WHY : ⚠️ Assumptions: the national identifier's wiring is resolved ONCE at module scope, where the
+ *       date and telephone groups resolve theirs inside their own renderer. The difference is that
+ *       those two are renderers called with a different first part each time -- four dates and two
+ *       numbers -- while this group is written out inline and has exactly one first part, so a value
+ *       recomputed on every render would be the same value every time.
+ * WHY : Assumptions: it sits AFTER the function it calls rather than beside the other identifier
+ *       constants above. A `const` initialiser runs where it is written, and although a `function`
+ *       declaration is hoisted and would in fact be callable from there, relying on that would make
+ *       the ordering of two apparently unrelated declarations load-bearing.
+ */
+
+/** The national-identifier group's ARIA wiring, whose first part is the leading three characters. */
+export const SSN_GROUP_ARIA = partGroupAria('ssnPart1');
 
 /**
  * The form members for which the character `'*'` is a real update instruction rather than a marker.
@@ -1815,6 +2188,51 @@ export function AccountUpdateScreen(): ReactElement {
   const [abended, setAbended] = useState(false);
 
   /*
+   * WHY : ⚠️ Purpose: WHICH key's press is responsible for the read currently outstanding. It exists
+   *       because two keys reach one reader -- the Enter fetch and the F12 cancel both perform the
+   *       reference's `9000-READ-ACCT` -- so the in-flight flag alone cannot say whose turn it is, and
+   *       the busy affordance is a claim about a specific control.
+   * WHY : ⚠️ Assumptions: it is set beside the in-flight flag and cleared beside it, at exactly the two
+   *       places that flag moves, so the pair cannot disagree. Deriving the owner from the change
+   *       action instead would answer wrongly on the cancel turn: cancel is admitted only from an
+   *       action the fetch also leaves the screen in, so both turns would look like Enter's.
+   * WHY : Trade-offs: `null` while nothing is outstanding rather than a third owner value. The absence
+   *       of a read is not a kind of read, and a `'NONE'` member would have to be excluded at every
+   *       comparison below.
+   */
+  const [readOwner, setReadOwner] = useState<ReadTurnOwner | null>(null);
+
+  /*
+   * WHY : ⚠️ Purpose: whether the LAST settled write was refused because another user had changed the
+   *       record, which is the one refusal that leaves the operator holding an edit the screen cannot
+   *       retry as it stands. It exists to paint the cancel legend on that turn and for nothing else.
+   * WHY : ⚠️ Assumptions: it is a flag of its own rather than a reading of the change action, because
+   *       the action the reference sets for this outcome -- show-details -- is the same action a local
+   *       no-change refusal and a plain fetch both set, and only ONE of those three needs the legend.
+   *       Deriving it from the action would light the legend on the other two as well, which would
+   *       advertise a discard on a turn that has nothing to discard.
+   * WHY : Alternatives Considered: an additional change action, say a concurrency-refused one. Rejected
+   *       because {@link ChangeAction} is a transcription of `ACUP-CHANGE-ACTION`'s `88` levels at
+   *       `app/cbl/COACTUPC.cbl` L654 to L668 and the reference declares no such level -- adding one
+   *       would put a value in a transcribed type that its source does not have, and every `switch` over
+   *       it would then carry an arm with no oracle behind it.
+   */
+  const [concurrencyRefused, setConcurrencyRefused] = useState(false);
+
+  /*
+   * WHY : ⚠️ Purpose: the control the cursor belongs on for the turn just settled, when the reference
+   *       names one that is not a refused field. It exists because `3300-SETUP-SCREEN-ATTRS`'s cursor
+   *       table has SEVEN arms and only five of them are field refusals -- the first two are outcomes,
+   *       and they were the two this screen did not transcribe.
+   * WHY : ⚠️ Assumptions: it is held as state rather than derived from the change action, because the
+   *       reference keys this table on the MESSAGE condition and not on the action: `FOUND-ACCOUNT-DATA`
+   *       and `NO-CHANGES-DETECTED` both set the show-details action, and so does a plain re-entry that
+   *       the table gives no cursor to at all. Reading the action would place a cursor on turns the
+   *       reference leaves alone.
+   */
+  const [cursorField, setCursorField] = useState<AccountUpdateFieldName | null>(null);
+
+  /*
    * WHY : ⚠️ Refactoring Rationale: every asynchronous turn on this screen is now sequenced by a token,
    *       where none of them was. The screen issues three kinds of request -- a read, a no-write
    *       validation and a write -- and each applied its outcome unconditionally, so any pair of them
@@ -1899,6 +2317,24 @@ export function AccountUpdateScreen(): ReactElement {
   const turnInFlight = loading || validating || saving;
 
   /*
+   * WHY : ⚠️ Purpose: which KEY owns the outstanding turn, split three ways so each legend control can
+   *       say whether the request in the air is its own. The combined flag above answers "a turn is
+   *       outstanding" and every control read it, so all four went inert together and none of them told
+   *       the operator which one they were waiting on.
+   * WHY : ⚠️ Assumptions: the validation request belongs to ENTER and the write to F5, which is this
+   *       screen's own two-turn ordering -- Enter validates, F5 writes -- so neither needs an owner
+   *       recorded; only the READ is reachable from two keys and only it consults {@link readOwner}.
+   * WHY : Assumptions: a control whose own turn is outstanding reports BUSY and a control whose turn
+   *       belongs to another key reports DISABLED, which is the distinction
+   *       `ui/src/layout/usePfKeys.ts` draws: busy stays present, enabled, focusable and named and
+   *       declines the press silently -- the terminal's input-inhibit -- while disabled greys the
+   *       control and reports the rejection. An operator therefore sees one working control and three
+   *       unavailable ones rather than four identical greyed ones.
+   */
+  const enterTurnIsOutstanding = validating || (loading && readOwner === 'ENTER');
+  const cancelTurnIsOutstanding = loading && readOwner === 'PFK12';
+
+  /*
    * WHY : Assumptions: the marker's colour is resolved by NAME through the token bridge to its
    *       CSS-variable reference, matching how `ui/src/screens/userUpdate/index.tsx` renders the same
    *       marker. Reading the resolved value instead would copy today's palette into an inline style and
@@ -1914,9 +2350,10 @@ export function AccountUpdateScreen(): ReactElement {
   /**
    * Publishes one sentence on the MESSAGE channel, the mapset's row-23 line.
    *
-   * Assumptions: this channel is the reference's `WS-RETURN-MSG` and carries refusals only. It is
-   * delegated to the shell, which paints row 23; the information channel is painted by this screen's
-   * own body because the mapset puts `INFOMSG` inside the screen's field area at row 22.
+   * ⚠️ Assumptions: this channel is the reference's `WS-RETURN-MSG` and carries refusals only. BOTH
+   * channels are delegated to the shell, which paints row 22 and row 23 adjacent as the mapset
+   * declares them -- the claim that the information channel is painted by this screen's own body was
+   * true of an earlier revision and the removal site records why it stopped being true.
    * @param {string | null} message - The sentence to render, or `null` to clear the channel.
    * @param {MessageBandSeverity} severity - Appearance for the sentence: `error` for a refusal and
    *   `success` for the one acknowledgement this channel carries.
@@ -1953,10 +2390,12 @@ export function AccountUpdateScreen(): ReactElement {
      * turn and the cancel turn, the latter at `app/cbl/COACTUPC.cbl` L2572 to L2580, which re-reads
      * rather than restoring its snapshot so a cancel shows the record as it stands now.
      * @param {string} accountId - The identifier to read, as the operator typed it.
+     * @param {ReadTurnOwner} owner - Which key's arm asked for this read, so the busy affordance can
+     *   name the one control responsible for it.
      * @returns {Promise<boolean>} Resolves `true` when the record was read and the form seeded, and
      *   `false` when the read was refused, in which case the band already carries the refusal.
      */
-    async (accountId: string): Promise<boolean> => {
+    async (accountId: string, owner: ReadTurnOwner): Promise<boolean> => {
       /*
        * WHY : Assumptions: the turn opens BEFORE the request and every state change below is gated on
        *       it still being current. Seeding the form is the most damaging outcome to apply late,
@@ -1965,6 +2404,13 @@ export function AccountUpdateScreen(): ReactElement {
        */
       const token = beginTurn();
       setLoading(true);
+      /*
+       * WHY : Assumptions: the owner is recorded here, beside the flag it qualifies, rather than by
+       *       each caller before it calls. One writer for a pair of values that describe one fact is
+       *       what stops them disagreeing -- a caller that set the owner and then took an early return
+       *       would leave an owner with no read.
+       */
+      setReadOwner(owner);
       setFieldErrors(new Map());
       try {
         const read = await readAccountView(accountId);
@@ -2050,6 +2496,22 @@ export function AccountUpdateScreen(): ReactElement {
           governmentIssuedIdMasked: populated.customer.governmentIssuedIdMasked,
         });
 
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the cursor is placed on the account status field once the read
+         *       has seeded the form, and it was left wherever the re-render dropped it. A browser review
+         *       measured the consequence -- `document.activeElement` was the document BODY after the
+         *       fetch turn -- so a keyboard operator was returned to the top of the document and had to
+         *       traverse the skip link, the sign-off control and the whole title band to reach the forty
+         *       fields the read had just unlocked.
+         * WHY : ⚠️ Assumptions: the field is not a choice made here. `3300-SETUP-SCREEN-ATTRS`'s cursor
+         *       table opens with `WHEN FOUND-ACCOUNT-DATA ... MOVE -1 TO ACSTTUSL` at
+         *       `app/cbl/COACTUPC.cbl` L3008 to L3011, and `ACSTTUS` is the account status field --
+         *       `app/bms/COACTUP.bms` L94, the first `UNPROT` field the read unlocks. So the reference
+         *       places the cursor on exactly this control for exactly this outcome, and the five refusal
+         *       arms this screen already transcribed sit BELOW it in the same table.
+         */
+        setCursorField('activeStatus');
+
         return true;
       } catch (failure: unknown) {
         if (!isCurrentTurn(token)) {
@@ -2089,8 +2551,12 @@ export function AccountUpdateScreen(): ReactElement {
          *       above. It describes this screen's own outstanding request rather than the answer, so
          *       leaving it set on a superseded turn would disable the keys permanently -- the operator
          *       would be locked out by a request they had already replaced.
+         * WHY : Assumptions: the owner is retired here for the same reason and in the same breath. It
+         *       qualifies the flag, so an owner outliving it would leave a control claiming to be
+         *       working after its turn had answered.
          */
         setLoading(false);
+        setReadOwner(null);
       }
     },
     [],
@@ -2113,16 +2579,30 @@ export function AccountUpdateScreen(): ReactElement {
 
   useEffect(
     /**
-     * Places the cursor on the first marked control in the mapset's paint order.
+     * Places the cursor where the turn just settled says it belongs.
      *
      * Assumptions: this runs after the render that shows the marks, which is why it is an effect and
      * not part of the handler that set them -- the control cannot be focused before it carries its
      * error state. It reproduces `MOVE -1 TO <field>L`, and it addresses the control by the
      * identifier this module states rather than by a name the design system composes.
-     * @returns {void} Completion is the focus change, or nothing when no control was marked.
+     *
+     * ⚠️ Refactoring Rationale: it covers the whole of the reference's cursor table rather than only
+     * its refusal arms. It used to consider marked controls alone, so the two arms keyed on an OUTCOME
+     * placed no cursor at all -- and the successful fetch is one of them, which is why a keyboard
+     * operator was dropped at the top of the document after the turn that unlocked forty fields.
+     * @returns {void} Completion is the focus change, or nothing when the table names no control.
      */
-    function placeCursorOnFirstError(): void {
-      const target = firstFieldInError(fieldErrors);
+    function placeCursorForTheSettledTurn(): void {
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the named outcome is consulted BEFORE the refusal map, which is
+       *       the order `3300-SETUP-SCREEN-ATTRS` states -- `FOUND-ACCOUNT-DATA` and
+       *       `NO-CHANGES-DETECTED` are the first two arms of its cursor `EVALUATE` at
+       *       `app/cbl/COACTUPC.cbl` L3008 to L3011 and every field arm follows them. The order is
+       *       transcribed rather than reasoned about: the two cannot in fact co-occur, since neither
+       *       outcome carries field refusals, so following the source costs nothing and leaves nothing
+       *       to re-derive if a later arm is added.
+       */
+      const target = cursorField ?? firstFieldInError(fieldErrors);
       if (target === null) {
         return;
       }
@@ -2131,7 +2611,7 @@ export function AccountUpdateScreen(): ReactElement {
         element.focus();
       }
     },
-    [fieldErrors],
+    [cursorField, fieldErrors],
   );
 
   /**
@@ -2222,7 +2702,23 @@ export function AccountUpdateScreen(): ReactElement {
      *       withdrawal, its consequence and the two rejected alternatives are recorded in full where the
      *       coercion's own declaration used to live; this site is where it was still being applied.
      */
-    const accepted = overwritten;
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the entry is clamped to the field's DECLARED width here, where the
+     *       control's `maxLength` was the only limit and this line read `const accepted = overwritten`.
+     *       The clamp's own declaration records why `maxLength` alone is not enough -- it counts UTF-16
+     *       units, which is neither of the units a `PIC X(n)` field is declared in -- and this is the
+     *       single funnel every control's entry passes through, so applying it here covers all 43
+     *       rather than each render site remembering to.
+     * WHY : Assumptions: no character CLASS is filtered, which is unchanged. A stale comment on this
+     *       site claimed the stored value was "narrowed" to digits for the identifier, date-part,
+     *       credit-score and telephone-part fields; it described a coercion that had already been
+     *       withdrawn, and the withdrawal's own reasoning stands where the coercion was declared --
+     *       `app/bms/COACTUP.bms` puts `ATTRB=...NUM` on none of its 128 fields, so the terminal
+     *       accepts any character into any of them and `1245-EDIT-NUM-REQD` is what refuses one. Length
+     *       is a property of the FIELD and is enforced by the terminal; character class is a property
+     *       of the EDIT and is refused by the program. Only the first is done here.
+     */
+    const accepted = clampToDeclaredWidth(overwritten, ACCOUNT_UPDATE_FIELD_WIDTHS[field]);
     setValues(
       /**
        * Replaces one member of the previous form values.
@@ -2231,14 +2727,6 @@ export function AccountUpdateScreen(): ReactElement {
        */
       (previous: AccountUpdateFormValues): AccountUpdateFormValues => ({
         ...previous,
-        /*
-         * WHY : Refactoring Rationale: the NARROWED value is stored, where this wrote the raw entry and
-         *       left the narrowing computed and discarded. The mapset declares the identifier, date
-         *       part, credit-score and phone-part fields right-justified numeric entry and the reference
-         *       edits each with a numeric test, so a pasted separator or letter must not reach the field
-         *       at all. The five AMOUNTS are deliberately not narrowed -- they must be able to hold a
-         *       malformed entry so the service can refuse it in the reference's own words.
-         */
         [field]: accepted,
       }),
     );
@@ -2261,7 +2749,7 @@ export function AccountUpdateScreen(): ReactElement {
       return;
     }
 
-    readThenShowDetails();
+    readThenShowDetails('ENTER');
   }
 
   /**
@@ -2277,10 +2765,12 @@ export function AccountUpdateScreen(): ReactElement {
    * this arm is reached only by something escaping that reader -- and reporting the read-failure
    * sentence there leaves the operator with a stated outcome instead of a screen that silently never
    * populated.
+   * @param {ReadTurnOwner} owner - Which key's arm is performing this turn, handed straight to the
+   *   reader so the busy affordance names the control the operator pressed.
    * @returns {void} Completion is represented by the screen's own state.
    */
-  function readThenShowDetails(): void {
-    readAccount(values.accountId).then(
+  function readThenShowDetails(owner: ReadTurnOwner): void {
+    readAccount(values.accountId, owner).then(
       /**
        * Moves to the details action once the read has seeded the form.
        * @param {boolean} read - Whether the read succeeded.
@@ -2369,6 +2859,17 @@ export function AccountUpdateScreen(): ReactElement {
     if (!hasChanges(values, baseline)) {
       setFieldErrors(new Map());
       report(MESSAGES.NO_CHANGES_DETECTED.text, 'error');
+      /*
+       * WHY : ⚠️ Assumptions: the no-change refusal places the cursor on the account status field, and
+       *       it is the SECOND arm of the same table the fetch turn's placement comes from --
+       *       `WHEN NO-CHANGES-DETECTED` shares the `MOVE -1 TO ACSTTUSL` at `app/cbl/COACTUPC.cbl`
+       *       L3008 to L3011 with `WHEN FOUND-ACCOUNT-DATA`. Both are outcomes that leave the whole
+       *       record editable with no field singled out, so the reference returns the operator to the
+       *       first editable field rather than to nothing. All three places this refusal is published
+       *       set it, because the reference's table is keyed on the sentence and not on which path
+       *       produced it.
+       */
+      setCursorField('activeStatus');
       return;
     }
 
@@ -2415,6 +2916,9 @@ export function AccountUpdateScreen(): ReactElement {
         }
         if (verdict.noChangesFound) {
           report(verdict.message ?? MESSAGES.NO_CHANGES_DETECTED.text, 'error');
+          // WHY : Assumptions: the same cursor arm as the local no-change refusal above, for the same
+          //       reason and from the same table line.
+          setCursorField('activeStatus');
           return;
         }
         enterAction('CHANGES_OK_NOT_CONFIRMED');
@@ -2568,6 +3072,9 @@ export function AccountUpdateScreen(): ReactElement {
           if (applied.account.returnMessage === MESSAGES.NO_CHANGES_DETECTED.text) {
             enterAction('SHOW_DETAILS');
             report(MESSAGES.NO_CHANGES_DETECTED.text, 'error');
+            // WHY : Assumptions: the same cursor arm as the two no-change refusals above, for the same
+            //       reason and from the same table line.
+            setCursorField('activeStatus');
             return;
           }
 
@@ -2640,32 +3147,37 @@ export function AccountUpdateScreen(): ReactElement {
            */
           enterAction(rejection.action);
           report(rejection.statement.message, rejection.statement.severity);
-          if (rejection.reread) {
-            /*
-             * WHY : Assumptions: the record is re-read and the refusal is then RESTATED, and the
-             *       restatement is defensive rather than redundant: `readAccount` reports on its own
-             *       failure arm, so a re-read that itself fails must not leave the concurrency sentence
-             *       standing over values it did not reseed -- and a re-read that succeeds must not lose it.
-             *       Both channels stand together on this turn, which is what the reference shows.
-             */
-            readAccount(values.accountId).then(
-              /**
-               * Restates the concurrency refusal after the re-read has reseeded the form.
-               * @returns {void} Completion is represented by the screen's own state.
-               */
-              (): void => {
-                report(rejection.statement.message, rejection.statement.severity);
-              },
-              /**
-               * Reports a failure that escaped the reader's own handling.
-               * @param {unknown} readFailure - The caught value from the re-read.
-               * @returns {void} Completion is represented by the screen's own state.
-               */
-              (readFailure: unknown): void => {
-                report(readFailureMessage(readFailure), 'error');
-              },
-            );
-          }
+          /*
+           * WHY : ⚠️ Refactoring Rationale: a concurrency refusal now leaves the form EXACTLY as the
+           *       operator typed it, where it used to re-read the record and reseed every control from
+           *       the answer. A responsive review drove one and measured the result: 42 of 43 controls
+           *       came back empty, `F5=Save` and `F12=Cancel` were both withdrawn, and the sentence
+           *       asking the operator to review a changed record stood over a blank form -- so the turn
+           *       destroyed the work it was reporting on and offered no way to redo it. Both halves of
+           *       that were the re-read's doing: `readAccount`'s own failure arm blanks every value but
+           *       the account identifier, and its SUCCESS arm reseeds from the answer, so the edit was
+           *       lost whichever way the second request settled.
+           * WHY : ⚠️ Assumptions: not re-reading is what the reference does, and the citation is in
+           *       {@link classifySaveRejection}: the concurrency arm of `2000-DECIDE-ACTION` at
+           *       `app/cbl/COACTUPC.cbl` L2610 to L2612 sets the show-details action and the sentence and
+           *       performs no read, and `9600-WRITE-PROCESSING` at L3947 to L3951 leaves its
+           *       `ACUP-OLD-*` before-image untouched on the way out. Deleting the re-read therefore
+           *       removes a browser invention rather than dropping a transcribed step.
+           * WHY : ⚠️ Trade-offs: the values left standing are the operator's EDITS, where the reference
+           *       would repaint its captured before-image through `3202-SHOW-ORIGINAL-VALUES`. This is a
+           *       deliberate divergence and the trade is stated plainly: a terminal operator re-keyed a
+           *       24-row screen from a printed source and the reference could afford to discard their
+           *       entry, whereas discarding typed work in a browser is irreversible and is what the
+           *       review reported as the defect. The record as it now stands remains ONE keystroke away
+           *       -- `F12=Cancel` re-reads it -- so nothing the reference showed has become unreachable.
+           * WHY : Alternatives Considered: silently refreshing the revision from a background read while
+           *       keeping the operator's values, which would let the very next save succeed. Rejected as
+           *       unsafe: the operator would overwrite a change they were told about but never SAW, and
+           *       neither the reference nor this screen ever admits a write whose concurrency token came
+           *       from a record the operator had not been shown. The cancel turn is the path that shows
+           *       it to them, and it is now labelled.
+           */
+          setConcurrencyRefused(rejection.concurrency);
         },
       )
       /*
@@ -2727,7 +3239,7 @@ export function AccountUpdateScreen(): ReactElement {
    */
   function cancelEdits(): void {
     clearBandForNewTurn();
-    readThenShowDetails();
+    readThenShowDetails('PFK12');
   }
 
   /*
@@ -2756,10 +3268,25 @@ export function AccountUpdateScreen(): ReactElement {
    * Assumptions: only the MESSAGE channel is cleared. The information channel is DERIVED from the
    * change action by `enterAction`, exactly as `3250-SETUP-INFOMSG` derives it on every send, so it
    * is never stale and clearing it would blank row 22 for the rest of the turn.
+   *
+   * ⚠️ Assumptions: the concurrency standing is cleared HERE too, and it belongs here for the same
+   * reason the sentence does -- it describes the turn that produced it, and the reference's own first
+   * act on every task is to drop what the previous task latched. Clearing it in each arm that settles
+   * a turn instead would leave the arms that settle none -- the cancel turn among them -- advertising
+   * a discard for an edit that had already been discarded.
    * @returns {void} Completion is represented by the screen's own state.
    */
   function clearBandForNewTurn(): void {
     report(null, 'error');
+    setConcurrencyRefused(false);
+    /*
+     * WHY : ⚠️ Assumptions: the cursor target is dropped here for the same reason the sentence is --
+     *       it describes the turn that produced it. It also has to be dropped BEFORE the new turn
+     *       settles: the effect that acts on it also watches the refusal map, so a target left over
+     *       from a fetch would win against the refusals of the turn after it and pull the cursor off
+     *       the field the operator has to correct.
+     */
+    setCursorField(null);
   }
 
   /**
@@ -2770,9 +3297,32 @@ export function AccountUpdateScreen(): ReactElement {
    * reference does in its main branch at `app/cbl/COACTUPC.cbl` L968 to L989 by re-initialising its
    * work areas and setting the not-fetched action. The final arm is the branch the reference itself
    * treats as unreachable and abends on.
-   * @returns {void} Completion is represented by the screen's own state.
+   * @returns {void} Completion is represented by the screen's own state, and nothing happens at all
+   *   while a request is outstanding.
    */
   function processEnter(): void {
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the arm declines itself while a request is outstanding, and it did
+     *       not -- the key DESCRIPTOR declined, which is a different thing, because two of the three
+     *       ways into this arm never pass through it. The form's own `onFinish` is one: an Enter pressed
+     *       inside a field is claimed by the focused control, so `ui/src/layout/usePfKeys.ts` returns
+     *       before its handler lookup and the browser's native submit runs this directly. The
+     *       invalid-key coercion above is the other. The guard therefore belongs at the arm, where all
+     *       three paths meet.
+     * WHY : ⚠️ Assumptions: the whole in-flight flag is tested rather than Enter's own share of it. A
+     *       second Enter would duplicate the request this one already has outstanding, and an Enter
+     *       during ANOTHER key's turn would settle this screen's action over an answer still arriving --
+     *       which is the race `beginTurn` exists to catch and this declines before it starts.
+     * WHY : ⚠️ Assumptions: it returns SILENTLY, before `clearBandForNewTurn`. A press that starts no turn
+     *       must not blank the sentence the outstanding turn is about to answer with, and it must not
+     *       report anything either: this is the 3270 input-inhibit state, where a key pressed while the
+     *       terminal was working was absorbed rather than refused, which is the same treatment the busy
+     *       affordance on the key gives the descriptor path.
+     */
+    if (turnInFlight) {
+      return;
+    }
+
     clearBandForNewTurn();
 
     switch (action) {
@@ -2860,6 +3410,28 @@ export function AccountUpdateScreen(): ReactElement {
       return;
     }
     clearBandForNewTurn();
+    /*
+     * WHY : ⚠️ Assumptions: the anchor is brought onto the display BEFORE the gate is opened, and the
+     *       order is the whole of it. The design system measures its anchor at the moment it opens, so
+     *       scrolling afterwards would leave the surface positioned against where the anchor used to be.
+     *       Refactoring Rationale: a browser pass measured what the absence cost. This screen is the
+     *       longest in the application -- its body measured 3567 pixels tall at a 375-pixel width against
+     *       a 486-pixel visible band -- and the trigger sits below all forty editable fields, at
+     *       `top: 2468`. Taking the turn from the function-key legend needs no pointer and therefore no
+     *       scrolling, so the surface opened at `top: 2379`, roughly fifteen hundred pixels below a
+     *       900-pixel display, with BOTH answers outside it and the focus placed on a Cancel control the
+     *       operator could not see. Pressing the save key produced no visible change at all. The same
+     *       surface raised with the trigger in view measured fully inside the display, so the anchor's
+     *       position is the whole of it.
+     *       Assumptions: `block: 'nearest'` is the least movement that can work and is a no-op when the
+     *       anchor is already fully visible -- the pointer operator's case, since they just clicked it --
+     *       so a route that never had the defect is not given a jolt to fix it.
+     *       Alternatives Considered: leaving it to the design system's own overflow handling.
+     *       `autoAdjustOverflow` is already on and cannot help, because an anchor BELOW the display has no
+     *       side that is inside it. The sibling `ui/src/screens/transactionAdd/index.tsx` reached the same
+     *       conclusion from the same measurement, which is why both screens now scroll the anchor first.
+     */
+    saveConfirmationAnchor.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     setConfirmingSave(true);
   }
 
@@ -2876,9 +3448,76 @@ export function AccountUpdateScreen(): ReactElement {
     cancelEdits();
   }
 
+  /*
+   * WHY : ⚠️ Purpose: holds the control the save gate anchors itself to, so the gate can be brought onto
+   *       the display before it is asked. {@link requestSaveConfirmation} records the measurement that
+   *       makes this necessary and why the design system's own overflow handling cannot substitute.
+   * WHY : Assumptions: the ref is on the in-content trigger rather than on the legend key, because the
+   *       trigger is what the design system positions the surface against -- the legend key opens the
+   *       same gate but is not its anchor, so scrolling to the legend would move the view without moving
+   *       the surface.
+   */
+  const saveConfirmationAnchor = useRef<HTMLButtonElement | null>(null);
+
   const cancelIsValid = action !== 'DETAILS_NOT_FETCHED';
   const saveIsValid = action === 'CHANGES_OK_NOT_CONFIRMED';
-  const cancelLegendIsPainted = isChangesMade(action) && action !== 'CHANGES_OKAYED_AND_DONE';
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the cancel legend is painted on a concurrency-refused turn as well
+   *       as across the changes-made group, where the group alone used to decide it. The key was ALWAYS
+   *       bound on that turn -- `cancelIsValid` holds for every action but the unfetched one, which is
+   *       the reference's own test at `app/cbl/COACTUPC.cbl` L905 to L916 -- so what was missing was the
+   *       label and not the behaviour, and a bound key with no label is a key an operator cannot find.
+   *       A responsive review reported exactly that as the refusal leaving "no way forward".
+   * WHY : ⚠️ Trade-offs: the mapset would leave this legend dark on that turn, because
+   *       `3390-SETUP-INFOMSG-ATTRS` un-darkens it for the changes-made group and the concurrency
+   *       outcome sets show-details instead. The divergence is taken deliberately and it is narrow: a
+   *       3270 operator worked from a printed keyboard template on which PF12 was cancel everywhere, so
+   *       a dark legend cost them nothing, whereas in a browser the legend bar is the ONLY place a key
+   *       is advertised. Painting a label for a handler that already exists adds no behaviour.
+   * WHY : Alternatives Considered: ARMING `F5=Save` on that turn too, which the review also asked for.
+   *       Declined, and the ordering is the reason: the fields are editable again in show-details, so a
+   *       save key on the same turn would write entries no validation step had seen -- the reference
+   *       admits PF05 only in the validated action, at L905 to L916, and this screen's own two-turn
+   *       ordering exists to keep that true. The save key is re-ARMED on the next Enter, which is the
+   *       turn that validates what the operator is about to write. ⚠️ Painting it is a separate question
+   *       from arming it and is answered separately, immediately below.
+   */
+  const cancelLegendIsPainted =
+    (isChangesMade(action) && action !== 'CHANGES_OKAYED_AND_DONE') || concurrencyRefused;
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the save key is PAINTED on a concurrency-refused turn and it used to
+   *       be withdrawn from the screen entirely, because its whole descriptor was registered inside
+   *       `saveIsValid ? { PFK05: ... } : {}`. A browser review measured the consequence: after the 409
+   *       the legend held `F12=Cancel` enabled and `F5=Save` was ABSENT from both the legend and the
+   *       in-screen confirmation area. A key that disappears tells the operator the action does not
+   *       exist, where the truth is that it is not available on this turn -- and it is the one key that
+   *       finishes the work they had just been refused, so its absence is what makes the refusal read as
+   *       a dead end.
+   * WHY : ⚠️ Assumptions: the remedy is DISABLED and not removed, which is the contract this tree already
+   *       states. `ui/src/layout/PfKeyBar.tsx` records it against `app/cbl/COACTUPC.cbl` L905 to L916:
+   *       the reference admits an invalid attention key and reduces it to a screen refresh rather than
+   *       reporting it, and a disabled control is the closest browser equivalent -- present, labelled,
+   *       inert. The BEHAVIOUR the note above declines is unchanged: `disabled` keeps the key from
+   *       reaching `requestSaveConfirmation`, so nothing is written and no confirmation can open until an
+   *       Enter turn has re-validated the entries.
+   * WHY : ⚠️ Trade-offs: the mapset would leave this legend dark on that turn, exactly as it would the
+   *       cancel legend -- `app/bms/COACTUP.bms` L498 to L507 declares `FKEY05` and `FKEY12` as
+   *       `ATTRB=(ASKIP,DRK)` and `3390-SETUP-INFOMSG-ATTRS` at `app/cbl/COACTUPC.cbl` L3566 to L3584
+   *       reveals `FKEY05` only for `PROMPT-FOR-CONFIRMATION`, while the 409 arm at L2607 to L2612 sets
+   *       the show-details action. So this is the SAME narrow divergence already declared for the cancel
+   *       legend above and taken for the same reason: on a terminal the key was advertised on a printed
+   *       template whatever the field's attribute, and in a browser the legend bar is the only place it
+   *       is advertised at all. `PfKeyBar` deliberately supports both treatments -- omit the descriptor
+   *       for a legend that must vanish, disable it for one that must stay -- so choosing is a stated
+   *       decision rather than an invented one.
+   * WHY : Assumptions: the predicate is the CANCEL predicate's counterpart and not a copy of it. The
+   *       save key is advertised on the turn the mapset reveals it and on the refused turn that follows
+   *       a save the operator has already asked for; it is NOT advertised before a record is fetched or
+   *       on a turn with nothing pending, because there was never anything for the operator to watch
+   *       vanish there and a disabled control on an untouched form advertises work that does not exist.
+   */
+  const saveLegendIsPainted = saveIsValid || concurrencyRefused;
 
   /*
    * WHY : ⚠️ Assumptions: the three keys that ISSUE a request stand down while one is outstanding, and
@@ -2904,7 +3543,29 @@ export function AccountUpdateScreen(): ReactElement {
        */
       onInvoke: processEnter,
       label: ACCOUNT_UPDATE_KEY_LABELS.ENTER,
-      disabled: turnInFlight,
+      /*
+       * WHY : ⚠️ Refactoring Rationale: this key reports its own outstanding turn as BUSY where it used
+       *       to report it as `disabled`, and the two are different claims. Disabled says the action is
+       *       unavailable; busy says it is running -- which is what is true of the key the operator has
+       *       just pressed, and which the design system renders as a spinner on that one control while
+       *       the others grey. The double-submit the `disabled` flag existed to prevent is still
+       *       prevented: `ui/src/layout/usePfKeys.ts` declines a busy key silently and the design
+       *       system's own button refuses a click while it is loading.
+       * WHY : ⚠️ Assumptions: `disabled` now means "a turn that is NOT mine is outstanding". Enter's arm
+       *       must not run while the write it queued is still in the air, and it must not run while the
+       *       cancel turn is re-reading -- either would settle a turn over an answer still arriving --
+       *       so the exclusion is of the other keys' turns rather than of all of them.
+       * WHY : Assumptions: risk is `read-only` because that is what the ACTION does, not what the key
+       *       is called. `ENTER=Process` fetches on the not-fetched action and asks the service's
+       *       non-writing check on the details actions; the write is behind F5 alone, which is the
+       *       ordering `app/cbl/COACTUPC.cbl` L905 to L916 enforces by admitting PF05 only in the
+       *       validated action. The visible consequence is intended: the emphasis fallback treats ENTER
+       *       as a primary action for a screen that has not opted in, and this screen now leaves the
+       *       single primary emphasis on the one control that mutates.
+       */
+      risk: 'read-only',
+      busy: enterTurnIsOutstanding,
+      disabled: turnInFlight && !enterTurnIsOutstanding,
     },
     PFK03: {
       /**
@@ -2919,8 +3580,28 @@ export function AccountUpdateScreen(): ReactElement {
         navigateSafely(navigate, MAIN_MENU_ROUTE);
       },
       label: ACCOUNT_UPDATE_KEY_LABELS.PFK03,
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the exit key stands down while a WRITE is in flight, and it was
+       *       the one key on this screen with no such condition -- Enter, save and cancel all carried one
+       *       already. A browser review measured it enabled and undimmed during the mutating request, so
+       *       an operator could leave for the menu while the record was being written and never learn
+       *       whether it was: the answer arrives at a screen that has unmounted, and the outcome is
+       *       neither shown nor recoverable.
+       * WHY : ⚠️ Trade-offs: it is gated on the write alone rather than on the combined in-flight flag
+       *       the other three keys use, and the difference is deliberate. Leaving during a read or a
+       *       validation abandons nothing -- neither mutates -- and the checkpoint's own contract for
+       *       this key is that it goes back WITHOUT mutation, so withdrawing it from turns that cannot
+       *       mutate would take away an escape while protecting nothing. The narrower gate closes the
+       *       measured defect and leaves the operator a way out of every other turn.
+       * WHY : Assumptions: risk is `read-only` and no busy channel is opened. This key issues no
+       *       request at all -- it navigates -- so it has no turn of its own to report, and a screen
+       *       that reported busy here would reserve the affordance's box on a control that can never
+       *       fill it.
+       */
+      risk: 'read-only',
+      disabled: saving,
     },
-    ...(saveIsValid
+    ...(saveLegendIsPainted
       ? {
           PFK05: {
             /**
@@ -2932,7 +3613,27 @@ export function AccountUpdateScreen(): ReactElement {
              */
             onInvoke: requestSaveConfirmation,
             label: ACCOUNT_UPDATE_KEY_LABELS.PFK05,
-            disabled: turnInFlight,
+            /*
+             * WHY : ⚠️ Assumptions: the descriptor is registered whenever the legend is painted and its
+             *       AVAILABILITY is carried here, which is the disabled-not-removed remedy recorded at
+             *       {@link saveLegendIsPainted}. The `!saveIsValid` term is what covers the
+             *       concurrency-refused turn -- the only turn on which the legend is painted without the
+             *       action being admitted -- and the second term stands the key down while ANOTHER
+             *       key's turn is outstanding.
+             * WHY : ⚠️ Assumptions: risk is `mutating` because this is the one key on the screen whose
+             *       action writes -- `app/bms/COACTUP.bms` L502 paints it `F5=Save` and
+             *       `app/cbl/COACTUPC.cbl` reaches its rewrite from this arm alone. The emphasis
+             *       primitive resolves `mutating` to the solid primary treatment, so with ENTER now
+             *       declared read-only this is the single emphasised control on the bar and the emphasis
+             *       marks the consequence rather than the position.
+             * WHY : ⚠️ Assumptions: its OWN turn -- the write -- is reported through `busy` rather than
+             *       through `disabled`, so the control the operator pressed to commit stays present and
+             *       spins instead of greying out at the moment they most need to know it is working.
+             *       The second press is still refused, on both the key path and the pointer path.
+             */
+            risk: 'mutating',
+            busy: saving,
+            disabled: !saveIsValid || (turnInFlight && !saving),
           },
         }
       : {}),
@@ -2947,7 +3648,19 @@ export function AccountUpdateScreen(): ReactElement {
              */
             onInvoke: cancelEdits,
             label: cancelLegendIsPainted ? ACCOUNT_UPDATE_KEY_LABELS.PFK12 : '',
-            disabled: turnInFlight,
+            /*
+             * WHY : Assumptions: risk is `read-only`, which is what `F12=Cancel` DOES here rather than
+             *       what the word cancel suggests. The reference's PF12 arm at `app/cbl/COACTUPC.cbl`
+             *       L2572 to L2580 discards the uncommitted entry and performs `9000-READ-ACCT`, so
+             *       nothing is written and nothing durable is destroyed -- the destructive treatment
+             *       would assert a consequence this key does not have.
+             * WHY : ⚠️ Assumptions: its own re-read is reported through `busy`, which is the reason
+             *       {@link readOwner} exists: this key and ENTER reach one reader, so without the owner
+             *       a cancel in flight would spin ENTER's control instead of this one.
+             */
+            risk: 'read-only',
+            busy: cancelTurnIsOutstanding,
+            disabled: turnInFlight && !cancelTurnIsOutstanding,
           },
         }
       : {}),
@@ -2983,6 +3696,12 @@ export function AccountUpdateScreen(): ReactElement {
       if (rejection.reason === 'disabled') {
         return;
       }
+      /*
+       * WHY : ⚠️ Assumptions: no in-flight guard stands here, because the arm it coerces into carries its
+       *       own -- recorded at {@link processEnter}. It matters that the guard is THERE and not here:
+       *       this is one of three ways into that arm, and the other two are the key descriptor and the
+       *       form's own submit, so a guard on this path alone would leave the other two open.
+       */
       processEnter();
     },
   });
@@ -2992,9 +3711,10 @@ export function AccountUpdateScreen(): ReactElement {
    *       the shell instead of painting them itself. `ui/src/layout/AppShell.tsx` is mounted as
    *       the authenticated layout route, so the frame is painted once above the outlet rather
    *       than rebuilt per screen; a screen that also painted them would show two title bands
-   *       and two legends. The row-22 INFORMATIONAL band stays local, because the mapset declares
-   *       that line inside the screen's own field area at `POS=(22,23)`; the row-23 message line is
-   *       delegated below, so exactly one element paints each of the four rows.
+   *       and two legends. BOTH message rows are delegated below as well -- row 22 and row 23 -- so
+   *       exactly one element paints each of the four rows and the two adjacent lines are painted
+   *       adjacent, which is the arrangement the mapset declares and the reason recorded at the
+   *       removal site.
    * WHY : ⚠️ Assumptions: the legend is delegated rather than dropped, so the SCREEN keeps
    *       owning the keyboard -- `bindings` and `invoke` come from this screen's own `usePfKeys`
    *       call and travel up unchanged, and an activation of a rendered legend control is
@@ -3032,6 +3752,27 @@ export function AccountUpdateScreen(): ReactElement {
       text: statement.message,
       severity: statement.severity,
       mapset: ACCOUNT_UPDATE_MAPSET,
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the row-22 INFORMATION line is delegated as well, where this
+       *       screen rendered its own band for it inside the form. The band's removal site records what a
+       *       responsive review measured -- the screen's advisory roughly 1688 to 3040 pixels down the
+       *       document with the frame's reserved row-22 zone standing empty above it -- and this is the
+       *       other half of that change.
+       * WHY : Assumptions: the severity is stated as `info` rather than left to the slot's own default of
+       *       `neutral`. The mapset declares `INFOMSG` `COLOR=NEUTRAL`, which is what that default is
+       *       measured from, and this screen's line is nonetheless an ADVISORY the operator is meant to
+       *       act on -- `3250-SETUP-INFOMSG` derives it from the change action and it reads as an
+       *       instruction on every turn -- so the appearance the band carried while it was local is kept
+       *       rather than quietly changed by the move. Keeping it also means the move is observable in
+       *       exactly one property, the band's position, which is what was wrong with it.
+       * WHY : Assumptions: no `mapset` is passed here, because the slot declares none: the display width
+       *       belongs to the mapset and a screen stands in for exactly one, so the width published on the
+       *       message slot governs both bands.
+       */
+      information: {
+        text: information,
+        severity: 'info',
+      },
     },
     pfKeys: {
       keys: bindings,
@@ -3113,12 +3854,90 @@ export function AccountUpdateScreen(): ReactElement {
    */
   function renderField(spec: FieldRenderSpec): ReactElement {
     const error = fieldErrors.get(spec.field);
-    const editable = isFieldEditable(action, spec.field);
+    /*
+     * WHY : ⚠️ Refactoring Rationale: a write in flight protects the control, where the action alone used
+     *       to decide it. A browser review measured every record field reporting `disabled: false` and a
+     *       text cursor while the mutating request was in the air, so a value could be retyped after the
+     *       body carrying the previous value had already left -- the operator then reads their new entry
+     *       on screen while the record stores the old one, with nothing to tell them the two differ.
+     * WHY : ⚠️ Assumptions: this is the terminal's own behaviour rather than an addition. A CICS
+     *       pseudo-conversational turn inhibits the keyboard from the send until the next receive, so the
+     *       reference has no in-flight state in which typing is possible at all -- there is no arm of
+     *       `3300-SETUP-SCREEN-ATTRS` to cite because the situation cannot arise there. Protecting for
+     *       the duration of the turn is what makes the browser match it.
+     * WHY : ⚠️ Trade-offs: it is gated on the WRITE alone and not on the combined in-flight flag the keys
+     *       use. A read seeds the form and a validation is already invalidated by any keystroke --
+     *       `recordEntry` discards turns in flight, so a verdict for superseded values cannot land -- and
+     *       neither loses an operator's work if they keep typing. Only the write composes its body up
+     *       front and cannot be recalled, so only the write needs the fields held still. Locking on all
+     *       three would freeze forty controls during a read that has nothing to protect.
+     */
+    const editable = isFieldEditable(action, spec.field) && !saving;
     const isBlankRefusal = error !== undefined && error.state === 'BLANK';
     const markerBesideControl = MARKER_BEARING_FIELDS.has(spec.field);
     const numeric = spec.numeric === true;
-    const controlStyle: CSSProperties =
-      spec.fixedPitch === true ? { fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] } : {};
+    /*
+     * WHY : ⚠️ Refactoring Rationale: every control is now sized from the character width its own
+     *       copybook PICTURE clause declares, where all 43 shared one full-width rule. A browser review
+     *       measured what that produced: `Opened :`, `Expiry :` and `Reissue:` each painted three boxes
+     *       of IDENTICAL width -- 146, 147 and 146 pixels -- so the four-digit year box and the
+     *       two-digit month box were the same size, and `Active Y/N:` painted a 446-pixel box at 992
+     *       and a 723-pixel box at 1600 for ONE character, dimensionally identical to the five
+     *       twelve-character money fields beside it. The defect grew with the viewport, because nothing
+     *       in the rule referred to the data.
+     * WHY : ⚠️ Assumptions: the width comes from {@link ACCOUNT_UPDATE_FIELD_WIDTHS}, which is the
+     *       transcribed record layout this module already keys `maxLength` and the clamp on -- so the
+     *       box a field paints and the value it can hold are now stated ONCE. Sizing them separately is
+     *       what let a one-character field paint at 45 per cent of the viewport.
+     * WHY : Assumptions: the helper returns a MAXIMUM beside `inlineSize: '100%'`, not a fixed size, so
+     *       the two fifty-character address lines still shrink to fit a phone rather than forcing the
+     *       page to scroll sideways. Design gap G1 in AAP section 0.3.4 already surrenders
+     *       pixel-for-character positioning; this keeps relative SIZE, which is what makes a year box
+     *       read as wider than a month box.
+     */
+    /*
+     * WHY : ⚠️ Refactoring Rationale: the marker slot is declared to the measure for the marker-BEARING
+     *       fields and not for the others, which is the same split the suffix itself follows below. With
+     *       a suffix present the design system sizes the affix WRAPPER, whose space the value and the
+     *       slot then share, so a maximum computed for the value alone leaves the value short by
+     *       whatever the slot takes -- measured on a sibling screen's two-character field as a record
+     *       key that rendered as one glyph and a sliver.
+     *       Assumptions: the allowance is UNCONDITIONAL for a marker-bearing field rather than keyed to
+     *       the refusal, because the trade-off recorded below holds that field's suffix element in every
+     *       state so the control does not lose focus when the marker appears. The box therefore shares
+     *       its space in every state too, and a measure that only allowed for the slot on a refused turn
+     *       would be wrong on the turns in between. Every other field writes the marker INTO its value
+     *       and carries no suffix at all, so it reserves nothing.
+     */
+    const controlStyle: CSSProperties = {
+      ...copybookFieldWidthStyle(
+        ACCOUNT_UPDATE_FIELD_WIDTHS[spec.field],
+        cssVar,
+        markerBesideControl ? BLANK_FIELD_MARKER_CHARACTERS : 0,
+      ),
+      ...(spec.fixedPitch === true ? { fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData] } : {}),
+      /*
+       * WHY : ⚠️ Refactoring Rationale: a control the operator cannot type into is painted on the design
+       *       system's own unavailable surface, where it used to keep the same white background as an
+       *       editable one. A browser review measured the consequence twice over: the read-only fields
+       *       were `rgb(255,255,255)`, indistinguishable from editable except by border, and the
+       *       read-only account number was reported as the one field that looked ACTIVE beside its
+       *       editable neighbours -- so the single field that cannot be edited was the one advertising
+       *       that it could.
+       * WHY : ⚠️ Trade-offs: the surface is borrowed from the disabled state while the control stays
+       *       `readOnly`, deliberately, and the two halves answer different requirements. `disabled`
+       *       would give the same surface for free but removes the control from the focus order and from
+       *       the accessibility tree, which is exactly why this screen stopped using it -- a refusal
+       *       keyed to one of the three never-editable fields would mark a control the keyboard cannot
+       *       reach and a screen reader does not announce. Painting the surface without taking the
+       *       reachability keeps both properties instead of trading one for the other.
+       * WHY : Assumptions: the token is read as a `cssVar` member rather than through a named map in
+       *       `ui/src/theme/tokens.ts`, which is the established form for a token no BMS role maps to --
+       *       `ui/src/layout/MessageBand.tsx` and `ui/src/layout/ScreenTitle.tsx` both read theirs the
+       *       same way. It is still a design-system token and not a literal colour.
+       */
+      ...(editable ? {} : { backgroundColor: cssVar.colorBgContainerDisabled }),
+    };
     const blankMarkerStyle: CSSProperties = { color: cssVar[FIELD_ERROR_TOKENS.errorColor] };
 
     /*
@@ -3202,6 +4021,17 @@ export function AccountUpdateScreen(): ReactElement {
             : {})}
           maxLength={ACCOUNT_UPDATE_FIELD_WIDTHS[spec.field]}
           {...(editable ? {} : { readOnly: true })}
+          /*
+            WHY : ⚠️ Assumptions: the busy state is announced on the control as well as being enforced by
+                  the protection above, because the two answer different questions. `readOnly` stops the
+                  typing; `aria-busy` is what tells an assistive technology WHY the field it was just
+                  editing has stopped accepting characters. Without it the control goes quietly inert,
+                  which reads as a broken field rather than as a turn in progress.
+            WHY : Assumptions: it is composed by `ui/src/layout/fieldHelp.tsx` rather than written as an
+                  attribute here, so the one screen that needed it does not become the one screen that
+                  spells it differently.
+          */
+          {...busyProps(saving)}
           autoFocus={spec.autoFocus === true}
           /*
             WHY : ⚠️ Refactoring Rationale: a SECOND, unconditional `suffix` stood here, rendering the
@@ -3322,9 +4152,11 @@ export function AccountUpdateScreen(): ReactElement {
     dayField: AccountUpdateFieldName,
     nameToken: string,
   ): ReactElement {
+    const aria = partGroupAria(yearField);
+
     return (
-      <Form.Item label={label}>
-        <Space.Compact>
+      <Form.Item htmlFor={aria.captionFor} label={<span id={aria.captionId}>{label}</span>}>
+        <Space.Compact {...aria.group}>
           {renderField({
             field: yearField,
             label: '',
@@ -3375,9 +4207,11 @@ export function AccountUpdateScreen(): ReactElement {
     lineField: AccountUpdateFieldName,
     nameToken: string,
   ): ReactElement {
+    const aria = partGroupAria(areaField);
+
     return (
-      <Form.Item label={label}>
-        <Space.Compact>
+      <Form.Item htmlFor={aria.captionFor} label={<span id={aria.captionId}>{label}</span>}>
+        <Space.Compact {...aria.group}>
           {renderField({
             field: areaField,
             label: '',
@@ -3440,7 +4274,7 @@ export function AccountUpdateScreen(): ReactElement {
    *       is baked into an element, and the value still comes from the bridge's own spacing entry
    *       rather than from a literal.
    */
-  const gridGutter = token[SPACING_TOKENS.sectionGapMedium];
+  const responsiveGridGutter = accountUpdateGridGutter(token[SPACING_TOKENS.sectionGapMedium]);
 
   /*
    * WHY : Refactoring Rationale: every text colour on this screen resolves through
@@ -3480,6 +4314,26 @@ export function AccountUpdateScreen(): ReactElement {
        */}
       <ScreenTitle style={titleStyle}>{ACCOUNT_UPDATE_HEADINGS.screen}</ScreenTitle>
       {/*
+       * WHY : ⚠️ Purpose: the ONE sentence an operator who cannot see the spinner hears while a request
+       *       is outstanding. Every visible sign this screen gives that it is working is visual -- the
+       *       overlay across the form, the spinner on the key that owns the turn -- so without this the
+       *       screen went silent for exactly as long as the service took and then spoke only its answer.
+       * WHY : ⚠️ Assumptions: it is mounted UNCONDITIONALLY and empty while idle, which
+       *       `ui/src/layout/fieldHelp.tsx` records as load-bearing: a live region has to be in the
+       *       accessibility tree before its text changes, so one that appeared already populated would
+       *       announce nothing on the first turn -- the one turn that matters most.
+       * WHY : ⚠️ Assumptions: the whole in-flight flag drives it rather than the per-key ownership derived
+       *       above. Ownership answers WHICH control is working, which is a visual question about one
+       *       control; this answers WHETHER the screen is working, and an operator waiting on a read, a
+       *       validation or a write is waiting on the same thing. One sentence for all three also means
+       *       the region never re-announces when a turn hands over.
+       * WHY : Assumptions: the sentence is `REQUEST_IN_PROGRESS` from the catalog and is not composed
+       *       here. The reference has no wording for a request still outstanding -- a 3270 terminal
+       *       inhibited input instead of narrating -- so this is an AUTHORED sentence, declared,
+       *       registered and width-checked in `ui/src/messages/messages.ts` under transformation rule T8.
+       */}
+      {busyAnnouncement(turnInFlight ? REQUEST_IN_PROGRESS : undefined)}
+      {/*
        * Refactoring Rationale: the message line that used to sit here is delegated to the shell, which
        * renders it unconditionally and reserves its space at all times -- what row 23 of a 24-row
        * terminal did for free. On THIS screen that reservation matters more than on most: the reference
@@ -3518,7 +4372,7 @@ export function AccountUpdateScreen(): ReactElement {
            *       in the order it paints them, so an operator reads the same fields in the same
            *       sequence.
            */}
-          <Row gutter={gridGutter}>
+          <Row gutter={responsiveGridGutter}>
             {/* Mapset row 5: the account identifier and the active status. */}
             <Col xs={24} md={12}>
               {renderField({
@@ -3585,8 +4439,28 @@ export function AccountUpdateScreen(): ReactElement {
               {renderAmount('currentBalance', ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.currentBalance)}
             </Col>
 
-            {/* Mapset row 9: the right-hand column only -- the cycle credit. */}
-            <Col xs={24} md={12} />
+            {/*
+             * WHY : ⚠️ Refactoring Rationale: an EMPTY `Col` stood here, rendered purely to hold the
+             *       left half of mapset row 9 open so that every later field kept the mapset's own
+             *       left/right pairing. A browser review measured the cost: a void in the left column,
+             *       present even in the empty pre-read state -- so a static grid artefact rather than a
+             *       data one -- where "the eye jumps a full row height". At 992 the right column had
+             *       five money rows against the left's four, which is the arithmetic the empty cell
+             *       existed to paper over.
+             * WHY : ⚠️ Trade-offs: removing it buys the void's removal at the price of the visual
+             *       PAIRING for the two fields after it -- the cycle credit moves to the left half and
+             *       the account group to the right. That is the trade AAP section 0.3.4 gap G1 already
+             *       makes: it surrenders pixel-for-character positioning and keeps field grouping,
+             *       reading order and tab order. Only position changes here. The DOM order is
+             *       untouched, so the keyboard traversal and the announced order are byte-identical to
+             *       before, and the mapset's row 9 asymmetry -- which is a POSITIONAL fact about a
+             *       fixed 24x80 display -- is the one thing G1 does not undertake to reproduce.
+             * WHY : Alternatives Considered: reordering the fields so the two counts match, which would
+             *       close the void and keep the money fields in one column. Rejected because the
+             *       reference's tab order follows mapset field-definition order, which is row-major, so
+             *       reordering the DOM would trade a positional divergence G1 permits for a traversal
+             *       divergence it does not.
+             */}
             <Col xs={24} md={12}>
               {renderAmount(
                 'currentCycleCredit',
@@ -3594,7 +4468,7 @@ export function AccountUpdateScreen(): ReactElement {
               )}
             </Col>
 
-            {/* Mapset row 10: the account group and the cycle debit. */}
+            {/* Mapset order, after the cycle credit: the account group and the cycle debit. */}
             <Col xs={24} md={12}>
               {renderField({
                 field: 'groupId',
@@ -3610,17 +4484,33 @@ export function AccountUpdateScreen(): ReactElement {
           </Row>
 
           {/*
-           * Assumptions: the divider stands in for mapset row 11, which paints the 16-character
-           * `COLOR=NEUTRAL` heading `Customer Details` and nothing else -- a whole terminal row given
-           * to separating the two records the screen edits together.
+           * WHY : ⚠️ Refactoring Rationale: this heading is now a real heading element, ranked by
+           *       `SECTION_HEADING_LEVEL`, where it was emphasised text inside a `Divider`. A browser
+           *       review reported the section-heading pattern as diverging from the PAIRED
+           *       `/account/view`, and the divergence was not merely stylistic: that screen paints the
+           *       same string with `Typography.Title level={SECTION_HEADING_LEVEL}`, so on one of the
+           *       two screens that edit this record the section is in the document's heading
+           *       hierarchy and on the other it is not -- a keyboard or screen-reader operator could
+           *       jump to `Customer Details` on the view and not on the update.
+           * WHY : ⚠️ Assumptions: the rank is READ from `ui/src/layout/ScreenTitle.tsx` and not written
+           *       as a literal, for the reason that module states -- a literal here would silently
+           *       become a PEER of the screen caption if the caption's own rank ever moved.
+           * WHY : Assumptions: the colour is unchanged in value. `type="secondary"` on the sibling and
+           *       `BMS_TEXT_COLOR_TOKENS.NEUTRAL` here both resolve to `colorTextSecondary`, so the
+           *       BMS `COLOR=NEUTRAL` operand the mapset gives this heading is still what is painted;
+           *       the token is named explicitly rather than implied by the prop so the mapping stays
+           *       traceable from the source operand.
+           * WHY : ⚠️ Trade-offs: the `Divider` is dropped rather than kept around the heading. Its own
+           *       note claimed it stood in for mapset row 11 -- a whole terminal row given to
+           *       separating the two records -- and the heading's own block spacing carries that
+           *       separation. Keeping both would give this screen a rule the paired screen does not
+           *       have, which is the same inconsistency in the other direction.
            */}
-          <Divider titlePlacement="start">
-            <Typography.Text strong style={sectionStyle}>
-              {ACCOUNT_UPDATE_HEADINGS.customerSection}
-            </Typography.Text>
-          </Divider>
+          <Typography.Title level={SECTION_HEADING_LEVEL} style={sectionStyle}>
+            {ACCOUNT_UPDATE_HEADINGS.customerSection}
+          </Typography.Title>
 
-          <Row gutter={gridGutter}>
+          <Row gutter={responsiveGridGutter}>
             {/* Mapset row 12: the customer identifier and the three identifier groups. */}
             <Col xs={24} md={12}>
               {renderField({
@@ -3646,10 +4536,15 @@ export function AccountUpdateScreen(): ReactElement {
                * {@link renderStoredState} refuses to do.
                */}
               <Form.Item
-                label={ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.ssn}
                 extra={renderStoredState(storedIdentifiers?.ssnMasked)}
+                htmlFor={SSN_GROUP_ARIA.captionFor}
+                label={
+                  <span id={SSN_GROUP_ARIA.captionId}>
+                    {ACCOUNT_UPDATE_FIELD_LABELS_PAINTED.ssn}
+                  </span>
+                }
               >
-                <Space.Compact>
+                <Space.Compact {...SSN_GROUP_ARIA.group}>
                   {renderField({
                     field: 'ssnPart1',
                     label: '',
@@ -3761,9 +4656,35 @@ export function AccountUpdateScreen(): ReactElement {
              *       line rather than a fourth field. The catalog's `CITY` token is what names that
              *       validation, which is why the label below reads City while the value is line 3.
              */}
+            {/*
+             * WHY : ⚠️ Refactoring Rationale: this control now paints a VISIBLE label, where it painted
+             *       an empty one and carried its name only for assistive technology. A browser review
+             *       measured the consequence at 576 and below: the input was orphaned -- no visible
+             *       label, landing between `State` holding `VA` and `Zip` holding `12546` -- because
+             *       its only association with `Address:` was that the two-column grid put it directly
+             *       beneath address line 1.
+             * WHY : ⚠️ Assumptions: that association was POSITIONAL and nothing else. The mapset paints
+             *       one `Address:` literal at `app/bms/COACTUP.bms` L355 over `ACSADL1` at (16,10) and
+             *       leaves `ACSADL2` at (17,10) unlabelled, relying on the two sitting in the same
+             *       column of a fixed 24x80 display. AAP section 0.3.4 gap G1 surrenders exactly that,
+             *       so the association has to be carried by something G1 keeps -- and a label is what
+             *       it keeps.
+             * WHY : ⚠️ Assumptions: the words are the PROGRAM's own and are not authored here.
+             *       `app/cbl/COACTUPC.cbl` L1614 holds `MOVE 'Address Line 2' TO
+             *       WS-EDIT-VARIABLE-NAME`, commented out on the line above because the field is
+             *       optional -- so this is the reference's name for the field, already carried in this
+             *       module as {@link ADDRESS_LINE_2_NAME} for the accessible name. Promoting it to the
+             *       visible label additionally makes the two agree, which is the property a visible
+             *       label and an accessible name are required to share.
+             * WHY : Alternatives Considered: revealing the label only below the medium breakpoint, so
+             *       the wide layout keeps the mapset's unlabelled look. Rejected on two counts -- it
+             *       makes one field's labelling depend on viewport width, which no other control on
+             *       this screen does, and the wide layout's implicit association is exactly the
+             *       positional one G1 declines to guarantee, so protecting it protects nothing stated.
+             */}
             {/* Mapset row 17: address line 2 with the postal code to its right. */}
             <Col xs={24} md={16}>
-              {renderField({ field: 'addressLine2', label: '', ariaLabel: ADDRESS_LINE_2_NAME })}
+              {renderField({ field: 'addressLine2', label: ADDRESS_LINE_2_NAME })}
             </Col>
             <Col xs={24} md={8}>
               {renderField({
@@ -3857,8 +4778,9 @@ export function AccountUpdateScreen(): ReactElement {
        *       losing it would make one keystroke a committed write on a form of forty editable fields.
        *       A modal is rejected because it takes focus away from the values being confirmed, where
        *       the design system's inline confirmation keeps them on screen behind it. The confirmation
-       *       is offered only while the save key is valid, so it cannot appear on a turn the reference
-       *       refuses the key, and AAP section 0.4.1.4 names this component for this screen.
+       *       cannot OPEN on a turn the reference refuses the key -- the guard for that is the `disabled`
+       *       pair recorded below rather than the control's absence -- and AAP section 0.4.1.4 names this
+       *       component for this screen.
        * WHY : ⚠️ Refactoring Rationale: the gate is CONTROLLED -- its visibility is this screen's state and
        *       `requestSaveConfirmation` is the only thing that opens it. Uncontrolled, the design system
        *       opened it from this trigger alone, so the physical F5 and the legend's F5 button wrote
@@ -3872,13 +4794,119 @@ export function AccountUpdateScreen(): ReactElement {
        *       band stays the last element of the body. The confirmation control has no mapset row of its
        *       own, and putting it after the band would place an additive control between rows 22 and 23.
        */}
-      {saveIsValid ? (
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: this control is rendered whenever the save legend is painted and
+       *       it used to be rendered only while the action ADMITTED the save, so it vanished on a
+       *       concurrency-refused turn exactly as the legend key did -- the browser review measured
+       *       `F5=Save` absent from both places at once. It is now present and DISABLED there, which is
+       *       the same remedy the legend takes and is recorded in full at {@link saveLegendIsPainted}.
+       * WHY : ⚠️ Assumptions: `disabled` is passed to the design system's confirmation as well as to its
+       *       trigger, and both are needed. The trigger being disabled stops a pointer press reaching
+       *       `onOpenChange`, and `Popconfirm`'s own `disabled` short-circuits the open path the
+       *       component can otherwise reach for itself -- `ui/node_modules/antd/lib/popconfirm/index.js`
+       *       returns from `onInternalOpenChange` before it sets state. The gate therefore cannot open on
+       *       a turn the action is not admitted on, so there is no path from this control to a write.
+       */}
+      {saveLegendIsPainted ? (
         <Card size="small">
           <Popconfirm
             title={MESSAGES.PROMPT_FOR_CONFIRMATION.text}
             okText={ACCOUNT_UPDATE_KEY_LABELS.PFK05}
             cancelText={ACCOUNT_UPDATE_KEY_LABELS.PFK12}
             okType="primary"
+            /*
+             * WHY : ⚠️ Refactoring Rationale: a withdrawn prompt is DESTROYED rather than kept hidden,
+             *       and this is what makes the `autoFocus` reasoned about below true on the SECOND
+             *       opening as well as the first. That paragraph is right that the platform applies
+             *       the attribute because the control is rendered into a portal on open -- and the
+             *       unstated half is that the platform applies it when the control ENTERS the
+             *       document, which happens only once unless the surface is destroyed in between. The
+             *       design system keeps a dismissed overlay mounted by default, so without this flag
+             *       a re-opened prompt re-shows a cancel control that never left, no mount occurs,
+             *       and the focus stays wherever the operator's gesture put it. A browser pass
+             *       measured both halves of that on sibling screens: focus on the declining choice on
+             *       a first opening, and focus left on the invoking control on a re-opening of the
+             *       same surface. On a screen that commits forty fields, a prompt whose safe answer
+             *       is merely VISIBLE rather than focused is the formality this confirmation exists
+             *       to prevent.
+             *       Trade-offs: the overlay is rebuilt per opening. The withdrawal still animates --
+             *       the flag reaches the leave motion as `removeOnLeave`, so removal waits for the
+             *       animation rather than replacing it.
+             */
+            destroyOnHidden
+            /*
+             * WHY : ⚠️ Purpose: the focus lands on the SAFE choice when the prompt opens, so the very
+             *       next Enter or Space withdraws the question rather than committing the record. A
+             *       prompt that opens with focus on its accept control turns a confirmation into a
+             *       formality -- one further keystroke, which is the keystroke an operator has already
+             *       pressed once to get here, writes forty fields.
+             * WHY : ⚠️ Assumptions: nothing takes the focus back afterwards, and what makes that true is
+             *       WHEN the other focus mover runs rather than whether it runs. The cursor effect above
+             *       places the cursor for the turn that settled -- on the validated turn it moves focus
+             *       to the control the reference's cursor table names, which a removal probe confirmed by
+             *       leaving the focus on `activeStatus` -- and its dependencies are the cursor target and
+             *       the refusal map, neither of which changes when this prompt opens. So it has already
+             *       run by the time the prompt exists and does not run again. The measured trap on
+             *       another screen was the opposite order: a focus call placed AFTER the prompt opened
+             *       took the focus back and left the operator on the committing control while the safe
+             *       one merely appeared selected.
+             * WHY : Assumptions: `autoFocus` on the design system's own cancel control rather than an
+             *       effect of ours. The control is rendered inside a portal on open, so the platform's
+             *       own mount-time focus is both the earliest and the only moment guaranteed to be after
+             *       it exists.
+             * WHY : ⚠️ Assumptions: ESCAPE needs nothing added here, and this was verified rather than
+             *       assumed. The dismissal is handled two layers down, by
+             *       `ui/node_modules/@rc-component/portal/lib/useEscKeyDown.js`, which keeps a stack of
+             *       open portals on a window `keydown` listener and withdraws the top one; a
+             *       screen-level listener was drafted, and removing it left the prompt closing on Escape
+             *       just the same, so it was withdrawn as a second handler for one key. What that layer
+             *       does is CLOSE the portal, which reaches this screen as `onOpenChange(false)` and
+             *       nothing else -- it does not run `onCancel` -- so Escape withdraws the question and
+             *       leaves the entry standing, where this prompt's own cancel control additionally
+             *       performs the reference's PF12 arm and discards it. Both write nothing, which is the
+             *       property that matters; only Escape is safe to press without losing work. The
+             *       behaviour is asserted in `ui/src/test/accountUpdate.test.tsx` so that a library
+             *       change cannot take it away silently.
+             */
+            cancelButtonProps={{ autoFocus: true }}
+            /*
+             * WHY : ⚠️ Refactoring Rationale: the surface opens DOWNWARD, and the design system's default
+             *       of upward is what a browser pass measured the cost of. The trigger sits immediately
+             *       below the last form row, and the surface needs roughly ninety pixels of clear space
+             *       above that trigger to fit. At a 1280-pixel width the gap is just wide enough and the
+             *       surface clipped only the bottom 4.39 pixels of the three `Phone 2` boxes -- their
+             *       padding and border, not their digits. At 375 the single-column stack closes that gap,
+             *       and the surface covered the `Primary Card Holder Y/N:` control across 100 per cent of
+             *       its width and 88.7 per cent of its height, with `elementFromPoint` at that control's
+             *       centre returning the surface's own title element: the operator was asked to commit a
+             *       record while one of its values was painted over. Downward, the surface opens into the
+             *       space beneath the form, which no field occupies at any width.
+             * WHY : Assumptions: the space beneath the form is the frame's pinned zone, and the only
+             *       thing the surface overlays there is this screen's own message line -- measured, it
+             *       covers NO legend key at either width, its foot landing two pixels above the legend
+             *       row at 1280 and clear of all four keys at 375. Nothing is lost even from the line it
+             *       does cover: the surface's title IS the sentence that line is showing, both reading
+             *       `MESSAGES.PROMPT_FOR_CONFIRMATION`, so it covers only a restatement of its own
+             *       question. Covering a field's value costs the operator a datum they were asked about;
+             *       covering a restatement of the question costs nothing.
+             * WHY : Alternatives Considered: (1) replacing the component with a dialog, which positions
+             *       itself against the viewport and so cannot collide with a field at all. REJECTED on
+             *       AAP grounds: section 0.4.1.4 names `Popconfirm` for this screen, and the block above
+             *       already records that decision. (2) Constraining the surface's width so it cannot reach
+             *       across the column. Rejected because the width is set by the catalogued sentence it
+             *       titles, so narrowing it rewraps a verbatim string. (3) Leaving it upward and moving
+             *       the trigger further from the form. Rejected because the trigger's position is itself
+             *       reasoned about above -- it is the last element of the body so the row-22 band stays
+             *       adjacent to row 23 -- and inserting space to accommodate an overlay would put layout
+             *       at the service of a popup.
+             * WHY : Assumptions: the horizontal clamp the same pass measured is NOT corrected here and is
+             *       not a defect. At 375 the design system pins the surface's left edge at 0 because a
+             *       fixed-width card cannot be centred on a trigger whose centre is 79.6 pixels in; the
+             *       card stays wholly inside the display, 0 through 267 of 375, with both answers visible.
+             *       That is the overflow handling keeping the question reachable, which is what it is for.
+             */
+            placement="bottom"
+            disabled={!saveIsValid || saving}
             open={confirmingSave}
             onOpenChange={
               /**
@@ -3898,7 +4926,12 @@ export function AccountUpdateScreen(): ReactElement {
             onConfirm={saveEdits}
             onCancel={abandonSaveConfirmation}
           >
-            <Button type="primary" loading={saving} disabled={saving}>
+            <Button
+              ref={saveConfirmationAnchor}
+              type="primary"
+              loading={saving}
+              disabled={!saveIsValid || saving}
+            >
               {ACCOUNT_UPDATE_KEY_LABELS.PFK05}
             </Button>
           </Popconfirm>
@@ -3906,24 +4939,22 @@ export function AccountUpdateScreen(): ReactElement {
       ) : null}
 
       {/*
-       * WHY : Assumptions: ONE band is rendered here and it is the row-22 INFORMATION line, because the
-       *       mapset declares two independent message lines at two different rows and only one of them
-       *       belongs to the screen's own field area -- `INFOMSG` at `POS=(22,23)`,
-       *       `ATTRB=(PROT) COLOR=NEUTRAL`, `PIC X(45)`. It takes the `info` severity, which is the
-       *       appearance its source field always had. The row-23 message line and the row-24 legend are
-       *       delegated to the shell in the `useShellSlot` call above, so exactly one element paints each
-       *       row and the sibling account-view screen is arranged the same way.
-       * WHY : Assumptions: it is rendered UNCONDITIONALLY and never as `null`, because
-       *       `3250-SETUP-INFOMSG` derives it from the change action on every send and every action has a
-       *       line -- so there is no state in which this row is empty, and reserving its height keeps the
-       *       controls above it from moving when the sentence changes.
+       * WHY : ⚠️ Refactoring Rationale: the row-22 INFORMATION band is no longer rendered here. It was,
+       *       on the ground that the mapset declares `INFOMSG` at `POS=(22,23)` -- inside the screen's
+       *       own field area rather than in the frame's zone -- and that reading is what a responsive
+       *       review measured the cost of: the screen's real advisory sat between roughly 1688 and 3040
+       *       pixels down the document, below the fold at every width tested, while the frame's own
+       *       row-22 zone stood at the reserved height with nothing in it. A line at `POS=(22,23)` on a
+       *       24-row display is one row above the message line and two above the legend, which in this
+       *       frame is the pinned zone; being inside the field AREA does not put it inside the scrolling
+       *       CONTENT. It is delegated in the `useShellSlot` call above, beside the row-23 line it is
+       *       declared next to, and the frame paints the two adjacent as the terminal did.
+       * WHY : Assumptions: nothing about the band's identity changes for a reader or a suite. The frame
+       *       renders `MessageBand` with `channel="information"`, which carries
+       *       `INFORMATION_BAND_TEST_ID` exactly as this element did, and it renders that zone if and
+       *       only if a screen delegates the slot -- so publishing here and rendering there leaves
+       *       exactly one row-22 band on the document rather than two.
        */}
-      <MessageBand
-        mapset={ACCOUNT_UPDATE_MAPSET}
-        severity="info"
-        message={information}
-        line="information"
-      />
 
       {/*
        * WHY : ⚠️ Refactoring Rationale: a SECOND band stood here, on the `error` channel, and it is

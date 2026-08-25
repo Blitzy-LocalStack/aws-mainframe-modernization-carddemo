@@ -507,6 +507,67 @@ if (typeof globalThis.ResizeObserver !== 'function') {
   installResizeObserver();
 }
 
+/**
+ * Installs a no-op `Element.prototype.scrollIntoView`, which jsdom does not implement.
+ *
+ * Refactoring Rationale: this shim exists for the same reason the two above it do -- jsdom omits a
+ * browser API application code calls unconditionally -- and it became necessary for one measured
+ * defect. A browser pass found the transaction-capture screen's confirmation overlay rendering
+ * twenty-three pixels below the foot of the display, with the lower eleven pixels of both answers cut
+ * off, because the overlay is anchored to a control at the foot of a form long enough to overflow the
+ * screen body and a turn taken from the function-key legend needs no scrolling to reach that control.
+ * The screen now brings the anchor onto the display before raising the question, and jsdom answers
+ * that call with `TypeError: ...scrollIntoView is not a function` -- thrown inside a click handler, so
+ * fifteen cases across four files failed on an exception rather than on an assertion.
+ *
+ * Alternatives Considered: (1) guarding the call site with `typeof anchor.scrollIntoView ===
+ * 'function'`. Rejected: the API is present in every browser this application ships to and absent
+ * only in the harness, so the guard would put a permanently-true condition into production code to
+ * describe a property of the test environment -- and it would read to the next maintainer as though
+ * the API were genuinely optional. An environment gap belongs in the file that assembles the
+ * environment. (2) Stubbing it per test file. Rejected because the four files that failed are owned
+ * by different areas and any fifth screen that scrolls an element into view would fail the same way,
+ * with nothing to attribute it to.
+ *
+ * Assumptions: a no-op is sufficient and weakens no assertion. jsdom performs NO layout -- every
+ * element reports a zero-sized rectangle and the document has no scrollport -- so a faithful
+ * implementation would have nothing to scroll and no observable to offer. Nothing in this suite
+ * asserts a scroll position, and nothing can: the property this shim's motivating fix delivers is a
+ * rectangle inside the viewport, which is measurable only in a real browser and is verified there.
+ * What the tests need is for the call to succeed.
+ * @returns {void} The method is present on every element for every subsequent line of every test file.
+ */
+function installScrollIntoView(): void {
+  Object.defineProperty(Element.prototype, 'scrollIntoView', {
+    writable: true,
+    configurable: true,
+    /**
+     * Accepts a scroll request and performs nothing, jsdom having no layout to scroll.
+     * @returns {void} No scrolling occurs and no event is dispatched.
+     */
+    value: function scrollIntoView(): void {
+      // Assumptions: deliberately empty. jsdom lays nothing out, so there is no position to change
+      //   and no scroll event a caller could observe; the contract this satisfies is "does not throw".
+    },
+  });
+}
+
+/*
+ * ⚠️ Assumptions: GUARDED for the reason recorded at the two calls above, and the guard matters more
+ * here than for either of them because this stand-in is installed onto a SHARED PROTOTYPE rather than
+ * onto a global of its own. Overwriting a real implementation would silently disable scrolling for
+ * every element in every test, in a runner where nothing asserts a scroll position and so nothing
+ * would fail to attribute it to. The check reads the prototype rather than an instance, because that
+ * is where the method would arrive if jsdom implemented it.
+ *
+ * Assumptions: this changes no current verdict. Probed against the pinned jsdom 29.1.1,
+ * `typeof Element.prototype.scrollIntoView` is `undefined`, so the condition holds and the stand-in
+ * installs; the day jsdom ships a real one, the guard hands the suite the real one instead.
+ */
+if (typeof Element.prototype.scrollIntoView !== 'function') {
+  installScrollIntoView();
+}
+
 /*
  * ---------------------------------------------------------------------------
  * The shared harness

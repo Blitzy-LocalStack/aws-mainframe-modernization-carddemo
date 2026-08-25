@@ -37,9 +37,15 @@
  * it already implemented was unreachable from anywhere -- main-menu option 7 had no path it could name
  * and answered the reference's not-installed sentence for a screen the delivery carries. The screen
  * itself needed no change: `ui/src/router.tsx` declares the second path onto the same component and
- * `ui/src/routes/programRoutes.ts` resolves `COTRN01C` to it. Both arrivals are exercised by
- * `ui/src/screens/transactionDetail/selectorFreeArrival.test.tsx`, which requires the selector-free one
- * to issue no read at all.
+ * `ui/src/routes/programRoutes.ts` resolves `COTRN01C` to it. ⚠️ The selector-free arrival's defining
+ * property -- that it issues NO read -- is asserted by `opens a framed screen at every keyless entry
+ * route` in `ui/src/routerReachability.test.tsx`, whose keyless sweep visits `/transactions/view`
+ * alongside the two card entry routes and requires `dispatchedRequests()` to be empty at each. The
+ * citation this replaces named
+ * `ui/src/screens/transactionDetail/selectorFreeArrival.test.tsx`, which does not exist and never did:
+ * that directory holds only `index.tsx` and `rendering.test.ts`. A citation to a file that is not there
+ * is worse than none, because a reader takes it as evidence the property is covered and stops looking --
+ * so it is repointed at the case that genuinely covers it rather than deleted.
  *
  * What this screen does NOT do
  * ----------------------------
@@ -66,8 +72,10 @@ import type { TransactionDetail } from '../../api/transactions';
 import type { ApiError, FieldError, FieldValidationState } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
-import type { MessageBandSeverity } from '../../layout/MessageBand';
+// Assumptions: `busyAnnouncement` is imported from the shared helper rather than a hidden span being
+//   composed here, because the helper is the one place that decides the region's shape -- always
+//   mounted, `role="status"`, empty when idle -- and a locally composed one would drift from it.
+import { busyAnnouncement, fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
 import { UNIFORM_PF_KEY_LABELS } from '../../layout/PfKeyBar';
 import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
@@ -89,6 +97,7 @@ import type { PfKeyHandlerMap } from '../../layout/usePfKeys';
  */
 import {
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   TRANSACTION_DETAIL_FIELD_LABELS,
   TRANSACTION_DETAIL_KEY_LABELS as CATALOG_KEY_LABELS,
@@ -585,6 +594,26 @@ export interface TransactionDetailKeyActions {
 export function buildTransactionDetailKeyHandlers(
   actions: TransactionDetailKeyActions,
 ): PfKeyHandlerMap {
+  /*
+   * WHY : ⚠️ Refactoring Rationale: every entry below declares `risk: 'read-only'`, and the reason it
+   *       has to be declared rather than left to the fallback is PF5. `PfKeyBar`'s
+   *       `PRIMARY_ACTION_AIDS` fallback emphasises `ENTER` and `PFK05` on every screen, which is a
+   *       reading derived from the mapsets where PF5 saves -- and on this one it does not.
+   *       `app/bms/COTRN01.bms` L267 paints `F5=Browse Tran.`, and `app/cbl/COTRN01C.cbl` transfers to
+   *       the browse for `DFHPF5`, so the key NAVIGATES. Emphasising it as a primary action told the
+   *       operator this screen had a committing control, and it has none at all.
+   * WHY : ⚠️ Assumptions: the classification is taken from what each LABEL says the action does and
+   *       never from which attention identifier carries it, which is the whole point of the taxonomy --
+   *       the same `PFK05` is delete, save and browse on three different mapsets. `ENTER=Fetch` reads,
+   *       `F3=Back` and `F5=Browse Tran.` navigate, and `F4=Clear` blanks controls locally. Not one of
+   *       the four reaches a write, which is consistent with what this module's header records: this
+   *       screen has no confirmation control, no submit and no delete.
+   * WHY : Assumptions: declaring `read-only` on all four leaves the legend with no primary control,
+   *       which is the intended consequence rather than an oversight. Emphasis under this taxonomy
+   *       signals CONSEQUENCE and not importance, so a screen that changes nothing paints nothing
+   *       prominent -- and an operator who learns that a solid control commits keeps that reading
+   *       across every screen in the tree.
+   */
   return {
     ENTER: {
       /**
@@ -595,6 +624,7 @@ export function buildTransactionDetailKeyHandlers(
         actions.onFetch();
       },
       label: TRANSACTION_DETAIL_KEY_LABELS.ENTER,
+      risk: 'read-only',
     },
     PFK03: {
       /**
@@ -605,6 +635,7 @@ export function buildTransactionDetailKeyHandlers(
         actions.onBack();
       },
       label: TRANSACTION_DETAIL_KEY_LABELS.PFK03,
+      risk: 'read-only',
     },
     PFK04: {
       /**
@@ -615,6 +646,7 @@ export function buildTransactionDetailKeyHandlers(
         actions.onClear();
       },
       label: TRANSACTION_DETAIL_KEY_LABELS.PFK04,
+      risk: 'read-only',
     },
     PFK05: {
       /**
@@ -626,6 +658,7 @@ export function buildTransactionDetailKeyHandlers(
       },
       action: 'screen-defined',
       label: TRANSACTION_DETAIL_KEY_LABELS.PFK05,
+      risk: 'read-only',
     },
   };
 }
@@ -865,9 +898,13 @@ function buildRecordItems(
     {
       key: 'merchantZip',
       label: recordLabel('merchantZip', labelStyle),
-      children: (
-        <Typography.Text style={fixedPitchValueStyle}>{record.merchantZip}</Typography.Text>
-      ),
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the postal code renders in the same face as the city it
+       *       stands beside, where it previously took the code face. The two are one row at the
+       *       two-column width and one address in the record, and the mapset gives them identical
+       *       attributes -- the rationale is recorded in full on `fixedPitchValueStyle` below.
+       */
+      children: <Typography.Text style={freeTextValueStyle}>{record.merchantZip}</Typography.Text>,
     },
   ];
 }
@@ -928,19 +965,44 @@ export function TransactionDetailScreen(): ReactElement {
    */
   const [entry, setEntry] = useState<string>(id ?? '');
   const [record, setRecord] = useState<TransactionDetail | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
   /*
-   * WHY : ⚠️ Assumptions: the sentence and its severity are held as TWO separate pieces of state, and
-   *       the normalised `ApiError` is reduced to them HERE rather than handed onward, because
-   *       `ui/src/layout/MessageBand.tsx` is deliberately presentational: it accepts a nullable string
-   *       and a `MessageBandSeverity`, imports nothing from `ui/src/api/**`, and so cannot accept an
-   *       `ApiError` at all. Mapping is therefore the caller's job by that module's design, which is
-   *       what keeps one band able to render a transport failure, a local refusal and an informational
-   *       reply without knowing that an API exists. Per-FIELD errors do not travel this channel at all
-   *       -- they go to the lookup control's own `Form.Item` through {@link refusalPropsFor}, mirroring
-   *       `app/cpy/CSSETATY.cpy` L17-L27, which colours the FIELD rather than writing the message line.
+   * WHY : ⚠️ Refactoring Rationale: the sentence is held WITHOUT a severity beside it, where this
+   *       screen previously carried a second `MessageBandSeverity` state and named a severity on every
+   *       arm. A rendering review measured the consequence: the successful arm named `'info'`, so a
+   *       reply the service sent alongside a retrieved record was painted as an informational alert
+   *       INSIDE the row-23 band -- and across the application the same class of event drew four
+   *       different severities on four screens because each one decided for itself.
+   * WHY : ⚠️ Assumptions: the severity is a property of the CHANNEL and not of the sentence, so it is
+   *       resolved by the band from {@link MESSAGE_BAND_CHANNELS} rather than named here.
+   *       `app/bms/COTRN01.bms` L259-L262 declares this mapset's one message field as
+   *       `ERRMSG ... COLOR=RED ... POS=(23,1)`, and `app/cbl/COTRN01C.cbl` L217 is the single
+   *       `MOVE WS-MESSAGE TO ERRMSGO` every arm reaches -- so on the terminal there is exactly one
+   *       line and exactly one colour, whatever the arm. `defaultMessageBandSeverity` in
+   *       `ui/src/layout/MessageBand.tsx` reads that same `COLOR=` operand, which is why omitting the
+   *       member reproduces the mapset instead of restating it.
+   * WHY : Alternatives Considered: keeping the state and assigning the channel's own default on every
+   *       arm. Rejected because it leaves the screen able to name a severity the mapset does not
+   *       declare -- which is the defect being removed -- whereas withdrawing the member makes that
+   *       unstateable here at all.
+   * WHY : ⚠️ Alternatives Considered: taking the severity from the problem document through
+   *       `messageBandSeverityForApiSeverity`, which is the correspondence
+   *       `ui/src/layout/MessageBand.tsx` publishes and is the obvious candidate on the failing arm.
+   *       Rejected on what it would do to a refusal's colour: that helper maps `LOG` to `neutral`, so
+   *       a service answering with the quietest tier would paint `'Unable to lookup Transaction...'`
+   *       -- a sentence `app/cbl/COTRN01C.cbl` L292 puts into `WS-MESSAGE`, and therefore into a field
+   *       declared `COLOR=RED` -- in a colour the mapset never gives it. It would also make this the
+   *       one screen whose refusal colour depends on a transport field, which is the per-screen
+   *       divergence being removed. That helper is for a screen whose band renders a document's own
+   *       message; this screen renders the reference's four sentences and the view's own message line,
+   *       and all five belong to the one line the mapset paints red.
+   * WHY : Assumptions: the normalised `ApiError` is still reduced to a SENTENCE here rather than handed
+   *       onward, because `ui/src/layout/MessageBand.tsx` is deliberately presentational: it accepts a
+   *       nullable string, imports nothing from `ui/src/api/**`, and so cannot accept an `ApiError` at
+   *       all. Per-FIELD errors do not travel this channel -- they go to the lookup control's own
+   *       `Form.Item` through {@link refusalPropsFor}, mirroring `app/cpy/CSSETATY.cpy` L17-L27, which
+   *       colours the FIELD rather than writing the message line.
    */
-  const [severity, setSeverity] = useState<MessageBandSeverity>('error');
+  const [message, setMessage] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<LookupRefusal | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
@@ -999,7 +1061,6 @@ export function TransactionDetailScreen(): ReactElement {
       if (candidate === '') {
         const refusalMessage = TRANSACTION_DETAIL_MESSAGES.TRAN_ID_CAN_NOT_BE_EMPTY;
         setRefusal({ state: 'BLANK', message: refusalMessage });
-        setSeverity('error');
         setMessage(refusalMessage);
         focusLookup();
         return;
@@ -1033,8 +1094,29 @@ export function TransactionDetailScreen(): ReactElement {
            *       the member exists because it is the migrated carrier of that field, and discarding
            *       a sentence the service authored for the operator would lose information the
            *       reference had a channel for.
+           * WHY : ⚠️ Refactoring Rationale: no severity is named on this arm, where it previously named
+           *       `'info'`. That was a decision by TONE -- a sentence arriving with a retrieved record
+           *       reads mild -- and `MESSAGE_BAND_CHANNELS` records that the test is TENSE: row 23
+           *       carries the outcome of the turn just taken, which a reply about the read just
+           *       performed is. Naming `'info'` did not move the sentence to another line, because
+           *       this mapset has only one; it painted the one line in a colour the mapset does not
+           *       declare, which is the informational-looking alert the review found in the ERROR
+           *       band.
+           * WHY : Alternatives Considered: publishing it through the shell's `information` channel, so
+           *       the sentence would leave the error band altogether. Rejected on the mapset:
+           *       `app/bms/COTRN01.bms` declares no row-22 field at all -- `INFOMSG` appears in five
+           *       of the twenty-one mapsets (`COACTUP`, `COACTVW`, `COCRDLI`, `COCRDSL`, `COCRDUP`)
+           *       and not in this one -- and `ShellMessageSlot.information` in
+           *       `ui/src/layout/AppShell.tsx` states that the member's absence means exactly that.
+           *       Delegating it here would paint a terminal row this screen never had.
+           * WHY : Alternatives Considered: discarding the member on this arm, which is the strictest
+           *       reading of a reference that sets no success message. Rejected because
+           *       `services/transaction-service/src/main/resources/openapi/transaction-api.yaml`
+           *       L2473-L2479 declares the member as the view screen's own message line and records
+           *       that null is merely the ORDINARY value, so a non-null one is a sentence the service
+           *       chose to send an operator; dropping it would suppress it with nothing recording that
+           *       it had been sent.
            */
-          setSeverity('info');
           setMessage(detail.returnMessage);
           setLoading(false);
         },
@@ -1050,7 +1132,6 @@ export function TransactionDetailScreen(): ReactElement {
           }
           setRecord(null);
           setRefusal(fieldRefusalFrom(reason));
-          setSeverity('error');
           setMessage(describeLookupFailure(reason));
           setLoading(false);
           focusLookup();
@@ -1118,7 +1199,6 @@ export function TransactionDetailScreen(): ReactElement {
       setRecord(null);
       setMessage(null);
       setRefusal(null);
-      setSeverity('error');
       setLoading(false);
       focusLookup();
     },
@@ -1182,20 +1262,27 @@ export function TransactionDetailScreen(): ReactElement {
       /**
        * Reports a recognised key this screen does not bind.
        *
-       * Assumptions: the sentence and the severity are taken from the rejection PAYLOAD rather than
-       * composed here, because `ui/src/layout/usePfKeys.ts` carries the byte-preserved
-       * `CCDA-MSG-INVALID-KEY` on it -- `'Invalid key pressed. Please see below...         '` at
-       * `app/cpy/CSMSG01Y.cpy` L20-L21, blank-padded to its declared `PIC X(50)`. Writing the string
-       * again here would be a second copy of a verbatim constant, which is what the catalog exists to
-       * prevent. What the screen still owns is the CHANNEL it goes to, which is the reference's own
-       * arrangement: L129-L131 sets the flag and moves the message into `WS-MESSAGE`, the same field
-       * every other refusal on this screen uses.
+       * Assumptions: the sentence is taken from the rejection PAYLOAD rather than composed here,
+       * because `ui/src/layout/usePfKeys.ts` carries the byte-preserved `CCDA-MSG-INVALID-KEY` on it
+       * -- `'Invalid key pressed. Please see below...         '` at `app/cpy/CSMSG01Y.cpy` L20-L21,
+       * blank-padded to its declared `PIC X(50)`. Writing the string again here would be a second copy
+       * of a verbatim constant, which is what the catalog exists to prevent. What the screen still
+       * owns is the CHANNEL it goes to, which is the reference's own arrangement: L129-L131 sets the
+       * flag and moves the message into `WS-MESSAGE`, the same field every other refusal on this
+       * screen uses.
+       *
+       * ⚠️ Assumptions: the payload's `severity` member is deliberately NOT read, and reading it would
+       * be indistinguishable from not reading it. `ui/src/layout/usePfKeys.ts` L149-L150 declares it as
+       * the literal type `'error'` and L489 is the one site that constructs it, so it can hold no other
+       * value -- and that value is what `MESSAGE_BAND_CHANNELS` in `ui/src/layout/MessageBand.tsx` already
+       * resolves for row 23. What
+       * withdrawing the read buys is that this screen no longer holds a severity at all, so no arm of
+       * it can paint the row-23 line in a colour `app/bms/COTRN01.bms` L260 does not declare.
        * @param {{ message: string; severity: 'error' }} rejection - The invalid-key payload, carrying
        *   the verbatim sentence and the severity a screen-level status renderer expects.
        * @returns {void} Nothing; the sentence is published through this screen's own state.
        */
       onInvalidKey: (rejection): void => {
-        setSeverity(rejection.severity);
         setMessage(rejection.message);
         focusLookup();
       },
@@ -1223,7 +1310,14 @@ export function TransactionDetailScreen(): ReactElement {
       programName: TRANSACTION_DETAIL_PROGRAM_NAME,
     },
     now: paintedAt,
-    message: { text: message, severity, mapset: TRANSACTION_DETAIL_MAPSET },
+    /*
+     * WHY : ⚠️ Assumptions: NO `severity` is delegated and no `line` either, so the band resolves both
+     *       from `MESSAGE_BAND_CHANNELS` -- the row-23 `error` channel, whose default severity is the
+     *       `COLOR=RED` this mapset declares at `app/bms/COTRN01.bms` L260. Naming either one would
+     *       restate a default, and naming a severity is what let this screen paint an informational
+     *       alert in the outcome band.
+     */
+    message: { text: message, mapset: TRANSACTION_DETAIL_MAPSET },
     pfKeys: { keys: bindings, onInvoke: invoke },
   });
 
@@ -1249,14 +1343,32 @@ export function TransactionDetailScreen(): ReactElement {
   const labelStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.TURQUOISE] };
   const valueStyle: CSSProperties = { color: cssVar[BMS_TEXT_COLOR_TOKENS.BLUE] };
   /*
-   * WHY : Assumptions: the fixed-pitch face is applied to the eight FIXED-WIDTH values and withheld
-   *       from the four free-text ones, which is the distinction `TYPOGRAPHY_TOKENS.fixedPitchData`
-   *       records. The 3270 cell grid aligned every column for free; a proportional face gives digits
-   *       different advance widths, so the sixteen-character identifier and masked card number, the
-   *       two- and four-character codes, the twelve-character signed amount, the two ten-character
-   *       dates, the nine-digit merchant identifier and the ten-character postal code stop lining up
-   *       down the value column. The description, the source, the merchant name and the merchant city
-   *       are proportional text with nothing to align against.
+   * WHY : Assumptions: the fixed-pitch face is applied to the eight COLUMNAR values and withheld from
+   *       the five free-text ones, which is the distinction `TYPOGRAPHY_TOKENS.fixedPitchData` records.
+   *       The 3270 cell grid aligned every column for free; a proportional face gives digits different
+   *       advance widths, so the sixteen-character identifier and masked card number, the two- and
+   *       four-character codes, the twelve-character signed amount, the two ten-character dates and
+   *       the nine-digit merchant identifier stop lining up down the value column.
+   * WHY : ⚠️ Refactoring Rationale: the discriminator is whether a value is COLUMNAR -- an identifier,
+   *       a code, an amount or a timestamp, which an operator scans against the like value above and
+   *       below it -- and not whether its `PICTURE` has a fixed width. Every field in a COBOL record
+   *       has a fixed width, so the width reading admits all thirteen and settles nothing. The
+   *       measured consequence of the width reading was the merchant's postal code in the code face
+   *       beside the merchant's city in the body face: at the two-column width those two are the two
+   *       cells of ONE row, and a browser review measured them side by side holding identical text in
+   *       two typefaces. The mapset draws no such distinction -- `app/bms/COTRN01.bms` L240-L243 and
+   *       L252-L255 give `MCITY` and `MZIP` the same `ATTRB=(ASKIP,NORM)` and the same `COLOR=BLUE`,
+   *       differing only in `LENGTH` and `POS` -- and neither is a column: a city and a postal code
+   *       are the two halves of one address, read together and compared with nothing.
+   * WHY : Assumptions: `ui/src/screens/accountView/index.tsx` is the precedent rather than a second
+   *       opinion. It renders its own postal code with `monetary: false` (L992-L995) and records at
+   *       L1137-L1139 that the code face is "applied only to monetary values so the decimal points
+   *       line up down the column" -- the same columnar test, reached independently on the record
+   *       screen that has five money fields to align.
+   * WHY : Alternatives Considered: moving the merchant CITY into the code face instead, which would
+   *       also remove the split. Rejected because it takes the wrong half: `TRAN-MERCHANT-CITY` is
+   *       `PIC X(50)` proportional text and the mapset paints only 25 of it, so the code face would
+   *       make a truncated place name wider and no better aligned.
    * WHY : Alternatives Considered: setting the face on the `Descriptions` component so every value
    *       inherited it. Rejected because it would put the hundred-character description in the code
    *       face as well, which aligns nothing and reads worse than the body face at that length.
@@ -1267,11 +1379,17 @@ export function TransactionDetailScreen(): ReactElement {
   };
   /*
    * WHY : Assumptions: the free-text values break inside a word rather than overflow their cell. Four
-   *       of them arrive WIDER than the field the terminal painted -- the description is `X(100)` in a
-   *       `LENGTH=60` field and the merchant name and city are `X(50)` in fields of 30 and 25 -- and a
-   *       bordered table cell has no fixed character width to spill out of gracefully. Breaking is
-   *       preferred to truncating for the reason recorded on
+   *       of the five arrive WIDER than the field the terminal painted -- the description is `X(100)`
+   *       in a `LENGTH=60` field and the merchant name and city are `X(50)` in fields of 30 and 25 --
+   *       and a bordered table cell has no fixed character width to spill out of gracefully. Breaking
+   *       is preferred to truncating for the reason recorded on
    *       {@link TRANSACTION_DETAIL_SCREEN_WIDTHS}: every character the service sent stays readable.
+   * WHY : Trade-offs: the fifth, the postal code, cannot reach the breaking rule -- `X(10)` in a
+   *       `LENGTH=10` field at `app/bms/COTRN01.bms` L254 is exactly the width the terminal painted,
+   *       so it has nothing to overflow. It shares this style anyway rather than taking a third style
+   *       object of its own, because a third object would exist solely to withhold a declaration that
+   *       is inert on the one field it applies to, and would give a reader a third policy to
+   *       reconcile against a mapset that declares only two.
    */
   const freeTextValueStyle: CSSProperties = { ...valueStyle, overflowWrap: 'break-word' };
   /*
@@ -1404,6 +1522,23 @@ export function TransactionDetailScreen(): ReactElement {
        *       is a property of the transport rather than of the screen.
        */}
       {loading ? <Spin size="large" /> : null}
+      {/*
+       * WHY : ⚠️ Purpose: the spinner above is a VISUAL statement only, and this is the same statement
+       *       made to an operator who cannot see it. antd's `Spin` carries no accessible name of its
+       *       own and announces nothing, so a screen reader on this turn was told the record region
+       *       had emptied and nothing about why or for how long.
+       * WHY : Assumptions: the region is rendered on EVERY turn and holds the empty string while idle,
+       *       which is what `busyAnnouncement` produces for an undefined announcement. A live region
+       *       has to be in the accessibility tree before its content changes for the change to be
+       *       announced at all, so rendering it only while loading would lose the one transition that
+       *       matters.
+       * WHY : Assumptions: the sentence is `REQUEST_IN_PROGRESS` from the catalog and not composed
+       *       here. It has no reference source -- a 3270 locks the keyboard and says nothing, so there
+       *       is no verbatim wording to carry across -- and the catalog is where an authored sentence
+       *       is registered and width-checked so it cannot differ between two screens saying the same
+       *       thing.
+       */}
+      {busyAnnouncement(loading ? REQUEST_IN_PROGRESS : undefined)}
       {/*
        * WHY : Trade-offs: the record is laid out by GROUPING and not by the mapset's absolute
        *       coordinates, which is documented gap G1 in the `DESIGN_GAPS` register of

@@ -6,7 +6,8 @@
  * Assert the properties a review found this screen had lost: that a short account identifier is refused
  * locally in the source's own words rather than sent for the service to refuse, that the filter control
  * states its refusal programmatically as well as visually, that the two unlabelled address values are
- * named for assistive technology, that the five row controls are ONE selection set, that the eight-column
+ * named for assistive technology, that each row carries the mapset's own one-character
+ * selection field, that the eight-column
  * table has a narrow-screen policy, that the record panel takes the shared responsive column policy, and
  * that route changes go through the shared navigation seam rather than a second copy of it.
  *
@@ -49,16 +50,22 @@ import type {
   PendingAuthSummary,
 } from '../../api/types';
 import { AppShell } from '../../layout/AppShell';
-import { SHARED_MESSAGES } from '../../messages/messages';
+import {
+  PERSISTENT_FAILURE_REPORT_IT,
+  SHARED_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
+} from '../../messages/messages';
 import { fieldErrorId } from '../../layout/fieldHelp';
 import { cardDemoTheme } from '../../theme/antdTheme';
 import {
+  AUTH_SUMMARY_COLUMN_HEADERS,
+  AUTH_SUMMARY_FIELD_WIDTHS,
   AUTH_SUMMARY_HIDDEN_LABELS,
-  AUTH_SUMMARY_SELECTION_PROMPT,
+  AUTH_SUMMARY_SELECTION_CODE,
   AuthSummaryScreen,
   accountIdRefusal,
   describeListingFailure,
-  selectionActionLabel,
+  selectionCellLabel,
 } from './index';
 
 /**
@@ -277,31 +284,6 @@ async function fetchPage(): Promise<void> {
 }
 
 /**
- * Builds a problem document carrying one status and one sentence, as the transport delivers one.
- *
- * Assumptions: it names no field, because the statuses these cases pass carry no per-field entry -- a
- * fault and a misroute are whole-request outcomes.
- * @param {number} status - The HTTP status the failure carries.
- * @param {string} message - Whatever sentence the answer carried.
- * @returns {ApiError} The normalised document the screen's mapping reads.
- */
-function problemWith(status: number, message: string): ApiError {
-  return {
-    code: 'CARDDEMO-PAUS-0002',
-    secondaryCode: '',
-    message,
-    severity: 'CRITICAL',
-    subsystem: 'APPLICATION',
-    status,
-    correlationId: 'UITESTAUTH000000000BB',
-    path: '/api/v1/authorizations',
-    timestamp: '2022-07-18 22:10:31.000000',
-    fieldErrors: [],
-    abend: null,
-  };
-}
-
-/**
  * Builds a listing answer this case settles itself, so a read can be held in flight across a turn.
  * @returns {{ promise: Promise<ReturnType<typeof listing>>; settle: () => void }} The held answer and
  *   the function that delivers it.
@@ -415,6 +397,40 @@ async function doesNotRepaintARefusedScopeFromAReadInFlight(): Promise<void> {
 }
 
 /**
+ * Builds the classified failure the browse publishes, from a status and the sentence a service sent.
+ *
+ * Assumptions: the classified failure is built rather than the bare problem document, because that is
+ * what `usePagedQuery` publishes on `failure` and what the screen now reads. Passing a document alone
+ * would exercise only the unclassified arm, leaving the three arms that decide between a service
+ * sentence, a momentary outage and a permanent fault untested while every case still passed.
+ *
+ * Assumptions: the remedy is left to the constructor's default, which derives it from the kind and the
+ * status through the transport module's own `remedyFor`. Supplying one here would let this file assert a
+ * transient judgement the client does not actually reach for the status under test.
+ * @param {number} status - Status the answer carried.
+ * @param {string | null} message - Sentence the service sent, or `null` when it sent none -- which is
+ *   what {@link ApiRequestError} carries for a timeout, a network failure and any body that was not a
+ *   problem document.
+ * @returns {ApiRequestError} The failure the transport module would raise.
+ */
+function failureWith(status: number, message: string | null): ApiRequestError {
+  const problem: ApiError = {
+    code: 'CARDDEMO-PAUS-0002',
+    secondaryCode: '',
+    message,
+    severity: 'CRITICAL',
+    subsystem: 'APPLICATION',
+    status,
+    correlationId: 'UITESTAUTH000000000BB',
+    path: '/api/v1/authorizations',
+    timestamp: '2022-07-18 22:10:31.000000',
+    fieldErrors: [],
+    abend: null,
+  };
+  return new ApiRequestError('PROBLEM', status, problem, `test failure ${String(status)}`);
+}
+
+/**
  * A 404 is reported as an unexpected condition and never as an account that does not exist.
  *
  * ⚠️ Purpose: this operation declares NO 404 -- an account with no summary row answers 200 with
@@ -423,13 +439,14 @@ async function doesNotRepaintARefusedScopeFromAReadInFlight(): Promise<void> {
  * arriving anyway means the request reached something other than the operation, and the sentence has to
  * say so rather than making a routing fault look like a business answer.
  *
- * Assumptions: the answer's OWN sentence is asserted absent as well. Whatever produced an undeclared 404
- * is not this service, so its body is a proxy's text, and falling through to it would put words on the
- * message band that nothing in this migration authored.
+ * Assumptions: the answer's OWN sentence is asserted absent as well, and the failure is given one for
+ * that assertion to bite on. Whatever produced an undeclared 404 is not this service, so its body is a
+ * proxy's text, and the branch has to be ordered ahead of the verbatim arm to keep it off the band --
+ * which is exactly what fails if the two are transposed.
  * @returns {void} Completion of the case; the assertions are its effect.
  */
 function reportsAnUndeclared404AsAnUnexpectedCondition(): void {
-  const notice = describeListingFailure(problemWith(404, 'Not Found'));
+  const notice = describeListingFailure(failureWith(404, 'Not Found'));
 
   expect(notice?.message).toBe(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED);
   expect(
@@ -442,17 +459,71 @@ function reportsAnUndeclared404AsAnUnexpectedCondition(): void {
 }
 
 /**
- * A 500 keeps the abend replacement the diagnostics register gives it.
+ * A momentary service outage says it may clear, and a permanent fault says it will not.
  *
- * Assumptions: this sits beside the case above so the pair states which statuses share one sentence and
- * why they share it for different reasons -- eight of the ten source diagnostics are replaced by it, and
- * the undeclared 404 joins them as a condition with no authored sentence of its own.
+ * ⚠️ Purpose: this is the distinction the previous arrangement could not draw. Every status at or
+ * above 500 took the abend replacement, so `503` -- which `TRANSIENT_STATUSES` in
+ * `ui/src/api/client.ts` declares a condition that may clear on its own -- was reported identically to
+ * a `500` that will not. An operator was told an outage was an abend and given no reason to press Enter
+ * again.
+ *
+ * Assumptions: BOTH sentences are asserted in one case, because the property under test is that the two
+ * statuses differ. A case asserting only the transient arm would pass against a screen that showed the
+ * momentary sentence for every failure, which is the same defect with the opposite sign.
+ *
+ * Assumptions: neither failure carries a sentence, which is what a bodiless answer and a proxy's HTML
+ * both produce -- the client synthesises a document with `message: null` for them. That is the only
+ * state in which the classification decides the wording, so it is the state this case supplies.
  * @returns {void} Completion of the case; the assertions are its effect.
  */
-function reportsAServiceFaultAsAnUnexpectedCondition(): void {
-  expect(describeListingFailure(problemWith(500, 'Internal Server Error'))?.message).toBe(
-    SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED,
+function distinguishesAMomentaryOutageFromAPermanentFault(): void {
+  expect(
+    describeListingFailure(failureWith(503, null))?.message,
+    'a status the transport module classifies as transient invites another attempt',
+  ).toBe(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(
+    describeListingFailure(failureWith(500, null))?.message,
+    'and one it does not asks for the failure to be reported instead',
+  ).toBe(PERSISTENT_FAILURE_REPORT_IT);
+}
+
+/**
+ * A service fault the service described is shown in the service's own words.
+ *
+ * Assumptions: a 500 is used deliberately, because it is the status the previous arrangement replaced
+ * unconditionally. The diagnostics register maps `COPAUS0C.cbl` L476 and L509 to
+ * `UNEXPECTED_ABEND_OCCURRED`, and the service sends that sentence in `message` -- so rendering the
+ * document verbatim shows the register's own replacement rather than substituting for it, and the
+ * sentence reaches the operator from the one place authorised to author it.
+ * @returns {void} Completion of the case; the assertions are its effect.
+ */
+function showsAServiceFaultInTheServicesOwnWords(): void {
+  expect(
+    describeListingFailure(failureWith(500, SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED))?.message,
+  ).toBe(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED);
+}
+
+/**
+ * A failure the transport module could not classify keeps the unexpected-condition sentence.
+ *
+ * Assumptions: a plain `Error` stands for the whole family, because the property is that the value was
+ * NOT narrowable and not which unnarrowable value it was. Both authored sentences describe a request
+ * that reached a classifier, so applying either to a value that did not would assert more than is
+ * known -- and the abend replacement is the closest target analogue of the baseline's own
+ * unexpected-condition arm.
+ * @returns {void} Completion of the case; the assertions are its effect.
+ */
+function keepsTheAbendSentenceForAnUnclassifiedFailure(): void {
+  const notice = describeListingFailure(new Error('something no service described'));
+
+  expect(notice?.message).toBe(SHARED_MESSAGES.UNEXPECTED_ABEND_OCCURRED);
+  expect(notice?.message, 'an unclassified value is not reported as a momentary outage').not.toBe(
+    TRANSIENT_FAILURE_TRY_AGAIN,
   );
+  expect(
+    notice?.message,
+    'nor is its own developer sentence put on the operator message band',
+  ).not.toBe('something no service described');
 }
 
 /**
@@ -464,7 +535,7 @@ function reportsAServiceFaultAsAnUnexpectedCondition(): void {
  */
 function showsAnAuthoredRefusalInItsOwnWords(): void {
   expect(
-    describeListingFailure(problemWith(400, 'Please correct the highlighted fields'))?.message,
+    describeListingFailure(failureWith(400, 'Please correct the highlighted fields'))?.message,
   ).toBe('Please correct the highlighted fields');
 }
 
@@ -559,38 +630,90 @@ async function namesBothAddressLines(): Promise<void> {
 }
 
 /**
- * The five row controls are one selection set, each named for the action it performs.
+ * Every row carries the mapset's own one-character selection field, named for the row it belongs to.
  *
- * Assumptions: the group is asserted through the ARIA role rather than through antd's class names,
- * because the property under test is what an assistive technology is told: five independent radios expose
- * no group at all, so a `radiogroup` containing every row control is exactly what was missing.
+ * ⚠️ Refactoring Rationale: this case asserted a `radiogroup` containing five `radio` controls. It now
+ * asserts five one-character ENTRY fields, because that is what `COPAU00.bms` declares -- `SEL0001`
+ * through `SEL0005` are `ATTRB=(FSET,NORM,UNPROT) ... LENGTH=1` at L277 to L282 and the four repeats --
+ * and because the screen's own row-22 sentence instructs the operator to TYPE `'S'`, which a radio can
+ * never obey. The group's contribution was one tab stop with arrow traversal; five unprotected fields
+ * are five tab stops, which is what the terminal's own tab key gave them.
+ *
+ * ⚠️ Assumptions: the declared width is asserted alongside the count, because a one-character field that
+ * admits two characters would let an operator type a value the source's `EVALUATE` could never receive.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
-async function groupsTheRowSelectors(): Promise<void> {
+async function paintsTheOneCharacterRowSelectors(): Promise<void> {
   await fetchPage();
 
-  const group = screen.getByRole('radiogroup', { name: AUTH_SUMMARY_SELECTION_PROMPT });
-  const controls = within(group).getAllByRole('radio');
+  const table = listingTable();
+  const controls = within(table).getAllByRole('textbox');
   expect(controls).toHaveLength(PAGE_ROWS);
   expect(
-    within(group).getByRole('radio', { name: selectionActionLabel(listItem(1).transactionId) }),
+    within(table).getByRole('textbox', {
+      name: selectionCellLabel(listItem(1).transactionId),
+    }),
   ).toBe(controls[0]);
-  expect(controls[0]?.getAttribute('name')).toBe(controls[1]?.getAttribute('name'));
+  expect(controls[0]).toHaveAttribute('maxLength', String(AUTH_SUMMARY_FIELD_WIDTHS.selection));
+
+  /*
+   * WHY : ⚠️ Assumptions: the ABSENCE of a radio is asserted with a non-throwing query, because
+   *       `getByRole` throws when nothing matches and a throwing query cannot express "there is none
+   *       of these". This half is what stops the radio column returning beside the typed one: two
+   *       controls for one `LENGTH=1` field would give the operator two ways to say one thing, and one
+   *       of them could not carry the character the source evaluates.
+   */
+  expect(screen.queryAllByRole('radio')).toEqual([]);
 }
 
 /**
- * Choosing a row and pressing the view key reaches that authorization's detail screen.
+ * Returns the row list's table, distinguished from the record panel's.
  *
- * Assumptions: this exercises the group's own change handler, which replaced five per-row handlers, and
- * it is asserted through the destination rather than through state so that the selection and the
+ * ⚠️ Assumptions: TWO tables render on this screen and a bare role query is therefore ambiguous. The
+ * record panel above the rows is an antd `Descriptions` with `bordered`, which emits a real `<table>`
+ * of its own, so the row list has to be identified by something only it has. Its selection column
+ * heading is that thing -- the mapset declares the column and its heading itself at `COPAU00.bms` L197
+ * to L201 -- so the identification is a painted baseline string rather than a test hook, and it is the
+ * same identification `src/test/authSummary.test.tsx` makes for the same reason.
+ * @returns {HTMLElement} The table carrying the listed authorizations.
+ * @throws {Error} If no table carries the selection heading, which means the row list did not render.
+ */
+function listingTable(): HTMLElement {
+  const table = screen.getAllByRole('table').find(hasSelectionHeading);
+  if (table === undefined) {
+    throw new Error(
+      `no rendered table carries the '${AUTH_SUMMARY_COLUMN_HEADERS.selection}' heading, so the row ` +
+        'list did not render; the record panel renders a table of its own and is not it',
+    );
+  }
+  return table;
+}
+
+/**
+ * Reports whether a table carries the row list's selection column heading.
+ * @param {HTMLElement} candidate - A rendered table.
+ * @returns {boolean} `true` when the table declares the selection column.
+ */
+function hasSelectionHeading(candidate: HTMLElement): boolean {
+  return within(candidate).queryAllByText(AUTH_SUMMARY_COLUMN_HEADERS.selection).length > 0;
+}
+
+/**
+ * Typing the selection character beside a row and pressing Enter reaches that authorization's detail.
+ *
+ * ⚠️ Assumptions: the character is TYPED rather than a control clicked, which is the whole of the change
+ * this case guards -- `PROCESS-ENTER-KEY` reads `SEL0001I` and moves whatever it holds into the
+ * selection flag (`COPAUS0C.cbl` L288 to L291), so the typed character is the input and Enter is the
+ * commit. It is asserted through the destination rather than through state, so the typed cell and the
  * navigation are shown to address the SAME record.
  * @returns {Promise<void>} Resolves once the assertion has run.
  */
 async function navigatesToTheChosenAuthorization(): Promise<void> {
   await fetchPage();
 
-  await userEvent.click(
-    screen.getByRole('radio', { name: selectionActionLabel(listItem(2).transactionId) }),
+  await userEvent.type(
+    screen.getByRole('textbox', { name: selectionCellLabel(listItem(2).transactionId) }),
+    AUTH_SUMMARY_SELECTION_CODE,
   );
   await userEvent.keyboard('{Enter}');
 
@@ -655,6 +778,135 @@ function usesTheSharedNavigationSeam(): void {
   expect(assigning).toEqual([]);
 }
 
+/**
+ * Captions the mapset paints beside the six monetary fields, in its own spelling.
+ *
+ * ⚠️ Assumptions: these are LITERALS transcribed from `app/app-authorization-ims-db2-mq/bms/COPAU00.bms`
+ * L143 to L197 rather than an import of the screen's own label constants, and that is the point of them.
+ * Importing the screen's constants would make the case agree with the screen by construction; spelling
+ * the mapset's `INITIAL` strings here makes it agree with the ORACLE, so a caption that drifted from the
+ * source would fail this case rather than travel through it.
+ */
+const MAPSET_MONEY_CAPTIONS = [
+  'Credit Lim:',
+  'Cash Lim:',
+  'Appr Amt:',
+  'Credit Bal:',
+  'Cash Bal:',
+  'Decl Amt:',
+] as const;
+
+/** A caption from the same panel that heads free text rather than a figure, as the negative control. */
+const MAPSET_TELEPHONE_CAPTION = 'PH:';
+
+/**
+ * Finds the value cell of the panel entry a caption heads.
+ *
+ * Assumptions: the label is matched on its RAW `textContent` and the value cell is taken as its next
+ * element sibling, because a bordered `Descriptions` renders each entry as an adjacent `th`/`td` pair --
+ * `antd/lib/descriptions/Row.js` L143 selects `['th', 'td']` when `bordered` is set. Matching raw text
+ * matters because several of this panel's captions carry a trailing space the mapset put there.
+ * @param {string} caption - The caption exactly as the mapset paints it.
+ * @returns {HTMLElement} The cell holding that entry's value.
+ * @throws {Error} When no label carries the caption, or the one that does heads no element.
+ */
+function panelValueCell(caption: string): HTMLElement {
+  for (const label of document.querySelectorAll('.ant-descriptions-item-label')) {
+    if (label.textContent === caption) {
+      const value = label.nextElementSibling;
+
+      if (value instanceof HTMLElement) {
+        return value;
+      }
+
+      throw new Error(`the panel entry headed "${caption}" heads no value cell`);
+    }
+  }
+
+  throw new Error(`no panel entry is headed "${caption}"`);
+}
+
+/**
+ * Every monetary cell anchors its content to its trailing edge, and no other cell does.
+ *
+ * ⚠️ Purpose: this guards a defect browser measurement found and prose could not. The six amounts sat
+ * flush against their cells' LEADING edge, so their trailing edges fell wherever each amount's own box
+ * width put them -- two edges 25.203125px apart in every rendered column, at 1280, 768 and 375 alike,
+ * because the box widths are `ch` on a fixed-pitch face and never vary with the viewport. The mapset
+ * gives each of its money columns one constant length across both rows, so on the terminal the decimal
+ * points of a column line up; anchoring the cell's content to its trailing edge is what restores that
+ * once the responsive reflow has folded three declared columns into two rendered ones.
+ *
+ * ⚠️ Assumptions: the assertion is on the CELL's inline style and not on the amount's, which is exactly
+ * the distinction the defect turned on. The amount always carried `text-align: end` -- that positions
+ * glyphs inside its own box and cannot move the box -- so a case asserting it would have passed
+ * throughout the defect. jsdom performs no layout, so the rendered geometry itself is not observable
+ * here; the reachable property is that the style arrives on the cell, and the pixels were confirmed
+ * separately in a browser.
+ *
+ * ⚠️ Assumptions: the six are collected and compared as a LIST rather than asserted one at a time, so a
+ * failure names which captions lost the anchor instead of stopping at the first. The telephone entry is
+ * checked in the same case as the negative half: trailing-edge alignment is right for a column of
+ * figures and wrong for free text, so a root-level style that fixed all six by disfiguring the rest
+ * would fail here.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function anchorsEveryAmountToItsCellsTrailingEdge(): Promise<void> {
+  await fetchPage();
+
+  const anchored: string[] = [];
+
+  for (const caption of MAPSET_MONEY_CAPTIONS) {
+    if (panelValueCell(caption).style.textAlign === 'end') {
+      anchored.push(caption);
+    }
+  }
+
+  expect(anchored).toEqual([...MAPSET_MONEY_CAPTIONS]);
+  expect(panelValueCell(MAPSET_TELEPHONE_CAPTION).style.textAlign).toBe('');
+}
+
+/**
+ * Every row's selection cell carries an identifier the document can resolve, unique to its row.
+ *
+ * ⚠️ Purpose: this guards a defect the browser reported and no test could see. DevTools raised "A form
+ * field element should have an id or name attribute" against exactly five nodes on this screen -- one per
+ * row of a page -- because these cells carried an accessible name and no identifier at all. They were
+ * the only form controls in the application in that state; the two sibling browse screens already
+ * publish `user-list-action-<userId>` and `ref-type-list-action-<typeCd>` and neither was reported.
+ *
+ * ⚠️ Assumptions: each identifier is checked by RESOLVING it through the document and comparing the
+ * result to the control it came from, rather than by matching it against a pattern. That is the property
+ * the platform actually needs -- an identifier that does not resolve, or resolves to something else, is
+ * no better than none -- and it catches a duplicate identifier as well as an absent one, because a
+ * repeated value would resolve to the first cell and fail the identity comparison for the rest.
+ *
+ * Assumptions: the accessible NAME is asserted alongside, so a change that supplied the identifier by
+ * taking the name away would fail here rather than read as a fix.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function identifiesEveryRowSelector(): Promise<void> {
+  await fetchPage();
+
+  const unresolved: string[] = [];
+  const identifiers = new Set<string>();
+
+  for (const ordinal of [1, 2, 3]) {
+    const cell = screen.getByRole('textbox', {
+      name: selectionCellLabel(listItem(ordinal).transactionId),
+    });
+
+    identifiers.add(cell.id);
+
+    if (cell.id === '' || document.getElementById(cell.id) !== cell) {
+      unresolved.push(listItem(ordinal).transactionId);
+    }
+  }
+
+  expect(unresolved).toEqual([]);
+  expect(identifiers.size).toBe(PAGE_ROWS);
+}
+
 /** Registers every case of this suite. */
 function authSummaryCases(): void {
   it('refuses a short identifier locally', refusesAShortIdentifierLocally);
@@ -667,17 +919,24 @@ function authSummaryCases(): void {
     reportsAnUndeclared404AsAnUnexpectedCondition,
   );
   it(
-    'reports a service fault as an unexpected condition',
-    reportsAServiceFaultAsAnUnexpectedCondition,
+    'distinguishes a momentary outage from a permanent fault',
+    distinguishesAMomentaryOutageFromAPermanentFault,
+  );
+  it("shows a service fault in the service's own words", showsAServiceFaultInTheServicesOwnWords);
+  it(
+    'keeps the abend sentence for an unclassified failure',
+    keepsTheAbendSentenceForAnUnclassifiedFailure,
   );
   it('shows an authored refusal in its own words', showsAnAuthoredRefusalInItsOwnWords);
   it('accepts the declared width', acceptsTheDeclaredWidth);
   it('links the filter refusal to the control', linksTheFilterRefusalToTheControl);
   it('names both address lines', namesBothAddressLines);
-  it('groups the row selectors', groupsTheRowSelectors);
+  it('paints the one-character row selectors', paintsTheOneCharacterRowSelectors);
+  it('identifies every row selector', identifiesEveryRowSelector);
   it('navigates to the chosen authorization', navigatesToTheChosenAuthorization);
   it('pins the key columns', pinsTheKeyColumns);
   it('takes the shared column policy', takesTheSharedColumnPolicy);
+  it("anchors every amount to its cell's trailing edge", anchorsEveryAmountToItsCellsTrailingEdge);
   it('uses the shared navigation seam', usesTheSharedNavigationSeam);
 }
 

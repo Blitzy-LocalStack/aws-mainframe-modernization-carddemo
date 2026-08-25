@@ -26,12 +26,18 @@
  * condition values, so those come from the catalog too, and none of them is written inline below.
  * Nothing user-visible is declared in this file.
  *
- * Assumptions: the six header fields the mapset paints in rows 1 and 2 -- `TRNNAME`, `TITLE01`,
- * `CURDATE`, `PGMNAME`, `TITLE02` and `CURTIME` -- are not composed here, and neither is the row-23
- * error line nor the row-24 legend. All three zones are DELEGATED to the one `AppShell` that
- * `ui/src/App.tsx` mounts, by publishing this screen's transaction identifier, program name, paint
- * instant, error sentence and resolved key bindings through `useShellSlot`. What stays in the body is
- * the row-22 informational line, because the mapset puts that one inside the screen's own field area.
+ * ⚠️ Assumptions: the six header fields the mapset paints in rows 1 and 2 -- `TRNNAME`, `TITLE01`,
+ * `CURDATE`, `PGMNAME`, `TITLE02` and `CURTIME` -- are not composed here, and neither is the row-22
+ * informational line, the row-23 error line nor the row-24 legend. All FOUR zones are DELEGATED to the
+ * one `AppShell` that `ui/src/App.tsx` mounts, by publishing this screen's transaction identifier,
+ * program name, paint instant, advisory sentence, error sentence and resolved key bindings through
+ * `useShellSlot`. Nothing persistent stays in the body.
+ *
+ * ⚠️ Refactoring Rationale: the row-22 line was the one exception to that, on the reading that
+ * `INFOMSG` at `POS=(22,23)` sits inside the screen's own field area. A browser measurement is what
+ * withdrew the exception: the body-composed band's rect top was 1270.39 in an 860-pixel viewport, so
+ * the operator's acknowledgement was painted 410 pixels below the fold while the frame's own row-22
+ * zone stood reserved and empty. The delegation site records the full reasoning.
  *
  * Refactoring Rationale: an earlier revision of this paragraph claimed the same division of labour
  * while the module published nothing and no shell was mounted, so the delivered screen had no title
@@ -54,25 +60,44 @@ import { useCallback, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentProps, CSSProperties, ReactElement } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 
-import { applyMoneyEditMask } from '../../format/money';
+/*
+ * WHY : ⚠️ Refactoring Rationale: the single money entry point is imported, where only the mask was.
+ *       The mask returns TEXT and nothing else, so every caller had to decide the sign's appearance and
+ *       the whitespace mode for itself -- and this screen decided neither, which is why a padded amount
+ *       painted with its padding collapsed. `renderMoney` returns the text, the sign, the token the
+ *       sign is painted in and the whitespace mode the padding requires, so the decision is made once
+ *       for every screen instead of once per call site.
+ */
+import { MONEY_PICTURES, renderMoney } from '../../format/money';
 import { readAccountView } from '../../api/accounts';
 import type { AccountDetail, AccountViewResponse, CustomerDetail } from '../../api/accounts';
 import type { AbendDetail, ApiError, FieldError, FieldValidationState } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import { busyAnnouncement, fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
 import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
-import { MessageBand } from '../../layout/MessageBand';
 import { usePfKeys } from '../../layout/usePfKeys';
 import type { PfKeyRejection } from '../../layout/usePfKeys';
+/*
+ * WHY : ⚠️ Assumptions: the three AUTHORED sentences are imported from the same catalog as the
+ *       transcribed ones, which is what keeps them lawful under transformation rule T8 -- a screen may
+ *       not invent operator wording, and these are declared, registered and width-checked in that
+ *       module. They describe conditions this program has no wording for: a request still outstanding,
+ *       and a request that never reached the service at all. A 3270 inhibited the keyboard rather than
+ *       narrating, and `app/cbl/COACTVWC.cbl` composes a CICS `RESP`/`REAS` diagnostic for a failed
+ *       read, which has no analogue here.
+ */
 import {
   ABEND_DATA_FIELDS,
   ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS,
   ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS,
   ACCOUNT_VIEW_HEADINGS,
   ACCOUNT_VIEW_KEY_LABELS,
+  PERSISTENT_FAILURE_REPORT_IT,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
   UNEXPECTED_ABEND_OCCURRED,
   UNEXPECTED_DATA_SCENARIO,
 } from '../../messages/messages';
@@ -225,6 +250,175 @@ const ACCOUNT_ID_RESPONSE_FIELD = 'accountId';
  * width alongside the text, which is how the information and error channels below stay distinguishable.
  */
 const ACCOUNT_VIEW_MESSAGES = STATUS_MESSAGES.COACTVWC;
+
+/**
+ * Characters in the widest label either record block paints.
+ *
+ * Purpose: give both blocks ONE label measure, so their grids line up with each other.
+ *
+ * ⚠️ Refactoring Rationale: neither block used to state a label width, so each sized its own label
+ * column to its own longest label and the two disagreed -- a browser review measured the two grids'
+ * label columns differing by 28 pixels. The cause is in the data: the account block's longest label is
+ * `'Credit Limit        :'` at 21 characters and the customer block's is
+ * `'Government Issued Id Ref    : '` at 30, so content-driven sizing could not have agreed.
+ *
+ * ⚠️ Assumptions: it is COMPUTED from the two label maps rather than written as a number, so a label
+ * added or lengthened in `ui/src/messages/messages.ts` moves this measure with it. A literal would be
+ * correct on the day it was written and silently wrong afterwards, which is the failure the measured
+ * 28-pixel gap already is.
+ */
+const RECORD_LABEL_MEASURE_CHARACTERS = Math.max(
+  ...Object.values(ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS).map(
+    /**
+     * Reads one label's character count.
+     * @param {string} label - The painted label, padding included.
+     * @returns {number} Its length in characters.
+     */
+    (label: string): number => label.length,
+  ),
+  ...Object.values(ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS).map(
+    /**
+     * Reads one label's character count.
+     * @param {string} label - The painted label, padding included.
+     * @returns {number} Its length in characters.
+     */
+    (label: string): number => label.length,
+  ),
+);
+
+/*
+ * WHY : ⚠️ Assumptions: the measure is expressed in `ch` -- the design system's own mechanism for
+ *       sizing from a declared character count, which `ui/src/layout/recordLayout.ts` uses for every
+ *       transcribed field on the sibling screen. The labels are set in a proportional face, so a
+ *       character is narrower than a `ch` and the measure binds as a floor for both blocks rather
+ *       than clipping either; an auto-layout table treats it as a minimum, so a label can never be
+ *       cut off by it.
+ * WHY : Alternatives Considered: `tableLayout: 'fixed'` with the same width, which would make the
+ *       column EXACTLY this measure in both blocks instead of at least it. Rejected because fixed
+ *       layout also equalises the two VALUE columns, and the values are not equal -- a
+ *       fifty-character address line shares a row with a two-character state code -- so it would
+ *       trade a label-column asymmetry for wrapped or clipped values.
+ * WHY : Alternatives Considered: `whiteSpace: 'pre'` on the labels, so the mapset's own padding spaces
+ *       survive and the padded colons align. Rejected on the data: the padding is NOT uniform. The
+ *       five money labels are each padded to exactly 21 characters with the colon last, but their
+ *       neighbours run from `'Opened:'` at 7 to `'Account Number :'` at 16, and the customer block
+ *       from `''` to 30 -- so preserving the runs would align one group of five and open ragged
+ *       internal gaps in every other label. The strings themselves are carried verbatim in the DOM
+ *       either way, which is what the fidelity contract asks; only their rendered whitespace collapses.
+ */
+
+/** One shared label-column measure, applied to both record blocks. */
+const RECORD_LABEL_STYLE: CSSProperties = {
+  inlineSize: `${String(RECORD_LABEL_MEASURE_CHARACTERS)}ch`,
+};
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: the response's return message is routed by MEANING from here on,
+ *       where it was published on the refusal line unconditionally. A browser review measured the
+ *       consequence: the service answered a successful read with `informationMessage: null` and
+ *       `returnMessage: 'Details of selected account shown above'`, and the screen painted that
+ *       ACKNOWLEDGEMENT in `ant-alert-error` styling inside an assertive `role="alert"` -- so a screen
+ *       reader interrupted itself to announce a success as a failure, in the refusal colour.
+ * WHY : ⚠️ Assumptions: the routing consults the CATALOG rather than a rule about which response
+ *       member a sentence arrived in, and the catalog is a real oracle for it: every entry carries the
+ *       COBOL data name of the field its `88` level is declared on, so `WS-INFO-MSG` and
+ *       `WS-RETURN-MSG` say which of the mapset's two lines the reference paints that sentence on.
+ *       `app/cbl/COACTVWC.cbl` L110 to L137 declares the whole set, and the split is not incidental:
+ *       the two advisories are on the information field and every refusal is on the return field.
+ * WHY : ⚠️ Assumptions: one sentence in the set is declared by the SIBLING program rather than by this
+ *       one -- `FOUND_ACCOUNT_DATA` at `app/cbl/COACTUPC.cbl` L467, also on `WS-INFO-MSG` -- and it
+ *       belongs here because the account read is ONE service operation serving both screens, so its
+ *       acknowledgement can reach this screen. What decides the channel is the field the sentence is
+ *       declared on, which does not change with the program that declares it.
+ * WHY : Alternatives Considered: scanning every program's block for a matching text and routing on
+ *       whatever field it finds. Rejected as too loose in both directions -- a sentence two programs
+ *       declare on two different fields would route by whichever block was scanned first, and a screen
+ *       would silently accept advisory text from a program that cannot answer it. Naming the entries
+ *       keeps the set auditable and lets a case assert that every member really is an information-line
+ *       entry, which is the property the routing depends on.
+ */
+
+/** Catalogued entries whose own declaring field puts them on the row-22 information line. */
+const ADVISORY_ENTRIES = [
+  ACCOUNT_VIEW_MESSAGES.WS_PROMPT_FOR_INPUT,
+  ACCOUNT_VIEW_MESSAGES.WS_INFORM_OUTPUT,
+  STATUS_MESSAGES.COACTUPC.FOUND_ACCOUNT_DATA,
+] as const;
+
+/** COBOL data name of the field the reference paints on row 22. */
+export const INFORMATION_LINE_FIELD = 'WS-INFO-MSG';
+
+/** The advisory sentences, indexed for lookup by the router below. */
+export const ACCOUNT_VIEW_ADVISORY_SENTENCES: ReadonlySet<string> = new Set(
+  ADVISORY_ENTRIES.map(
+    /**
+     * Reads one catalogued entry's text.
+     * @param {(typeof ADVISORY_ENTRIES)[number]} entry - The catalogued message.
+     * @returns {string} Its literal text.
+     */
+    (entry: (typeof ADVISORY_ENTRIES)[number]): string => entry.text,
+  ),
+);
+
+/** The declaring field of each advisory entry, so a case can check the set against the catalog. */
+export const ACCOUNT_VIEW_ADVISORY_FIELDS: readonly string[] = ADVISORY_ENTRIES.map(
+  /**
+   * Reads one catalogued entry's declaring field.
+   * @param {(typeof ADVISORY_ENTRIES)[number]} entry - The catalogued message.
+   * @returns {string} The COBOL data name the entry's `88` level is declared on.
+   */
+  (entry: (typeof ADVISORY_ENTRIES)[number]): string => entry.field,
+);
+
+/** Which line each of a response's two sentences belongs on, once routed by meaning. */
+export interface AccountViewChannels {
+  /** The row-22 advisory to paint, which the reference guarantees is never empty. */
+  readonly information: string;
+  /** The row-23 refusal to paint, or `null` when the turn produced none. */
+  readonly refusal: string | null;
+}
+
+/**
+ * Routes a read's two sentences onto the two lines the reference declares them on.
+ *
+ * Purpose: keep an acknowledgement off the refusal line, and keep one sentence from being painted on
+ * both lines at once.
+ *
+ * Assumptions: an advisory arriving in the return member is moved to the information line rather than
+ * dropped, because the reference paints that sentence somewhere and the operator is entitled to read
+ * it -- what is wrong is only WHICH line carries it.
+ *
+ * Assumptions: an information member the service supplied WINS over an advisory in the return member,
+ * because the service named the channel explicitly there; the return member's advisory is then
+ * dropped rather than painted twice, which is the duplicate the review reported as contradictory.
+ *
+ * Trade-offs: a sentence the catalog does not know is treated as a REFUSAL. That is the conservative
+ * reading in a browser: an unrecognised sentence painted as an advisory would be announced politely
+ * and could be a genuine failure, whereas one painted as a refusal is announced and is at worst
+ * over-emphatic. Every sentence this operation can answer with is catalogued, so the fallback is
+ * reached only if the service starts saying something new.
+ * @param {string | null} informationMessage - The response's information member, as published.
+ * @param {string | null} returnMessage - The response's return member, as published.
+ * @param {string} promptFallback - The sentence the reference guarantees on row 22 when neither
+ *   member supplies one.
+ * @returns {AccountViewChannels} The sentence for each line, deduplicated across the two.
+ */
+export function routeAccountViewChannels(
+  informationMessage: string | null,
+  returnMessage: string | null,
+  promptFallback: string,
+): AccountViewChannels {
+  const returnIsAdvisory =
+    returnMessage !== null && ACCOUNT_VIEW_ADVISORY_SENTENCES.has(returnMessage);
+  const information =
+    informationMessage ??
+    (returnIsAdvisory && returnMessage !== null ? returnMessage : promptFallback);
+
+  return {
+    information,
+    refusal: returnIsAdvisory || returnMessage === information ? null : returnMessage,
+  };
+}
 
 /*
  * WHY : Assumptions: the two labels beside the abend detail are the baseline's OWN data names, read out
@@ -506,15 +700,74 @@ function accountIdRefusalFrom(problem: ApiError): AccountIdRefusal | null {
  * cross-reference row and a missing customer row are all reported as one status, so no finer branch
  * can be established here; that literal is the reference's own wording for the commonest of the three
  * and introduces no new text.
+ * ⚠️ Refactoring Rationale: a second fallback stands between the supplied sentence and the
+ * account-master one, and until it did, a request that never reached the service was reported as a
+ * missing account. Only the `PROBLEM` kind is a service answering: the client synthesises a document
+ * for a timeout, for a dropped connection and for a body it cannot read, and those documents carry a
+ * null message -- so all three fell through to the account-master literal and told an operator their
+ * account does not exist when what happened is that nothing answered. That is a false statement about
+ * their data, and it sends them to check an identifier that was correct.
  * @param {ApiError} problem - The normalised problem document the read rejected with.
+ * @param {string | null} noAnswerSentence - The authored sentence for a request that reached no
+ *   service, or `null` when the rejection came from one.
  * @returns {string} The sentence to render in the error channel of the message band.
  */
-function screenMessageFrom(problem: ApiError): string {
+function screenMessageFrom(problem: ApiError, noAnswerSentence: string | null): string {
   const supplied = problem.message ?? '';
 
-  return supplied.trim().length > 0
-    ? supplied
-    : ACCOUNT_VIEW_MESSAGES.DID_NOT_FIND_ACCT_IN_ACCTDAT.text;
+  /*
+   * WHY : Assumptions: the ORDER is the catalog's stated one -- a service-supplied sentence verbatim,
+   *       then the authored no-answer sentence, then the reference's own literal. The supplied sentence
+   *       comes first unconditionally, so a service that does answer is never overruled by a
+   *       classification made from its transport status.
+   */
+  if (supplied.trim().length > 0) {
+    return supplied;
+  }
+
+  return noAnswerSentence ?? ACCOUNT_VIEW_MESSAGES.DID_NOT_FIND_ACCT_IN_ACCTDAT.text;
+}
+
+/**
+ * Chooses the authored sentence for a rejection that never reached the service, if it is one.
+ *
+ * ⚠️ Alternatives Considered: `isApiRequestError` and `isTransientFailure` from `ui/src/api/client.ts`,
+ * which is where that classification belongs and which the sibling `/account/update` screen uses.
+ * Rejected here for the reason {@link problemFrom} records at length: both are `instanceof` checks, and
+ * the suites under `ui/src/test/**` reject with hand-assembled doubles that carry the shape without the
+ * prototype, so a screen narrowing that way answers `false` for every failure a test can build. The
+ * test is therefore structural, against the two members the client publishes, exactly as the sibling
+ * narrowing in this module is.
+ *
+ * ⚠️ Assumptions: the CLASSIFICATION itself is not re-derived. The client decides which conditions may
+ * clear -- a timeout and four retryable statuses do, a dropped connection does not -- and this reads its
+ * answer off the failure rather than testing a status list of its own. A second opinion here is how a
+ * screen comes to invite a repeat for a failure that repeating cannot clear.
+ *
+ * Assumptions: a `kind` of `PROBLEM` returns `null` rather than a sentence, because that kind means the
+ * service answered and its own document owns the wording.
+ *
+ * Assumptions: the transient sentence invites a repeat and this screen offers no control for one, which
+ * is deliberate. A repeat control belongs behind the transport module's `isRepeatableFailure` and not
+ * behind transience -- the two differ exactly where it matters -- and the repeat here is a key the
+ * operator already has, since Enter re-reads. Nothing consults that predicate on this screen and
+ * anything added later must.
+ * @param {unknown} reason - The value a rejected read settled with.
+ * @returns {string | null} The authored sentence for a no-answer failure, or `null` when the rejection
+ *   carries no such classification or came from the service itself.
+ */
+function noAnswerSentenceFrom(reason: unknown): string | null {
+  if (typeof reason !== 'object' || reason === null) {
+    return null;
+  }
+
+  const { kind, transient } = reason as { readonly kind?: unknown; readonly transient?: unknown };
+
+  if (typeof kind !== 'string' || kind === 'PROBLEM' || typeof transient !== 'boolean') {
+    return null;
+  }
+
+  return transient ? TRANSIENT_FAILURE_TRY_AGAIN : PERSISTENT_FAILURE_REPORT_IT;
 }
 
 /**
@@ -873,6 +1126,87 @@ function customerBlockRows(detail: CustomerDetail): readonly RecordRow[] {
   ];
 }
 
+/*
+ * WHY : ⚠️ Refactoring Rationale: the monetary value is a COMPONENT rather than three properties
+ *       spread inline at the render site, and the reason is the token. `renderMoney` returns a token
+ *       NAME so that the colour question stays in the theme -- resolving it needs the design system's
+ *       own token accessor, which is a hook, and the render site is inside a plain mapping function
+ *       with no component boundary of its own. A component is the smallest thing that can hold a hook.
+ * WHY : Alternatives Considered: threading the resolved token map down as a fourth parameter of the
+ *       mapping function, which needs no component. Rejected because every one of that function's
+ *       callers would then have to carry a value only one branch of it uses, and the resolved map is
+ *       already available at the one place that needs it -- inside a component.
+ */
+
+/** What one monetary value needs to paint itself: the wire amount and the fixed-pitch style. */
+interface MonetaryValueProps {
+  /** Money exactly as the service published it, as a decimal string. */
+  readonly wireAmount: string;
+  /** Style carrying the fixed-pitch font token, so a column of amounts aligns. */
+  readonly style: CSSProperties;
+}
+
+/**
+ * Paints one monetary value with its picture, its pad preserved and its sign expressed.
+ *
+ * Purpose: render an amount the way the terminal did -- right-aligned inside a fixed field by a run
+ * of pad blanks -- and make the three sign cases distinguishable, which the AAP requires of the
+ * rendering rather than of each screen.
+ *
+ * Assumptions: the whitespace mode comes from the rendering rather than being written here, because
+ * `renderMoney` returns it precisely so no screen has to know which pictures pad with blanks and
+ * which pad with zeroes.
+ * @param {MonetaryValueProps} props - The wire amount and the fixed-pitch style.
+ * @returns {ReactElement} The painted amount.
+ */
+function MonetaryValue({ wireAmount, style }: MonetaryValueProps): ReactElement {
+  /*
+   * WHY : ⚠️ Assumptions: the token is resolved through `cssVar` and never through the resolved
+   *       `token` map, so what reaches the element is a `var(--ant-...)` reference rather than the
+   *       colour that variable currently holds. Reading the resolved value would bake today's palette
+   *       into an inline style -- it would stop following a theme change, and it would put a rendered
+   *       design value in the DOM where the token bridge is what the review checks. Every other colour
+   *       on this screen is resolved the same way.
+   */
+  const { cssVar } = theme.useToken();
+  const rendered = renderMoney(wireAmount, MONEY_PICTURES.accountGrouped);
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the lookup is NARROWED by a type test where it used to be widened by
+   *       `String(...)`, and the difference is that the old form was a lint error rather than a
+   *       preference: `@typescript-eslint/no-base-to-string` rejects stringifying a value whose type
+   *       admits an object, because such a value reaches the DOM as the literal `[object Object]`. The
+   *       union here does admit one -- `renderMoney` types its token as `keyof GlobalToken`, so indexing
+   *       the accessor with it yields the value type of EVERY design token, not just the colours.
+   * WHY : ⚠️ Assumptions: the test is `typeof === 'string'`, which is exactly what a CSS-variable
+   *       reference is, so the branch that paints is the only branch reachable for a colour token and
+   *       the other exists solely to make that statement checkable. A cast was the alternative and is
+   *       worse in the same way it was before: a cast asserts the fact to the compiler where this one
+   *       establishes it.
+   * WHY : Trade-offs: the narrowing is local, because the wide type's ORIGIN is `colorToken` on
+   *       `MoneyRendering` in `ui/src/format/money.ts`, which this group may not edit. Declaring that
+   *       member as the union of the three sign tokens it can actually hold would remove the need for
+   *       any test at all here and at every other call site; it is reported rather than reached for.
+   */
+  const colourReference = cssVar[rendered.colorToken];
+
+  return (
+    <Typography.Text
+      style={{
+        ...style,
+        whiteSpace: rendered.whiteSpace,
+        /*
+         * WHY : Assumptions: the colour is SPREAD in rather than assigned a value that may be nothing,
+         *       because `ui/tsconfig.json` enables `exactOptionalPropertyTypes` -- under which an
+         *       optional style property will not accept an explicit `undefined`.
+         */
+        ...(typeof colourReference === 'string' ? { color: colourReference } : {}),
+      }}
+    >
+      {rendered.text}
+    </Typography.Text>
+  );
+}
+
 /**
  * Converts record rows into the design system's record entries.
  *
@@ -925,12 +1259,32 @@ function toDescriptionItems(
            *       which writes `Money.toPlainString()`, so the service cannot have applied it and
            *       nothing else did. The mask is a string transformation on the digits, so applying it
            *       parses nothing and keeps the exactness the string representation exists to protect.
+           * WHY : ⚠️ Refactoring Rationale: the rendering now comes from `renderMoney` and the two
+           *       properties it returns BESIDE the text are applied. Applying the mask alone was not
+           *       enough and a browser review measured why: the DOM held `+      5,000.00` and computed
+           *       `white-space: normal`, so the run of pad blanks collapsed to one and the amount
+           *       painted as `+ 5,000.00`. The pad IS the alignment -- a suppressed picture right-aligns
+           *       by padding the integer field with blanks -- so collapsing it puts two amounts of
+           *       different magnitudes at different offsets down one column. Equal-width masks measured
+           *       84.016 pixels with the pad preserved against 67.219 without it.
+           * WHY : ⚠️ Assumptions: the SIGN's token is applied as well, from the same call. The mapset's
+           *       mask is signed, so the leading `+` or `-` is in the text whatever colour is resolved
+           *       -- colour is redundant here and never the sole carrier, which is what keeps this on
+           *       the right side of the use-of-colour criterion -- but a credit and a debit painted in
+           *       one colour is a distinction the AAP asks the rendering to make and this screen was
+           *       not making.
+           * WHY : Assumptions: the picture is named explicitly rather than left to the function's
+           *       default, even though the default IS this picture. The account mask is
+           *       `+ZZZ,ZZZ,ZZZ.99`, width 15, sourced from `app/bms/COACTVW.bms` -- five `PICOUT`
+           *       occurrences -- and from `app/cbl/COACTUPC.cbl` L371; naming it means this call states
+           *       which measurement it is relying on rather than inheriting whichever one the formatter
+           *       currently defaults to.
            * WHY : Assumptions: it is applied at the single point every monetary row is rendered rather
            *       than at each of the five sites that build those rows. One call site cannot then
            *       disagree with another, and the `monetary` flag that selects the fixed-pitch font
            *       already marks exactly the fields the mapset gives a `PICOUT` to.
            */}
-          <Typography.Text style={monetaryStyle}>{applyMoneyEditMask(row.value)}</Typography.Text>
+          <MonetaryValue style={monetaryStyle} wireAmount={row.value} />
         </Flex>
       ) : row.continuation === undefined ? (
         <Typography.Text>{row.value}</Typography.Text>
@@ -1254,29 +1608,43 @@ export function AccountViewScreen(): ReactElement {
           }
 
           setView(result.account);
-          setErrorMessage(result.account.returnMessage);
           setLoading(false);
 
           /*
-           * WHY : ⚠️ Refactoring Rationale: the successful state showed `Displaying details of given
-           *       Account` when the response supplied no information line, and that sentence is
-           *       withdrawn. It is the `88`-level value `WS-INFORM-OUTPUT` at `app/cbl/COACTVWC.cbl`
-           *       L115-L116, and the program never `SET`s it anywhere; L528-L530 then forces the
-           *       prompt back whenever the information field is empty, so the reference's information
-           *       line is the prompt on every turn, record on display or not. Substituting an unset
-           *       condition's text was therefore an invented behaviour presented as a divergence, and
-           *       it was registered nowhere -- no entry in
-           *       `docs/architecture/cobol-to-service-traceability.md` authorises it. The prompt is the
-           *       floor the reference guarantees, so the prompt is the fallback.
-           * WHY : Assumptions: the fallback is reached rarely if ever, because the service supplies the
-           *       prompt on every arm of the composition -- which is the same sentence -- so this
-           *       expression normally resolves to the response's own value. It is written out rather
-           *       than dropped because the contract declares the member nullable, and a null must not
-           *       reach the band as an empty line where the reference paints text.
+           * WHY : ⚠️ Refactoring Rationale: both lines are decided by ONE routing call, where the
+           *       return member used to be assigned to the refusal line directly. A browser review
+           *       drove a successful read and measured what that produced: the service answered
+           *       `informationMessage: null` with `returnMessage: 'Details of selected account shown
+           *       above'`, and the screen painted that acknowledgement in `ant-alert-error` styling
+           *       inside an assertive `role="alert"` -- announcing a success as a failure. Routing by
+           *       the catalog's own declaring field puts it on row 22, which is the line
+           *       `app/cbl/COACTUPC.cbl` L467 declares it on.
+           * WHY : Assumptions: the prompt is still the floor for row 22 and the citation for that is
+           *       unchanged -- `WS-INFORM-OUTPUT` at `app/cbl/COACTVWC.cbl` L115-L116 is declared and
+           *       never `SET`, and L528-L530 forces the prompt back whenever the information field is
+           *       empty -- so it is passed IN as the fallback rather than being chosen here.
            */
-          setInfoMessage(
-            result.account.informationMessage ?? ACCOUNT_VIEW_MESSAGES.WS_PROMPT_FOR_INPUT.text,
+          const channels = routeAccountViewChannels(
+            result.account.informationMessage,
+            result.account.returnMessage,
+            ACCOUNT_VIEW_MESSAGES.WS_PROMPT_FOR_INPUT.text,
           );
+
+          setErrorMessage(channels.refusal);
+
+          /*
+           * WHY : ⚠️ Assumptions: the sentence `Displaying details of given Account` is still NOT
+           *       substituted here when the response supplies no information line, and the reason is
+           *       unchanged by the routing: it is the `88`-level value `WS-INFORM-OUTPUT` at
+           *       `app/cbl/COACTVWC.cbl` L115-L116, which the program declares and never `SET`s, while
+           *       L528-L530 forces the PROMPT back whenever the information field is empty. So the
+           *       reference's information line is the prompt on every turn, record on display or not,
+           *       and the prompt is the floor -- which is what was passed as the fallback above. The
+           *       fallback is written out rather than dropped because the contract declares the member
+           *       nullable and a null must not reach the band as an empty line where the reference
+           *       paints text.
+           */
+          setInfoMessage(channels.information);
         },
         /**
          * Reports a rejected read on the channel that matches what the rejection carried.
@@ -1337,7 +1705,7 @@ export function AccountViewScreen(): ReactElement {
 
           setRefusal(accountIdRefusalFrom(problem));
           setAbend(problem.abend);
-          setErrorMessage(screenMessageFrom(problem));
+          setErrorMessage(screenMessageFrom(problem, noAnswerSentenceFrom(reason)));
         },
       );
     },
@@ -1407,6 +1775,23 @@ export function AccountViewScreen(): ReactElement {
         onInvoke: (): void => {
           submit();
         },
+        /*
+         * WHY : ⚠️ Assumptions: risk is declared by what the ACTION does, and every action on this screen
+         *       reads. `app/cbl/COACTVWC.cbl` admits exactly two attention identifiers, at L307 to L308,
+         *       and neither writes anything -- this one edits the filter and performs the three reads,
+         *       and the other transfers control. The declaration changes no paint here, because the
+         *       emphasis fallback it displaces applies to a control this screen does not paint: this
+         *       binding carries no label, so it is keyboard-only. It is declared anyway so the screen's
+         *       own statement of consequence is on the record rather than inferred from a shared default.
+         * WHY : ⚠️ Alternatives Considered: opening a `busy` channel here as the sibling `/account/update`
+         *       screen does. DECLINED, and the reason is this screen's own tested contract: a later
+         *       submission SUPERSEDES an outstanding read -- `invalidateInFlightRead` and the sequence
+         *       token exist for exactly that -- so a busy predicate would silently decline the press that
+         *       is meant to replace the request in the air, and the operator would have to wait out a
+         *       read they had already abandoned. The screen still reports the outstanding request, on the
+         *       live region below and on the form's own overlay, which is the half that was missing.
+         */
+        risk: 'read-only',
       },
       PFK03: {
         /**
@@ -1417,6 +1802,12 @@ export function AccountViewScreen(): ReactElement {
           exit();
         },
         label: ACCOUNT_VIEW_KEY_LABELS.PFK03,
+        /*
+         * WHY : Assumptions: risk is `read-only` and no busy channel is opened, for the same reason as
+         *       above and one more: this key issues no request at all, so it has no turn of its own to
+         *       report and a reserved busy affordance here could never fill.
+         */
+        risk: 'read-only',
       },
     },
     {
@@ -1452,12 +1843,34 @@ export function AccountViewScreen(): ReactElement {
    *       was simply missing from the rendered screen. Publishing is what makes that statement true:
    *       the shell paints a zone if and ONLY if a screen has delegated it, so a screen gets the frame
    *       by asking for it.
-   * WHY : Assumptions: the row-23 error line and the row-24 legend go UP to the shell while the row-22
-   *       informational line stays in the body below. That split is the mapset's own, not a convenience:
-   *       `INFOMSG` is at `POS=(22,23)` inside the screen's own field area and `ERRMSG` at `POS=(23,1)`
-   *       is the last line before the legend, which is the line the shell owns for every screen. Keeping
-   *       the informational band here therefore preserves the measured reading order - record blocks,
-   *       row 22, row 23, row 24 - with each line rendered by whichever layer owns it.
+   * WHY : ⚠️ Refactoring Rationale: ALL THREE persistent lines go up to the shell -- row 22, row 23 and
+   *       row 24 -- where row 22 used to stay in the body below. The argument for keeping it was that the
+   *       split is the mapset's own: `INFOMSG` is at `POS=(22,23)` inside the screen's own field area
+   *       while `ERRMSG` at `POS=(23,1)` is the last line before the legend. That reading of the mapset
+   *       is correct and the conclusion drawn from it was not, which a browser measurement settled: the
+   *       body-composed band's rect top was 1270.39 in an 860-pixel viewport -- the operator's
+   *       confirmation painted 410 pixels BELOW the fold -- while the frame's own row-22 zone stood
+   *       reserved and empty, the pinned zone holding only `["message-band","FOOTER"]`. A field at
+   *       `POS=(22,23)` on a 24-row display is one row above the message line and two above the legend,
+   *       which in this frame is the pinned zone; being inside the field AREA does not put it inside the
+   *       scrolling CONTENT. The sibling `/account/update` screen reached the same conclusion from the
+   *       same measurement and its removal site records it, so both account screens now publish the line
+   *       rather than paint it.
+   * WHY : Assumptions: `information` is a MEMBER of the message slot rather than a sibling of it, and it
+   *       carries no `mapset` of its own. The display width is a property of the mapset and this screen
+   *       stands in for exactly one, so the width already published beside the row-23 text governs both
+   *       lines -- `ShellInformationSlot` in `ui/src/layout/AppShell.tsx` records that a second mapset
+   *       member here would let one screen claim two widths.
+   * WHY : Assumptions: the severity is stated as `neutral` rather than left to the slot's default, even
+   *       though the default resolves to the same value. `app/bms/COACTVW.bms` declares `INFOMSG` as
+   *       `COLOR=NEUTRAL`, which `ui/src/theme/tokens.ts` resolves to `colorTextSecondary`; naming it
+   *       keeps this screen's measured colour recorded at the screen rather than inherited from a
+   *       default that a later reader would have to go and check.
+   * WHY : Assumptions: the line is published on EVERY turn, which is what reserves the row and gives the
+   *       no-layout-shift guarantee. `infoMessage` is a non-null string whose floor is the reference's
+   *       own prompt -- `app/cbl/COACTVWC.cbl` L528-L530 forces `WS-PROMPT-FOR-INPUT` back whenever the
+   *       information field is empty -- so there is no turn on which this screen has nothing to publish
+   *       and the `information: { text: null }` reservation form is not needed here.
    * WHY : Assumptions: the resolved `bindings` and `invoke` from this screen's own `usePfKeys` call are
    *       handed over unchanged. The shell never re-derives a binding, so this screen remains the single
    *       owner of the document key listener; and because a published `pfKeys` slot makes the shell stand
@@ -1466,7 +1879,11 @@ export function AccountViewScreen(): ReactElement {
   useShellSlot({
     screen: { transactionId: ACCOUNT_VIEW_TRANSACTION_ID, programName: ACCOUNT_VIEW_PROGRAM_NAME },
     now: paintedAt,
-    message: { text: errorMessage, mapset: ACCOUNT_VIEW_MAPSET },
+    message: {
+      text: errorMessage,
+      mapset: ACCOUNT_VIEW_MAPSET,
+      information: { text: infoMessage, severity: 'neutral' },
+    },
     /*
      * WHY : Assumptions: the legend colour is delegated explicitly and is not left to the slot's
      *       default. This mapset is one of only TWO whose row-24 legend is `COLOR=TURQUOISE` rather
@@ -1552,6 +1969,19 @@ export function AccountViewScreen(): ReactElement {
        *       of it.
        */}
       <ScreenTitle type="secondary">{ACCOUNT_VIEW_HEADINGS.ACCOUNT}</ScreenTitle>
+      {/*
+       * WHY : ⚠️ Purpose: the one sentence an operator who cannot see the overlay hears while the read is
+       *       outstanding. Every other sign this screen gives that it is working is visual -- the
+       *       spinner over the record blocks -- so the screen went silent for the length of the request
+       *       and then spoke only its answer.
+       * WHY : ⚠️ Assumptions: the region is mounted UNCONDITIONALLY and empty while idle, which
+       *       `ui/src/layout/fieldHelp.tsx` records as load-bearing rather than defensive: a live region
+       *       has to be in the accessibility tree before its text changes for the change to be
+       *       announced, so one mounted only while busy would announce nothing on the first read.
+       * WHY : Assumptions: it is driven by the read flag alone, because the read is the only request
+       *       this screen makes -- the other admitted key navigates.
+       */}
+      {busyAnnouncement(loading ? REQUEST_IN_PROGRESS : undefined)}
       {/*
        * Alternatives Considered: rendering the whole screen as a form. Of the 37 named
        * `DFHMDF` definitions in this mapset exactly ONE is an input -- `ACCTSID`, the only field
@@ -1708,6 +2138,7 @@ export function AccountViewScreen(): ReactElement {
             bordered
             column={RECORD_VIEW_COLUMNS}
             items={toDescriptionItems(accountBlockRows(view.account), monetaryStyle)}
+            styles={{ label: RECORD_LABEL_STYLE }}
           />
           {/*
            * WHY : ⚠️ Refactoring Rationale: the customer block takes its VALUES from the response's own
@@ -1756,48 +2187,24 @@ export function AccountViewScreen(): ReactElement {
               customerBlockRows(view.customer ?? UNPOPULATED_CUSTOMER),
               monetaryStyle,
             )}
+            styles={{ label: RECORD_LABEL_STYLE }}
           />
         </>
       )}
       {/*
-       * WHY : Assumptions: ONE band is rendered here and it is the row-22 informational line, because
-       *       the mapset declares two independent message lines at two different rows and only one of
-       *       them belongs to the screen's own field area -- `INFOMSG` at `POS=(22,23)`,
-       *       `ATTRB=(PROT) COLOR=NEUTRAL`, `PIC X(45)`.
-       * WHY : Refactoring Rationale: the row-23 error line that used to sit beside it, and the row-24
-       *       legend that used to follow it, are now delegated to the shell in the `useShellSlot` call
-       *       above. Composing them here as well would render a second message line and a second named
-       *       legend region on this screen once the shell was mounted -- two live regions announcing one
-       *       message, and two documented `message-band` handles where a caller expects one. The
-       *       measured reading order is unchanged: this line is the last thing in the body, and the
-       *       shell paints rows 23 and 24 immediately below the body region.
-       * WHY : ⚠️ Refactoring Rationale: this band takes the `neutral` severity, and it took `info`
-       *       before. `ui/src/theme/tokens.ts` resolves `COLOR=TURQUOISE` to `colorInfo` and
-       *       `COLOR=NEUTRAL` to `colorTextSecondary`, and this field is declared `COLOR=NEUTRAL` -- so
-       *       the informational severity painted the guidance line in the turquoise hue, which is
-       *       exactly the substitution the bridge's G3 note exists to prevent. The severity was added to
-       *       `ui/src/layout/MessageBand.tsx` for this field rather than the colour being written here,
-       *       because a literal colour on this element would opt it out of the theme silently.
-       * WHY : Assumptions: the band names its CHANNEL, which selects a distinct `data-testid`. Both
-       *       bands carried `message-band` before, so the two rendered elements were indistinguishable:
-       *       a query for the band resolved to whichever came first and no case could address the other.
-       *       The row-23 handle now belongs to the shell alone.
-       */}
-      <MessageBand
-        channel="information"
-        mapset={ACCOUNT_VIEW_MAPSET}
-        message={infoMessage}
-        severity="neutral"
-      />
-      {/*
-       * WHY : ⚠️ Refactoring Rationale: ONE row-22 band closes this body, and a second one stood here
-       *       rendering the SAME `infoMessage` under the same mapset. Two independent revisions each
-       *       added the informational line -- one naming its channel and taking the `neutral` severity
-       *       this field's measured `COLOR=NEUTRAL` requires, the other taking `info` -- so the sentence
-       *       was painted twice, in two different hues, and any query for it resolved to two matches.
-       *       The mapset declares exactly one such field, `INFOMSG` at `POS=(22,23)`, so the second is
-       *       withdrawn and the one that carries the measured colour survives. The legend note that stood
-       *       beside it is preserved on the delegation above, where the legend now lives.
+       * WHY : ⚠️ Refactoring Rationale: the row-22 INFORMATION band is no longer rendered here, and it
+       *       closed this body for two revisions. The reasoning that put it here is preserved on the
+       *       delegation above together with the measurement that withdrew it -- the band's rect top was
+       *       1270.39 in an 860-pixel viewport, so this screen's one acknowledgement sentence was painted
+       *       410 pixels below the fold while the frame's own row-22 zone stood reserved and empty. The
+       *       `neutral` severity that a second revision had wrongly rendered as `info` travels with the
+       *       delegation, so the measured `COLOR=NEUTRAL` is still what this line resolves to.
+       * WHY : Assumptions: nothing about the band's identity changes for a reader or a suite. The frame
+       *       renders `MessageBand` with `channel="information"`, which carries
+       *       `INFORMATION_BAND_TEST_ID` exactly as this element did, and it renders that zone if and
+       *       only if a screen delegates the slot -- so publishing above and rendering there leaves
+       *       exactly one row-22 band on the document rather than two, and `closest('main')` on it is now
+       *       `null` because the frame paints it outside the scrolling content region.
        */}
     </Flex>
   );

@@ -6,8 +6,8 @@
  * Assert the observable contract of the screen that replaces `app/cbl/COMEN01C.cbl`: the eleven
  * option lines composed exactly as `BUILD-MENU-OPTIONS` composes them, the option field at its
  * declared width, the three-way refusal the program applies to a bad entry, the destination each
- * option enters -- including the two whose screens are addressed only per record, which enter the
- * browse that selects the record -- the PF3 exit destination, the invalid-key sentence, and the exit
+ * option enters -- including the three whose screens are addressed per record and which enter those
+ * screens' own KEYLESS first turn -- the PF3 exit destination, the invalid-key sentence, and the exit
  * message a departing screen hands over.
  *
  * ⚠️ Assumptions: the not-installed sentence is NOT asserted here any longer, because no live option can
@@ -47,10 +47,11 @@ import {
 } from '../../messages/messages';
 import type { MainMenuOption } from '../../messages/messages';
 import { PF_KEY_BAR_REGION_LABEL } from '../../layout/PfKeyBar';
-// Assumptions: the transaction browse route is imported from the module that OWNS the menu's
-//   program-to-route resolution rather than from `ui/src/routes/navigation.ts`, which declares no
-//   constant for it. That keeps this harness declaring the same value the screen navigates through, which
-//   is the property this file's overview relies on when it asserts destinations by arrival.
+// ⚠️ Assumptions: every destination route is imported from `ui/src/routes/navigation.ts`, which is where
+//   both this harness and `ui/src/routes/programRoutes.ts` take them from -- so the paths declared below
+//   are the same values the screen navigates through. Retyping any of them as a literal is what would let
+//   this harness declare a route the router does not serve while still passing, because a marker route
+//   the case never arrives at is indistinguishable from one that was never registered.
 import { TRANSACTION_LIST_ROUTE } from '../../routes/navigation';
 
 /**
@@ -65,22 +66,38 @@ import {
   ACCOUNT_UPDATE_ROUTE,
   ACCOUNT_VIEW_ROUTE,
   AUTHORIZATION_SUMMARY_ROUTE,
+  CARD_DETAIL_ENTRY_ROUTE,
   CARD_LIST_ROUTE,
+  CARD_UPDATE_ENTRY_ROUTE,
   MAIN_MENU_ROUTE,
   TRANSACTION_ADD_ROUTE,
+  TRANSACTION_DETAIL_ENTRY_ROUTE,
   screenTransitionState,
 } from '../../routes/navigation';
 import { MainMenuScreen, normaliseOptionEntry } from './index';
 
-/** Marker text rendered at each destination route, keyed by the route it stands at. */
+/**
+ * Marker text rendered at each destination route, keyed by the route it stands at.
+ *
+ * ⚠️ Refactoring Rationale: the three KEYLESS entry routes are declared here, where they were absent
+ * because they did not exist -- options 4, 5 and 7 resolved to the two browses above and this table
+ * needed no entry of its own for them. Each of those three programs now has the address of its own
+ * first turn, so a marker is what lets a case distinguish arriving at the CARD DETAIL screen with no
+ * selector from arriving at the browse. Without the distinct markers the destination cases would go on
+ * passing against a re-collapse, because a browse arrival and a keyless arrival would report the same
+ * text.
+ */
 const DESTINATION_MARKERS: Readonly<Record<string, string>> = {
   [SIGN_ON_ROUTE]: 'SIGN ON REACHED',
   [ACCOUNT_VIEW_ROUTE]: 'ACCOUNT VIEW REACHED',
   [ACCOUNT_UPDATE_ROUTE]: 'ACCOUNT UPDATE REACHED',
   [CARD_LIST_ROUTE]: 'CARD LIST REACHED',
+  [CARD_DETAIL_ENTRY_ROUTE]: 'CARD DETAIL ENTRY REACHED',
+  [CARD_UPDATE_ENTRY_ROUTE]: 'CARD UPDATE ENTRY REACHED',
   [TRANSACTION_ADD_ROUTE]: 'TRANSACTION ADD REACHED',
   [AUTHORIZATION_SUMMARY_ROUTE]: 'AUTHORIZATION SUMMARY REACHED',
   [TRANSACTION_LIST_ROUTE]: 'TRANSACTION LIST REACHED',
+  [TRANSACTION_DETAIL_ENTRY_ROUTE]: 'TRANSACTION DETAIL ENTRY REACHED',
 };
 
 /** Test id the destination probe reports the origin it was handed under. */
@@ -434,21 +451,21 @@ async function anOptionRowIsNotActivatable(): Promise<void> {
 }
 
 /**
- * Option 7 enters the transaction browse, which is where a transaction is selected.
+ * Option 7 enters the transaction detail screen's own keyless first turn.
  *
- * ⚠️ Refactoring Rationale: this case asserted that option 7 reported itself NOT INSTALLED, and it
- * ratified a defect. `COTRN01C`'s screen is delivered and `ui/src/router.tsx` mounts it at
- * `/transactions/:id`, so the sentence -- which reports a program the CICS region does not HOLD -- named
- * a screen this application does hold. The option refused was the only main-menu route to the transaction
- * detail screen, which AAP section 0.1.3.1 requires to stay reachable: program flow preserves the
- * reachability graph of the eighteen transactions, and `app/csd/CARDDEMO.CSD` L429-L430 makes `COTRN01C`
- * one of them.
+ * ⚠️⚠️ Refactoring Rationale: this case has been wrong twice and this is the correction. It first
+ * asserted that option 7 reported itself NOT INSTALLED, which spent the sentence for a program the CICS
+ * region cannot LOAD on a screen this delivery mounts. It then asserted the option entered the
+ * transaction BROWSE, which stopped the false sentence and left option 7 entering the screen option 6
+ * enters -- so `app/cpy/COMEN02Y.cpy`, which gives eleven options eleven distinct programs, was served
+ * by ten destinations. The reference's own answer is neither: `app/cbl/COTRN01C.cbl` L103-L108 reads
+ * `CDEMO-CT01-TRN-SELECTED` and L109 paints the EMPTY map when it arrives blank, with the transaction
+ * identifier as a field to type into. That first turn now has an address and this case asserts arrival
+ * at it.
  *
- * Assumptions: the destination is the BROWSE and not the per-transaction path, and that is the same
- * resolution options 4 and 5 take to the card browse under `D-CARD-SELECTOR`. A menu option carries no
- * selection -- `app/cbl/COTRN01C.cbl` L109 pre-fills the identifier only when `CDEMO-CT01-TRN-SELECTED`
- * arrives non-blank, so a menu arrival is a screen waiting for a key -- and the browse is the control
- * that names one transaction and enters the detail screen with it.
+ * ⚠️ Assumptions: the marker asserted is the KEYLESS one and not the browse's, which is the whole point
+ * of the separate marker. Asserting the browse marker would have kept passing against the collapse this
+ * case exists to prevent, because a collapsed option and a correct one both arrive somewhere.
  *
  * Assumptions: the not-installed sentence keeps its own coverage in
  * `ui/src/screens/menuScreens.test.tsx`, which asserts the catalogued template and that an unregistered
@@ -456,43 +473,45 @@ async function anOptionRowIsNotActivatable(): Promise<void> {
  * screen, so proving it at the resolution level is the only honest place left for it.
  * @returns {Promise<void>} Resolves once the destination has been reached.
  */
-async function entersTheTransactionBrowseOnOptionSeven(): Promise<void> {
+async function entersTheKeylessTransactionDetailOnOptionSeven(): Promise<void> {
   render(renderMenu());
 
   await selectByTyping('07');
 
-  expect(await screen.findByText('TRANSACTION LIST REACHED')).toBeInTheDocument();
+  expect(await screen.findByText('TRANSACTION DETAIL ENTRY REACHED')).toBeInTheDocument();
 }
 
 /**
- * An option whose route carries an opaque selector enters the browse that mints the selector.
+ * Options 4 and 5 enter the two card screens at their own keyless addresses.
  *
- * ⚠️ Refactoring Rationale: this case previously asserted that option 4 reported itself NOT INSTALLED,
- * and it ratified a defect. `ui/src/routes/programRoutes.ts` is the module that owns the
- * program-to-route resolution for both menus — its docstring says so explicitly — and it maps both
- * `COCRDSLC` and `COCRDUPC` to the card browse as the registered divergence `D-CARD-SELECTOR`. The menu
- * screen carried a second, hand-written copy of that table which answered `null` for the same two
- * programs, so options 4 and 5 reported an absent screen while the delivery in fact carries one. The
- * screen now derives its map from the owning module, so the two cannot disagree, and this case asserts
- * the resolution that module documents.
+ * ⚠️⚠️ Refactoring Rationale: this case asserted that option 4 entered the card BROWSE, and before that
+ * that it reported itself NOT INSTALLED. Both were corrections of the previous state and both left the
+ * operator somewhere they had not asked for: options 4 and 5 name `COCRDSLC` and `COCRDUPC`, and while
+ * both resolved to the browse the menu's eleven options reached eight destinations. `app/cbl/COCRDSLC.cbl`
+ * L490-L491 falls back to `WS-PROMPT-FOR-INPUT` and paints an empty map with account and card fields to
+ * type into, so each program has a first turn of its own, and each now has that turn's address.
  *
- * Assumptions: the destination is the card BROWSE rather than a single-card path because
- * `/cards/:cardKey` is addressable only by a selector the service mints, and the browse is where a
- * typed card number is exchanged for one — which is what the reference's own first turn of `COCRDSLC`
- * does with its empty account and card fields.
+ * Assumptions: registered divergence `D-CARD-SELECTOR` is UNAFFECTED and stays documented -- a single
+ * card is still addressable only through the opaque selector the service mints, and neither keyless
+ * address carries one. What changed is which screen the operator stands on while they exchange an
+ * account and card number for that selector.
  *
- * Assumptions: option 7 resolves the same way for the same reason, which
- * {@link entersTheTransactionBrowseOnOptionSeven} asserts separately -- both cases are kept because the
- * two selectors differ in kind, an opaque service-minted card key here against a transaction identifier
- * there, so one passing does not establish the other.
- * @returns {Promise<void>} Resolves once the destination has been reached.
+ * ⚠️ Assumptions: BOTH options are asserted in one case, because the property is that they reach
+ * DIFFERENT screens. Asserting either alone would pass against the two being repointed at one address,
+ * which is the exact regression that made this a finding.
+ * @returns {Promise<void>} Resolves once both destinations have been reached.
  */
-async function entersTheBrowseForASelectorSealedRoute(): Promise<void> {
-  render(renderMenu());
+async function entersTheKeylessCardScreensOnOptionsFourAndFive(): Promise<void> {
+  const first = render(renderMenu());
 
   await selectByTyping('04');
+  expect(await screen.findByText('CARD DETAIL ENTRY REACHED')).toBeInTheDocument();
 
-  expect(await screen.findByText('CARD LIST REACHED')).toBeInTheDocument();
+  first.unmount();
+  render(renderMenu());
+
+  await selectByTyping('05');
+  expect(await screen.findByText('CARD UPDATE ENTRY REACHED')).toBeInTheDocument();
 }
 
 /**
@@ -758,8 +777,14 @@ function mainMenuScreenCases(): void {
   );
   it('accepts a single-digit entry as the zero-filled equivalent', acceptsASingleDigitEntry);
   it('offers no activatable option row', anOptionRowIsNotActivatable);
-  it('enters the transaction browse on option 7', entersTheTransactionBrowseOnOptionSeven);
-  it('enters the browse for a selector-sealed route', entersTheBrowseForASelectorSealedRoute);
+  it(
+    'enters the keyless transaction detail entry on option 7',
+    entersTheKeylessTransactionDetailOnOptionSeven,
+  );
+  it(
+    'enters the two keyless card entries on options 4 and 5',
+    entersTheKeylessCardScreensOnOptionsFourAndFive,
+  );
   it('echoes the normalised entry into the field', echoesTheNormalisedEntryIntoTheField);
   it('echoes a single typed digit as two', echoesASingleDigitAsTwo);
   it('refuses an option above the catalogued count', refusesAnOptionAboveTheCount);

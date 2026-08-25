@@ -84,6 +84,9 @@ import type {
   TransactionListQuery,
   TransactionSummary,
 } from '../api/types';
+// Assumptions: the busy region is located by the shared test identifier the helper itself publishes,
+//   so a case cannot drift from the one place that decides the region's shape.
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, UNIFORM_PF_KEY_LABELS } from '../layout/PfKeyBar';
 import { CICS_AIDS, KEYBOARD_KEY_TO_AID } from '../layout/usePfKeys';
@@ -95,6 +98,7 @@ import {
   PROGRAM_MESSAGES,
   PROGRAM_MESSAGE_SOURCES,
   PROGRAM_SOURCE_FILES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   SHARED_MESSAGE_SOURCES,
   TRANSACTION_LIST_COLUMN_HEADERS,
@@ -1775,10 +1779,13 @@ describe('transaction browse verbatim text', verbatimTextContract);
  * per-key labels precisely because the measured legends differ across mapsets, and the two paging
  * labels come from the shared constant because their wording is identical on every mapset that pages.
  *
- * Assumptions: the emphasis mapping fixes the primary role to the submit key and the default to the
- * rest, so the submit control is asserted primary and the back control default. This is a component
- * mapping rather than a source colour: the mapset colours the whole legend field one way and says
- * nothing about which key writes.
+ * ⚠️ Refactoring Rationale: the emphasis half of this case now asserts that NO control is emphasised,
+ * and the note it replaces claimed "the emphasis mapping fixes the primary role to the submit key".
+ * There is no submit key on this screen: `app/cbl/COTRN00C.cbl` answers `DFHENTER` by re-reading from
+ * the entry field, and PF7 and PF8 by re-reading a page, so all four bindings declare
+ * `risk: 'read-only'` and the shared `pfKeyEmphasisFor` resolves each to the default variant. The rest
+ * of that note still holds and is kept: this is a component mapping rather than a source colour, since
+ * the mapset colours the whole legend field one way and says nothing about which key writes.
  * @returns {Promise<void>} Resolves once the legend has been examined.
  */
 async function theLegendAdvertisesTheProgramsFourKeys(): Promise<void> {
@@ -1810,8 +1817,25 @@ async function theLegendAdvertisesTheProgramsFourKeys(): Promise<void> {
   expect(TRANSACTION_LIST_KEY_LABELS.PFK07).toBe(UNIFORM_PF_KEY_LABELS.PFK07);
   expect(TRANSACTION_LIST_KEY_LABELS.PFK08).toBe(UNIFORM_PF_KEY_LABELS.PFK08);
 
-  expect(legendButton(TRANSACTION_LIST_KEY_LABELS.ENTER)).toHaveClass('ant-btn-primary');
-  expect(legendButton(TRANSACTION_LIST_KEY_LABELS.PFK03)).not.toHaveClass('ant-btn-primary');
+  /*
+   * WHY : ⚠️ Refactoring Rationale: NO control on this legend is emphasised, and the assertion this
+   *       replaces required Enter to be. It read `toHaveClass('ant-btn-primary')` on Enter, which was
+   *       true only because `PfKeyBar`'s `PRIMARY_ACTION_AIDS` fallback emphasises that identifier on
+   *       every screen that binds it -- a reading taken from the mapsets where Enter submits a change.
+   *       This screen declares `risk: 'read-only'` on all four bindings, because `app/cbl/COTRN00C.cbl`
+   *       has no arm that writes: L149-L192 reads the selectors and transfers, and L119-L133 answers
+   *       PF7 and PF8 with a page re-read. Emphasis under this taxonomy signals CONSEQUENCE, so a
+   *       screen that changes nothing paints nothing solid -- and the negative is asserted on all four
+   *       rather than on Enter alone, because a partial claim would pass against a legend that had
+   *       emphasised a different one of them.
+   */
+  for (const label of Object.values(TRANSACTION_LIST_KEY_LABELS)) {
+    expect({ label, primary: legendButton(label).classList.contains('ant-btn-primary') }).toEqual({
+      label,
+      primary: false,
+    });
+    expect(legendButton(label)).toHaveClass('ant-btn-default');
+  }
 }
 
 /**
@@ -2129,6 +2153,71 @@ async function moneyIsCarriedAsTextEndToEnd(): Promise<void> {
 }
 
 /**
+ * The pinned money column never shares its track with a second pinned block.
+ *
+ * ⚠️ Purpose: a browser sweep measured the two pinned groups OVERLAPPING at 375. The grid's scroller
+ * was 327 pixels wide for a 454-pixel row; the leading pinned pair spanned x 0 to 246.42 and the
+ * trailing pinned amount x 218.17 to 351, a 28.25-pixel overlap -- and because the leading block sits
+ * at a higher stacking level, it painted OVER the amount, so on the row under the pointer the money
+ * column read doubled and overstruck. That is a monetary value rendered wrongly, not a layout blemish.
+ *
+ * ⚠️ Assumptions: the amount is the pin that stays and the identifier is the pin that goes, and the
+ * arithmetic decides which rather than taste. Of the 327-pixel track the amount needs 132.83, leaving
+ * 194.17; the leading pair needs 218.31 -- the 51.89-pixel selector plus the 166.42-pixel identifier --
+ * so NO arrangement that keeps this column pinned fits. Unpinning it leaves the leading pin at 184.72
+ * of 327 with 142 clear. Unpinning the SELECTOR instead would also fit, at 299.25 of 327, but with
+ * only 27.75 clear -- one padding token from colliding again -- and it would take away the control the
+ * operator types into while leaving them a value they could already read.
+ *
+ * Assumptions: the identifier stays reachable rather than merely unpinned. It is the leading DATA
+ * column so it is on screen at rest, and the amount an operator would otherwise have scrolled for is
+ * itself pinned, so that scroll is no longer needed to read a figure at all.
+ *
+ * Assumptions: nothing here asserts that the amount pin is optional. The reference pins nothing
+ * because a 24x80 display had nothing to pin, so every pin on this grid is additive and removing one
+ * cannot cost fidelity -- but keeping one that overstrikes a money value costs it plainly.
+ * @returns {Promise<void>} Resolves once the settled header row has been measured.
+ */
+async function pinsTheMoneyColumnWithoutASecondPinnedBlock(): Promise<void> {
+  await browseShowing(pageResponse(FULL_PAGE_ROWS));
+
+  const headerCells = Array.from(
+    document.querySelectorAll<HTMLElement>('.ant-table-thead th.ant-table-cell'),
+  );
+  expect(headerCells.length, 'the header row must have been rendered').toBeGreaterThan(3);
+
+  /*
+   * WHY : Assumptions: the traversal is a plain loop for the reason this file's header records -- an
+   *       inline callback owes its own JSDoc block under `ui/eslint.config.js`.
+   */
+  const leadingPins: string[] = [];
+  const trailingPins: string[] = [];
+
+  for (const cell of headerCells) {
+    if (cell.classList.contains('ant-table-cell-fix-start')) {
+      leadingPins.push(cell.textContent ?? '');
+    }
+
+    if (cell.classList.contains('ant-table-cell-fix-end')) {
+      trailingPins.push(cell.textContent ?? '');
+    }
+  }
+
+  expect(
+    trailingPins,
+    'the amount must be the one trailing pin, so a money value is never scrolled out of reach',
+  ).toHaveLength(1);
+  expect(
+    leadingPins,
+    'and exactly ONE leading pin may share the track with it -- two is what overlapped',
+  ).toHaveLength(1);
+  expect(
+    leadingPins[0],
+    'the leading pin must be the selection cell the operator types into, not the identifier',
+  ).not.toContain(rowAt(FULL_PAGE_ROWS, 0).transactionId.slice(0, 4));
+}
+
+/**
  * An amount past the exact range of a double survives every one of its digits.
  * @returns {Promise<void>} Resolves once the wide amount has been read from the rendered page.
  */
@@ -2290,6 +2379,10 @@ function navigationMoneyAndExposureContract(): void {
   it('opens the chosen transaction\u2019s own screen', choosingARowOpensThatTransactionsScreen);
   it('carries every amount as text', moneyIsCarriedAsTextEndToEnd);
   it('keeps every digit of a wide amount', aWideAmountKeepsEveryDigit);
+  it(
+    'pins the money column without a second pinned block',
+    pinsTheMoneyColumnWithoutASecondPinnedBlock,
+  );
   it('slices the origination stamp rather than parsing it', theOriginationStampIsSlicedNotParsed);
   it('renders the data columns in the fixed-pitch token', theDataColumnsUseTheFixedPitchToken);
   it('discloses no card number and no verification value', noCardNumberReachesTheBrowse);
@@ -2297,3 +2390,589 @@ function navigationMoneyAndExposureContract(): void {
 }
 
 describe('transaction browse navigation, money and exposure', navigationMoneyAndExposureContract);
+
+/*
+ * =====================================================================================================
+ * Read discipline, row affordance and narrow-viewport reachability
+ * =====================================================================================================
+ *
+ * Assumptions: these cases are grouped separately from the keyset suite above because they assert a
+ * different KIND of property. The keyset suite asserts what one read carries; these assert how many
+ * reads happen, what a delivered row answers to, and what remains readable when the viewport is a
+ * phone. Each was written against a measured defect on this screen rather than against a rule.
+ */
+
+/**
+ * One read held open, with the means to settle it on demand.
+ *
+ * Purpose: every duplicate-read case needs a window in which a read is genuinely outstanding, and a
+ * resolved promise closes that window before a second press can be made.
+ */
+interface HeldRead {
+  /** The promise the browse operation answers with, which stays pending until settled. */
+  readonly promise: Promise<PageResponse<TransactionSummary>>;
+  /**
+   * Settles the held read with a page.
+   * @param {PageResponse<TransactionSummary>} page - The envelope to answer with.
+   * @returns {void} Nothing; the promise resolves as a side effect.
+   */
+  readonly settle: (page: PageResponse<TransactionSummary>) => void;
+}
+
+/**
+ * Builds a read that stays outstanding until it is settled by hand.
+ *
+ * ⚠️ Assumptions: a hand-held promise rather than a timer or a fake clock, because the property under
+ * test is "while a read is outstanding" and nothing else -- a timer would make the case depend on how
+ * long the runner takes to advance it, and a fake clock would also freeze the design system's own
+ * transitions. Holding the promise makes the window exactly as long as the case needs and no longer.
+ *
+ * Assumptions: the resolver is captured from the executor rather than the promise being built from a
+ * deferred helper, because none exists in this package and one written here would be a second way of
+ * saying the same three lines.
+ * @returns {HeldRead} The pending promise and its resolver.
+ * @throws {Error} From {@link HeldRead.settle} if the executor never ran, which cannot happen for a
+ *   native promise and is checked so the type needs no assertion.
+ */
+function heldRead(): HeldRead {
+  let release: ((page: PageResponse<TransactionSummary>) => void) | null = null;
+  const promise = new Promise<PageResponse<TransactionSummary>>(
+    /**
+     * Captures the resolver so the read can be settled from outside.
+     * @param {(page: PageResponse<TransactionSummary>) => void} resolve - The promise's resolver.
+     * @returns {void} Nothing; the resolver is retained as a side effect.
+     */
+    (resolve: (page: PageResponse<TransactionSummary>) => void): void => {
+      release = resolve;
+    },
+  );
+  return {
+    promise,
+    /**
+     * Settles the held read with a page.
+     * @param {PageResponse<TransactionSummary>} page - The envelope to answer with.
+     * @returns {void} Nothing; the promise resolves as a side effect.
+     * @throws {Error} If the resolver was never captured.
+     */
+    settle: (page: PageResponse<TransactionSummary>): void => {
+      if (release === null) {
+        throw new Error('the held read was never given a resolver');
+      }
+      release(page);
+    },
+  };
+}
+
+/**
+ * Reads the page ordinal the screen is displaying.
+ *
+ * Assumptions: located by the accessible name the mapset's own row-4 prompt supplies, so the query
+ * fails if the label association breaks as well as if the value does.
+ * @returns {string} The ordinal as rendered.
+ * @throws {Error} If no ordinal is rendered under that name.
+ */
+function displayedOrdinal(): string {
+  return textOf(screen.getByRole('status', { name: TRANSACTION_LIST_LABELS.pageLabel }));
+}
+
+/**
+ * Locates one row's selection control.
+ * @param {string} transactionId - Identifier of the row whose control is wanted.
+ * @returns {HTMLElement} That row's radio.
+ * @throws {Error} If no control carries that row's accessible name.
+ */
+function selectionControlOf(transactionId: string): HTMLElement {
+  return screen.getByRole('radio', { name: selectionActionLabel(transactionId) });
+}
+
+/**
+ * Reports whether one row is the chosen one.
+ *
+ * Assumptions: the control's own `checked` property is read rather than the `checked` ATTRIBUTE,
+ * because these radios are controlled -- React sets the property and leaves the attribute at its
+ * initial value, so an attribute read would report every row unchosen however the screen behaved.
+ *
+ * Assumptions: the element is narrowed with `instanceof` rather than cast, so a selection column that
+ * stopped rendering a real input fails here naming that fact instead of reading `undefined`.
+ * @param {string} transactionId - Identifier of the row to examine.
+ * @returns {boolean} Whether that row's control is currently chosen.
+ * @throws {Error} If the row's control is not an input element.
+ */
+function rowIsChosen(transactionId: string): boolean {
+  const control = selectionControlOf(transactionId);
+  if (!(control instanceof HTMLInputElement)) {
+    throw new Error(`the selection control for ${transactionId} is not an input`);
+  }
+  return control.checked;
+}
+
+/**
+ * A second forward press made while the first read is still outstanding issues no second read.
+ *
+ * ⚠️ Purpose: this is the defect a browser review measured on the sibling browse -- two presses of the
+ * forward control 400 milliseconds apart produced two identical positioned reads, and because each
+ * delivered page advances the ordinal, the screen came to state a page number it was not showing rows
+ * for. The wrong number is the harm; the wasted request is incidental.
+ *
+ * ⚠️ Assumptions: the ordinal is asserted as well as the read count, because they fail independently
+ * and only the ordinal states the operator-visible consequence. A screen that issued one read but
+ * counted two presses would pass a count-only assertion and still mislead.
+ *
+ * Assumptions: absorbing the press leaves the band EMPTY rather than adding a sentence. The terminal
+ * answered an inhibited keystroke with nothing at all -- CICS locks the keyboard for the duration of a
+ * task, so the second press was never delivered -- and `ui/src/messages/messages.ts` carries no
+ * sentence for a press that arrived mid-turn, so any wording here would be invented screen text.
+ * @returns {Promise<void>} Resolves once both presses and the settled page have been examined.
+ */
+async function aSecondForwardPressDuringAReadIsAbsorbed(): Promise<void> {
+  const operation = vi.mocked(listTransactions);
+  operation.mockResolvedValueOnce(pageResponse(FULL_PAGE_ROWS, { hasNext: true }));
+  const held = heldRead();
+  operation.mockReturnValueOnce(held.promise);
+
+  const rendered = await mountBrowse();
+  await waitFor(
+    /**
+     * Waits until the opening page is on display, so a forward step is expressible.
+     * @returns {void} Nothing; throws until the opening page's first row is present.
+     */
+    () => {
+      expect(screen.getByText(rowAt(FULL_PAGE_ROWS, 0).transactionId)).toBeInTheDocument();
+    },
+  );
+
+  await pressPfKey(rendered.user, 'PFK08');
+  expect(readCount()).toBe(2);
+
+  // WHY : Assumptions: the second press is made while the first read is unsettled, which is the whole
+  //       of the window under test. `pressPfKey` awaits its own act scope, so the started transition
+  //       has already been applied and the handler this press reaches is the one that can see the read
+  //       outstanding.
+  await pressPfKey(rendered.user, 'PFK08');
+  expect(readCount()).toBe(2);
+
+  await act(
+    /**
+     * Settles the held read and lets its continuation run inside an act scope.
+     * @returns {Promise<void>} Resolves once the page has been applied.
+     */
+    async (): Promise<void> => {
+      held.settle(pageResponse(SECOND_PAGE_ROWS));
+      await held.promise;
+    },
+  );
+
+  await waitFor(
+    /**
+     * Waits until the delivered page is on display.
+     * @returns {void} Nothing; throws until the second page's first row is present.
+     */
+    () => {
+      expect(screen.getByText(rowAt(SECOND_PAGE_ROWS, 0).transactionId)).toBeInTheDocument();
+    },
+  );
+
+  // WHY : Assumptions: TWO, not three. Each delivered page advances the ordinal, so a second read that
+  //       had been issued would have advanced it again and the screen would state page three over page
+  //       two's rows -- which is the measured symptom this case exists to exclude.
+  expect(displayedOrdinal()).toBe('2');
+  expect(readCount()).toBe(2);
+}
+
+/**
+ * Submitting the same entry twice while the first read is outstanding issues no second read.
+ *
+ * Assumptions: the SAME entry, because that is the arm the guard covers. The source repositions on
+ * ENTER and nothing else, so pressing it twice unchanged asks for the identical page twice.
+ * @returns {Promise<void>} Resolves once both submissions have been examined.
+ */
+async function anUnchangedResubmissionDuringAReadIsAbsorbed(): Promise<void> {
+  const operation = vi.mocked(listTransactions);
+  operation.mockResolvedValueOnce(pageResponse(FULL_PAGE_ROWS, { hasNext: true }));
+  const held = heldRead();
+  operation.mockReturnValueOnce(held.promise);
+
+  const rendered = await mountBrowse();
+  await waitFor(
+    /**
+     * Waits until the opening page is on display.
+     * @returns {void} Nothing; throws until its first row is present.
+     */
+    () => {
+      expect(screen.getByText(rowAt(FULL_PAGE_ROWS, 0).transactionId)).toBeInTheDocument();
+    },
+  );
+
+  await pressPfKey(rendered.user, 'ENTER');
+  expect(readCount()).toBe(2);
+
+  await pressPfKey(rendered.user, 'ENTER');
+  expect(readCount()).toBe(2);
+
+  await act(
+    /**
+     * Settles the held read so the case leaves no pending work behind.
+     * @returns {Promise<void>} Resolves once the page has been applied.
+     */
+    async (): Promise<void> => {
+      held.settle(pageResponse(FULL_PAGE_ROWS, { hasNext: true }));
+      await held.promise;
+    },
+  );
+}
+
+/**
+ * A DIFFERENT entry submitted while a read is outstanding is still issued.
+ *
+ * ⚠️ Purpose: this is the boundary of the collapse above, and it is asserted so the collapse cannot be
+ * widened by accident. An operator who mistypes a starting identifier must be able to correct it
+ * without waiting for a read they no longer want, and the superseded response is discarded by the
+ * hook's own sequence guard rather than by refusing the correction.
+ *
+ * Assumptions: the correcting entry is typed into the control the mapset labels, and the read that
+ * follows is asserted to carry it -- so this case would also fail a screen that issued a read while
+ * ignoring the new entry.
+ * @returns {Promise<void>} Resolves once the corrected read has been examined.
+ */
+async function aDifferentEntryDuringAReadIsStillIssued(): Promise<void> {
+  const operation = vi.mocked(listTransactions);
+  operation.mockResolvedValueOnce(pageResponse(FULL_PAGE_ROWS, { hasNext: true }));
+  const held = heldRead();
+  operation.mockReturnValueOnce(held.promise);
+  operation.mockResolvedValueOnce(pageResponse(SECOND_PAGE_ROWS));
+
+  const rendered = await mountBrowse();
+  await waitFor(
+    /**
+     * Waits until the opening page is on display.
+     * @returns {void} Nothing; throws until its first row is present.
+     */
+    () => {
+      expect(screen.getByText(rowAt(FULL_PAGE_ROWS, 0).transactionId)).toBeInTheDocument();
+    },
+  );
+
+  await pressPfKey(rendered.user, 'PFK08');
+  expect(readCount()).toBe(2);
+
+  const corrected = rowAt(SECOND_PAGE_ROWS, 0).transactionId;
+  await rendered.user.type(filterField(), corrected);
+  await pressPfKey(rendered.user, 'ENTER');
+
+  await waitFor(
+    /**
+     * Waits until the corrected read has been issued.
+     * @returns {void} Nothing; throws until a third read is recorded.
+     */
+    () => {
+      expect(readCount()).toBe(3);
+    },
+  );
+  expect(criteriaOfRead(2)).toEqual({ transactionIdFilter: corrected });
+
+  await act(
+    /**
+     * Settles the superseded read so the case leaves no pending work behind.
+     * @returns {Promise<void>} Resolves once it has settled.
+     */
+    async (): Promise<void> => {
+      held.settle(pageResponse(FULL_PAGE_ROWS, { hasNext: true }));
+      await held.promise;
+    },
+  );
+}
+
+/**
+ * The entry control states that a read is outstanding, and stops stating it once one is not.
+ *
+ * ⚠️ Purpose: a browser review found `aria-busy` on no control anywhere in this tree, so the only
+ * indication that a read was running was the table's own spinner -- which tells a sighted operator
+ * something and a screen-reader user nothing. The attribute is asserted in BOTH states, because an
+ * attribute that is always present states as little as one that is never present.
+ *
+ * ⚠️ Refactoring Rationale: a SENTENCE is asserted alongside the attribute now, and the note this
+ * replaces argued against one -- "there is no catalogued wording to announce and `aria-busy` states the
+ * fact without inventing one". `REQUEST_IN_PROGRESS` is now an authored, registered and width-checked
+ * entry in `ui/src/messages/messages.ts`, so the wording is no longer invented at the point of use; and
+ * `aria-busy` alone is the wrong instrument for this, because it SUPPRESSES assistive announcements from
+ * the region it marks rather than producing one. Marking the control busy and saying nothing left a
+ * screen-reader operator with less than they had before.
+ *
+ * ⚠️ Assumptions: the live region is asserted PRESENT AND EMPTY while idle, not absent. A live region
+ * has to be in the accessibility tree before its content changes for the change to be announced at all,
+ * so a screen that rendered it only while busy would silently lose the first transition -- the one that
+ * matters. `busyAnnouncement` renders exactly that shape and this asserts it in both states.
+ * @returns {Promise<void>} Resolves once both states have been examined.
+ */
+async function theEntryFieldStatesThatAReadIsOutstanding(): Promise<void> {
+  const operation = vi.mocked(listTransactions);
+  operation.mockResolvedValueOnce(pageResponse(FULL_PAGE_ROWS, { hasNext: true }));
+  const held = heldRead();
+  operation.mockReturnValueOnce(held.promise);
+
+  const rendered = await mountBrowse();
+  await waitFor(
+    /**
+     * Waits until the opening page has settled, so the idle state is observable.
+     * @returns {void} Nothing; throws until its first row is present.
+     */
+    () => {
+      expect(screen.getByText(rowAt(FULL_PAGE_ROWS, 0).transactionId)).toBeInTheDocument();
+    },
+  );
+  expect(filterField()).not.toHaveAttribute('aria-busy');
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
+
+  await pressPfKey(rendered.user, 'PFK08');
+  expect(filterField()).toHaveAttribute('aria-busy', 'true');
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
+
+  await act(
+    /**
+     * Settles the held read so the idle state can be observed again.
+     * @returns {Promise<void>} Resolves once the page has been applied.
+     */
+    async (): Promise<void> => {
+      held.settle(pageResponse(SECOND_PAGE_ROWS));
+      await held.promise;
+    },
+  );
+
+  await waitFor(
+    /**
+     * Waits until the control has stopped reporting a read outstanding.
+     * @returns {void} Nothing; throws until the attribute is gone.
+     */
+    () => {
+      expect(filterField()).not.toHaveAttribute('aria-busy');
+    },
+  );
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
+}
+
+/**
+ * Pointing at a delivered row chooses it, and chooses it without navigating.
+ *
+ * ⚠️ Purpose: a browser review found the four data cells painted in link blue and a fixed pitch while
+ * being inert -- `cursor: auto` at rest and on hover, no anchor, no control, no handler -- so the row
+ * advertised itself as something to click and answered nothing, while the mapset's own row-21 prompt
+ * described a selection control that existed nowhere on the screen.
+ *
+ * ⚠️ Assumptions: the click SELECTS and does not open, which is the source's own two-step turn rather
+ * than a hesitation. `app/cbl/COTRN00C.cbl` reads the ten selector fields only inside
+ * `PROCESS-ENTER-KEY` (L149 to L181) and transfers to `COTRN01C` only from there (L190 to L192), so on
+ * the terminal the character goes into a row and then ENTER is pressed. Both halves are asserted: the
+ * row's own control becomes chosen, and the address does not change.
+ *
+ * Assumptions: the cursor is asserted through the inline style the screen sets rather than through a
+ * computed value, because jsdom computes no layout and resolves no stylesheet -- a computed-style read
+ * would report the initial value whatever the markup said.
+ * @returns {Promise<void>} Resolves once the choice and the unchanged address have been examined.
+ */
+async function aRowIsChoosableByPointer(): Promise<void> {
+  const rendered = await browseWithLocationProbe(pageResponse(FULL_PAGE_ROWS));
+  const chosen = rowAt(FULL_PAGE_ROWS, 4);
+  const row = oneRenderedRow(rendered.container, chosen.transactionId);
+
+  expect(row.style.cursor).toBe('pointer');
+  expect(selectionControlOf(chosen.transactionId)).not.toBeChecked();
+
+  await rendered.user.click(row);
+
+  expect(selectionControlOf(chosen.transactionId)).toBeChecked();
+  expect(currentPath()).toBe(TRANSACTION_LIST_PATH);
+
+  // WHY : Assumptions: the choice is then COMMITTED with the attention identifier, so the case proves
+  //       the pointer path reaches the same turn the radio path does rather than merely marking a row.
+  await pressPfKey(rendered.user, 'ENTER');
+  await waitFor(
+    /**
+     * Waits until the router has reached the chosen transaction's address.
+     * @returns {void} Nothing; throws until the probe reports that address.
+     */
+    () => {
+      expect(currentPath()).toBe(transactionDetailPath(chosen.transactionId));
+    },
+  );
+}
+
+/**
+ * Typing the character the row-21 prompt names chooses the row it was typed on.
+ *
+ * ⚠️ Purpose: the prompt `Type 'S' to View Transaction details from the list` is a mapset literal at
+ * `app/bms/COTRN00.bms` L448 to L449, and a browser review found no control anywhere on the screen
+ * that accepted a typed character -- so the screen instructed an operator to do something it had no
+ * way of receiving. Both catalogued spellings are exercised, because `PROCESS-ENTER-KEY` dispatches on
+ * `WHEN 'S'` at L186 and `WHEN 's'` at L187 and dropping the second is the easiest fidelity loss here
+ * to make and the hardest to notice.
+ *
+ * Assumptions: a character the vocabulary refuses is exercised in the same case, so the assertion is
+ * about this program's vocabulary rather than about any keystroke selecting a row. `'U'` is used
+ * because it is the sibling user browse's own selection character, which makes an accidentally shared
+ * vocabulary the specific regression excluded.
+ * @returns {Promise<void>} Resolves once every spelling has been examined.
+ */
+async function aRowIsChoosableByTheLetterTheScreenNames(): Promise<void> {
+  const rendered = await browseShowing(pageResponse(FULL_PAGE_ROWS));
+
+  for (const spelling of VIEW_SELECTION_CODES) {
+    const chosen = rowAt(FULL_PAGE_ROWS, VIEW_SELECTION_CODES.indexOf(spelling) + 1);
+
+    /*
+     * WHY : ⚠️ Assumptions: the row's own control is FOCUSED programmatically and the character is
+     *       then sent through the keyboard, rather than the character being typed at the row element.
+     *       Two reasons. A table row is not a typeable element, so `user.type` on it raises rather than
+     *       dispatching anything. And clicking the row to focus it would CHOOSE it, which is the very
+     *       outcome under test -- the case would then pass against a screen that ignored the keystroke
+     *       entirely. Focusing the control and typing is also the real keyboard path: an operator
+     *       reaches the selection column with one tab stop, walks it with the arrow keys, and the
+     *       keystroke they then make bubbles from that control to the row.
+     */
+    selectionControlOf(chosen.transactionId).focus();
+    await rendered.user.keyboard(spelling);
+
+    expect({ spelling, chosen: rowIsChosen(chosen.transactionId) }).toEqual({
+      spelling,
+      chosen: true,
+    });
+  }
+
+  // WHY : Assumptions: the refused character is typed onto a row that is NOT currently chosen, so a
+  //       screen that ignored the vocabulary and selected on any keystroke fails here rather than
+  //       passing on a row that was already chosen.
+  const untouched = rowAt(FULL_PAGE_ROWS, 7);
+  selectionControlOf(untouched.transactionId).focus();
+  await rendered.user.keyboard('U');
+  expect(rowIsChosen(untouched.transactionId)).toBe(false);
+}
+
+/**
+ * The screen caption stands on its own line, sharing none with the page ordinal.
+ *
+ * ⚠️ Purpose: a responsive review measured this screen placing its caption 26 pixels higher than every
+ * other screen in the tree -- y145 against y172 -- because the caption shared a baseline-aligned flex
+ * line with the page ordinal and had its block margin zeroed to sit on that baseline. The heading is
+ * what an operator reads to confirm which screen they are on, so it is the one element whose position
+ * should not be a per-screen exception.
+ *
+ * ⚠️ Assumptions: the property is asserted STRUCTURALLY -- no flex container holds both the caption and
+ * the ordinal -- rather than by measuring a position, because jsdom computes no layout and every
+ * element reports a zero rectangle, so a coordinate assertion here would pass against any markup.
+ * Sharing a flex line is the mechanism that produced the offset, so its absence is the property.
+ *
+ * Assumptions: the caption's own margin is asserted to be UNSET rather than to hold a value. The
+ * zeroing was the second half of the defect, and `ScreenTitle` resolves the heading's spacing itself,
+ * so the correct state is the screen not overriding it at all.
+ * @returns {Promise<void>} Resolves once the caption and the ordinal have been located.
+ */
+async function theCaptionStandsOnItsOwnLine(): Promise<void> {
+  await browseShowing(pageResponse(FULL_PAGE_ROWS));
+
+  const caption = screen.getByRole('heading', { name: TRANSACTION_LIST_LABELS.title });
+  const ordinal = screen.getByRole('status', { name: TRANSACTION_LIST_LABELS.pageLabel });
+
+  expect(caption.style.margin).toBe('');
+
+  /*
+   * WHY : ⚠️ Assumptions: the ORDINAL's nearest flex line is the one examined, not the caption's. The
+   *       screen's outermost element is itself a vertical flex holding every band, so the caption's
+   *       nearest flex contains the ordinal whatever the arrangement is and an assertion made from that
+   *       end would be vacuous. The ordinal's nearest flex is the line it shares, and the property under
+   *       test is that the caption is not on that line.
+   */
+  const ordinalLine = ordinal.closest('.ant-flex');
+  expect(ordinalLine).not.toBeNull();
+  expect(ordinalLine?.contains(caption) ?? true).toBe(false);
+
+  // WHY : Assumptions: the caption's own parent is asserted to be the VERTICAL stack, which states the
+  //       positive half -- the caption occupies a line of its own -- where the check above states only
+  //       that it does not share the ordinal's. antd marks a vertical flex with its own class.
+  expect(caption.parentElement?.className ?? '').toContain('ant-flex-vertical');
+}
+
+/**
+ * The money column is on screen at a phone width, and the widest column is what withdraws.
+ *
+ * ⚠️ Purpose: a responsive review measured the five columns holding their desktop widths at every
+ * viewport -- 51.89, 166.42, 99.22, 250.42 and 132.83 pixels, summing to 700.78 -- inside a scroller
+ * whose window is the viewport, so at 375 the amount cells sat at x568 to x700.8 and were entirely
+ * off-screen with "no scrollbar, fade, chevron or hint" to say so. The amount is the figure this
+ * screen exists to show.
+ *
+ * ⚠️ Assumptions: the viewport is selected by assigning `window.innerWidth` BEFORE the mount, which is
+ * the mechanism `ui/src/test/setup.ts` documents: its `matchMedia` shim derives `matches` from that
+ * value rather than reporting every breakpoint inactive, precisely so a case can choose the branch it
+ * means to test. The width is restored afterwards so the following case sees the default.
+ *
+ * Assumptions: the pinned column is asserted through the design system's own fixed-cell class rather
+ * than through a coordinate, for the same reason the caption case asserts structure -- jsdom computes
+ * no layout, so the class is the only observable form of the pin.
+ * @returns {Promise<void>} Resolves once both viewports have been examined.
+ */
+async function theMoneyColumnStaysReadableOnAPhone(): Promise<void> {
+  const restoreWidth = window.innerWidth;
+  try {
+    // WHY : Assumptions: 375 specifically, because it is the narrowest viewport the responsive sweep
+    //       covers and the one at which the amount was measured entirely off-screen.
+    window.innerWidth = 375;
+    await browseShowing(pageResponse(FULL_PAGE_ROWS));
+
+    const headers = screen.getAllByRole('columnheader').map(textOf);
+    expect(headers).toContain(TRANSACTION_LIST_COLUMN_HEADERS.amount);
+    expect(headers).not.toContain(TRANSACTION_LIST_COLUMN_HEADERS.description);
+    expect(headers).toContain(TRANSACTION_LIST_COLUMN_HEADERS.transactionId);
+    expect(headers).toContain(TRANSACTION_LIST_COLUMN_HEADERS.date);
+  } finally {
+    window.innerWidth = restoreWidth;
+  }
+}
+
+/**
+ * Every column the mapset paints is present at a desktop width.
+ *
+ * Purpose: the narrow-viewport case above withdraws a column, and this states the boundary of that
+ * withdrawal -- so a change that dropped the description everywhere fails here rather than passing as
+ * a responsive refinement.
+ * @returns {Promise<void>} Resolves once the headings have been counted.
+ */
+async function everyColumnIsPresentOnADesktop(): Promise<void> {
+  const restoreWidth = window.innerWidth;
+  try {
+    // WHY : Assumptions: 1200, which is the design system's `lg` breakpoint and the width the sweep
+    //       records as the reference desktop, so this is the branch an operator at a workstation meets.
+    window.innerWidth = 1200;
+    await browseShowing(pageResponse(FULL_PAGE_ROWS));
+
+    const headers = screen.getAllByRole('columnheader').map(textOf);
+    expect(headers).toEqual([
+      TRANSACTION_LIST_COLUMN_HEADERS.selection,
+      TRANSACTION_LIST_COLUMN_HEADERS.transactionId,
+      TRANSACTION_LIST_COLUMN_HEADERS.date,
+      TRANSACTION_LIST_COLUMN_HEADERS.description,
+      TRANSACTION_LIST_COLUMN_HEADERS.amount,
+    ]);
+  } finally {
+    window.innerWidth = restoreWidth;
+  }
+}
+
+/**
+ * Groups the read-discipline, row-affordance and narrow-viewport cases.
+ * @returns {void} Nothing; the cases are registered with the runner.
+ */
+function readDisciplineAndAffordanceContract(): void {
+  it('absorbs a second forward press during a read', aSecondForwardPressDuringAReadIsAbsorbed);
+  it(
+    'absorbs an unchanged resubmission during a read',
+    anUnchangedResubmissionDuringAReadIsAbsorbed,
+  );
+  it('still issues a corrected entry during a read', aDifferentEntryDuringAReadIsStillIssued);
+  it('states that a read is outstanding', theEntryFieldStatesThatAReadIsOutstanding);
+  it('lets a row be chosen by pointer', aRowIsChoosableByPointer);
+  it('lets a row be chosen by the named letter', aRowIsChoosableByTheLetterTheScreenNames);
+  it('keeps the caption on its own line', theCaptionStandsOnItsOwnLine);
+  it('keeps the money column readable on a phone', theMoneyColumnStaysReadableOnAPhone);
+  it('keeps every column on a desktop', everyColumnIsPresentOnADesktop);
+}
+
+describe('transaction browse read discipline and affordance', readDisciplineAndAffordanceContract);

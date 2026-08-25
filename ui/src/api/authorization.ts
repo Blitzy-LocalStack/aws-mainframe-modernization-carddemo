@@ -111,7 +111,12 @@
  * here.
  */
 
-import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import {
+  getApiClient,
+  keysetPagingMembers,
+  requestPath,
+  requireWithinPublishedWidths,
+} from './client';
 import { MASKED_CARD_NUMBER } from './masking';
 import type {
   ContractOperation,
@@ -401,6 +406,8 @@ export async function getNextPendingAuthorization(key: string): Promise<NextPend
  * @param {FraudMarkRequest} request - The fraud state to set: report or withdraw.
  * @returns {Promise<FraudMarkResponse>} The success outcome, carrying the reference program's own
  *   sentence for whichever write path ran. A non-success is never reported in this body.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `FraudMarkRequest` publishes for it, in which case nothing is sent.
  * @throws {Error} If the request fails, normalised to `ApiRequestError` carrying an `ApiError`. This
  *   operation can answer 400 for a selector outside the sealed shape or an action outside its
  *   two-character domain, 401, 403, 404 for a row that no longer exists, 405, 409 when another
@@ -413,7 +420,7 @@ export async function setAuthorizationFraudState(
 ): Promise<FraudMarkResponse> {
   const response = await getApiClient().put<FraudMarkResponse>(
     requestPath(SET_AUTHORIZATION_FRAUD_STATE, { key }),
-    request,
+    requireWithinPublishedWidths('FraudMarkRequest', request),
   );
   return response.data;
 }

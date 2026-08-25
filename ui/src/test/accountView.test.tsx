@@ -72,7 +72,12 @@ import { screen, waitFor, within } from '@testing-library/react';
 
 import { readAccountView } from '../api/accounts';
 import type { AccountViewResponse, CustomerDetail } from '../api/accounts';
-import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
+import {
+  INFORMATION_BAND_TEST_ID,
+  MESSAGE_BAND_TEST_ID,
+  isMessageBandEmpty,
+} from '../layout/MessageBand';
+import { MONEY_PICTURES, renderMoney } from '../format/money';
 import { PF_KEY_BAR_REGION_LABEL } from '../layout/PfKeyBar';
 import {
   ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS,
@@ -83,7 +88,13 @@ import {
   STATUS_MESSAGES,
 } from '../messages/messages';
 import { ACCOUNT_VIEW_PATH } from '../router';
-import { AccountViewScreen } from '../screens/accountView';
+import {
+  ACCOUNT_VIEW_ADVISORY_FIELDS,
+  ACCOUNT_VIEW_ADVISORY_SENTENCES,
+  AccountViewScreen,
+  INFORMATION_LINE_FIELD,
+  routeAccountViewChannels,
+} from '../screens/accountView';
 import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 import {
   apiError,
@@ -105,6 +116,33 @@ import type { HarnessRenderResult } from './setup';
  * into both places satisfies that while the operator sees the wrong words.
  */
 const VIEW_MESSAGES = STATUS_MESSAGES.COACTVWC;
+
+/*
+ * WHY : ⚠️ Assumptions: this acknowledgement is declared by the SIBLING program rather than by the one
+ *       this screen transcribes -- `FOUND-ACCOUNT-DATA` at `app/cbl/COACTUPC.cbl` L467, on
+ *       `WS-INFO-MSG` -- and it is exercised here because the running service answers this screen's
+ *       read with it. One service operation serves both account screens, so its acknowledgement
+ *       reaches both, and the field it is declared on is what decides which line carries it.
+ */
+const FOUND_ACCOUNT_DATA = STATUS_MESSAGES.COACTUPC.FOUND_ACCOUNT_DATA.text;
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: the five monetary labels are named ONCE here, where two cases used
+ *       to carry their own copy of the list. Two lists of the same five fields drift independently --
+ *       a sixth `PICOUT` field added to the mapset would be picked up by whichever case was edited --
+ *       and the property every one of these cases rests on is that the list is the mapset's complete
+ *       set. The paired member name is what lets a case read the fixture's amount for each label
+ *       without a second parallel list.
+ * WHY : Assumptions: five is the mapset's own count. `app/bms/COACTVW.bms` gives a `PICOUT` operand to
+ *       exactly five fields, which is what the monetary rendering is keyed on.
+ */
+const MONEY_FIELDS = [
+  [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CREDIT_LIMIT, 'creditLimit'],
+  [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CASH_CREDIT_LIMIT, 'cashCreditLimit'],
+  [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_BALANCE, 'currentBalance'],
+  [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_CYCLE_CREDIT, 'currentCycleCredit'],
+  [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_CYCLE_DEBIT, 'currentCycleDebit'],
+] as const satisfies readonly (readonly [string, keyof AccountViewResponse['account']])[];
 
 /**
  * The refusal the program actually moves for a malformed filter.
@@ -526,6 +564,41 @@ async function submitFilter(rendered: HarnessRenderResult, entry: string): Promi
  * @param {string} wireAmount - The amount exactly as the fixture put it on the wire.
  * @returns {void} Nothing; the assertions carry the outcome.
  */
+/**
+ * Reads the element one monetary value is painted on, inside its record cell.
+ *
+ * Assumptions: the element is located by the fixed-pitch font declaration in its inline style, which
+ * is the same handle the width case already uses. Every monetary value carries that declaration and
+ * no other value on the screen does, so it identifies the money element without a test-only
+ * attribute being added to production markup for the tests' convenience.
+ * @param {string} label - The record label the value sits against.
+ * @returns {HTMLElement} The element the amount is painted on.
+ * @throws {Error} When no such element is present, which is a failure rather than an empty result.
+ */
+function moneyElementFor(label: string): HTMLElement {
+  const painted = recordValueFor(label).querySelector<HTMLElement>('[style*="font-family"]');
+
+  if (painted === null) {
+    throw new Error(`no monetary element rendered for ${label}`);
+  }
+
+  return painted;
+}
+
+/**
+ * Asserts one monetary cell is painted through its declared edit mask rather than as a bare number.
+ *
+ * Assumptions: the rendered length is asserted BEFORE the digits are compared, and that order is what
+ * makes the case meaningful. A bare `1234.56` carries the same digits as the masked
+ * `+      1,234.56` and would satisfy the second assertion on its own, so the width is the assertion
+ * that actually detects an unmasked value; the digit comparison then confirms the mask did not alter
+ * the amount while formatting it. Trade-offs: the sign, the spaces and the grouping commas are
+ * stripped rather than matched positionally, because their positions are the mask's business and are
+ * asserted where the mask itself is tested.
+ * @param {HTMLElement} cell - The rendered element holding one monetary value.
+ * @param {string} wireAmount - The digits the service sent, with no sign, padding or grouping.
+ * @returns {void} Nothing; the assertions fail the case.
+ */
 function expectEditMaskedMoney(cell: HTMLElement, wireAmount: string): void {
   const rendered = cell.textContent ?? '';
 
@@ -541,11 +614,34 @@ function expectEditMaskedMoney(cell: HTMLElement, wireAmount: string): void {
  * the token constant rather than writing the property out is what keeps this file free of a literal
  * font value: AAP section 0.3.2 admits no hardcoded CSS values, and a test that hardcoded the
  * resolved stack would pass while the element had been opted out of the theme.
+ * ⚠️ Assumptions: a DIGIT run is separated from the letters before it, because the design system
+ * hyphenates one -- a palette token named `red7` reaches the DOM as `--ant-red-7`, which was
+ * confirmed by reading the rendered inline style rather than assumed. Without that boundary this
+ * helper derived `red7` and a case looking for it failed against a correctly painted element, so the
+ * omission produced a false negative rather than a missed defect. Only the two exceptional money
+ * sign cases resolve to a palette token, which is why no earlier caller met the gap.
  * @param {string} tokenName - The token name as `ui/src/theme/tokens.ts` publishes it.
  * @returns {string} The kebab-cased fragment the custom property carries.
  */
 function customPropertyFragmentFor(tokenName: string): string {
-  return tokenName.replace(/([a-z0-9])([A-Z])/gu, '$1-$2').toLowerCase();
+  return tokenName
+    .replace(/([a-z0-9])([A-Z])/gu, '$1-$2')
+    .replace(/([a-zA-Z])([0-9])/gu, '$1-$2')
+    .toLowerCase();
+}
+
+/**
+ * Converts a design-system token name to the whole custom-property reference it resolves to.
+ *
+ * Assumptions: the complete reference is asserted rather than the bare fragment where one token name
+ * is a PREFIX of another. `colorText` and `colorTextSecondary` differ only by a suffix, so a
+ * containment check on the shorter fragment passes against an element painted in the longer token --
+ * the closing parenthesis is what makes the two distinguishable.
+ * @param {string} tokenName - The token name as `ui/src/theme/tokens.ts` publishes it.
+ * @returns {string} The `var(...)` reference the design system emits for that token.
+ */
+function customPropertyReferenceFor(tokenName: string): string {
+  return `var(--ant-${customPropertyFragmentFor(tokenName)})`;
 }
 
 /**
@@ -719,25 +815,14 @@ async function theFiveAmountsRenderAsFixedPitchStringsAtTheirDeclaredWidth(): Pr
   await submitFilter(rendered, ACCOUNT_ID);
   await waitFor(assertAccountBlockRendered);
 
-  const amounts: readonly (readonly [string, string])[] = [
-    [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CREDIT_LIMIT, view.account.creditLimit],
-    [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CASH_CREDIT_LIMIT, view.account.cashCreditLimit],
-    [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_BALANCE, view.account.currentBalance],
-    [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_CYCLE_CREDIT, view.account.currentCycleCredit],
-    [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_CYCLE_DEBIT, view.account.currentCycleDebit],
-  ];
-
   const fragment = customPropertyFragmentFor(TYPOGRAPHY_TOKENS.fixedPitchData);
 
-  for (const [label, wireAmount] of amounts) {
+  for (const [label, member] of MONEY_FIELDS) {
+    const wireAmount = view.account[member];
     expect(typeof wireAmount).toBe('string');
 
-    const cell = recordValueFor(label);
-    expectEditMaskedMoney(cell, wireAmount);
-
-    const styled = cell.querySelector<HTMLElement>('[style*="font-family"]');
-    expect(styled).not.toBeNull();
-    expect(styled?.getAttribute('style') ?? '').toContain(fragment);
+    expectEditMaskedMoney(recordValueFor(label), wireAmount);
+    expect(moneyElementFor(label).getAttribute('style') ?? '').toContain(fragment);
   }
 }
 
@@ -1236,6 +1321,258 @@ async function theProtectedIdentifiersRenderOnlyMasked(): Promise<void> {
  * guarantee the configuration already provides.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
+/**
+ * Every sentence the screen treats as an advisory really is declared on the information field.
+ *
+ * Purpose: guard the routing set against catalog drift. The screen decides which of the mapset's two
+ * message lines a sentence belongs on by consulting the catalog's own `field` member, so the set it
+ * consults is only trustworthy while every member of it is declared on the information field. A
+ * sentence that moved to `WS-RETURN-MSG` upstream would otherwise be silently re-routed to row 22.
+ *
+ * Assumptions: the expected field name is read from the screen's own exported constant rather than
+ * retyped, so this asserts the SET against the catalog and not the catalog against a literal.
+ * @returns {void} Resolves once every advisory entry's declaring field has been asserted.
+ */
+function everyAdvisorySentenceIsDeclaredOnTheInformationField(): void {
+  expect(ACCOUNT_VIEW_ADVISORY_FIELDS.length).toBeGreaterThan(0);
+
+  for (const field of ACCOUNT_VIEW_ADVISORY_FIELDS) {
+    expect(field).toBe(INFORMATION_LINE_FIELD);
+  }
+
+  expect(ACCOUNT_VIEW_ADVISORY_SENTENCES.has(FOUND_ACCOUNT_DATA)).toBe(true);
+}
+
+/**
+ * The router sends each sentence to the line its catalog entry declares, and never to both.
+ *
+ * Purpose: pin the four outcomes directly, because three of them are unreachable through the screen
+ * with the fixtures this file drives -- the service supplies one member at a time -- and an outcome
+ * asserted nowhere is an outcome that can regress silently.
+ *
+ * Assumptions: the unknown-sentence outcome is asserted as a REFUSAL deliberately. That is the
+ * conservative reading the screen documents: an unrecognised sentence announced politely could be a
+ * genuine failure the operator never notices, whereas one announced as a refusal is at worst
+ * over-emphatic.
+ * @returns {void} Resolves once all four routing outcomes have been asserted.
+ */
+function theRoutingSendsEachSentenceToTheLineItsEntryDeclares(): void {
+  const prompt = VIEW_MESSAGES.WS_PROMPT_FOR_INPUT.text;
+  const refusalText = VIEW_MESSAGES.DID_NOT_FIND_CUST_IN_CUSTDAT.text;
+
+  const acknowledgementInTheReturnMember = routeAccountViewChannels(
+    null,
+    FOUND_ACCOUNT_DATA,
+    prompt,
+  );
+  expect(acknowledgementInTheReturnMember.information).toBe(FOUND_ACCOUNT_DATA);
+  expect(acknowledgementInTheReturnMember.refusal).toBeNull();
+
+  const genuineRefusal = routeAccountViewChannels(null, refusalText, prompt);
+  expect(genuineRefusal.information).toBe(prompt);
+  expect(genuineRefusal.refusal).toBe(refusalText);
+
+  const bothMembersSupplied = routeAccountViewChannels(prompt, FOUND_ACCOUNT_DATA, prompt);
+  expect(bothMembersSupplied.information).toBe(prompt);
+  expect(bothMembersSupplied.refusal).toBeNull();
+
+  const neitherSupplied = routeAccountViewChannels(null, null, prompt);
+  expect(neitherSupplied.information).toBe(prompt);
+  expect(neitherSupplied.refusal).toBeNull();
+}
+
+/**
+ * A successful read's acknowledgement lands on row 22 and leaves the refusal line empty.
+ *
+ * Purpose: this is the defect a browser review measured on the running system. The service answered a
+ * located account with `informationMessage: null` and the acknowledgement in `returnMessage`, and the
+ * screen painted that acknowledgement in the refusal band's error styling inside an assertive live
+ * region -- so a screen reader interrupted itself to announce a success as a failure.
+ *
+ * Assumptions: the error band is asserted EMPTY through the band's own emptiness predicate rather
+ * than by querying for an absent element, because the shell paints that zone for every screen and the
+ * band renders its own empty state; a query for the element would succeed either way.
+ * @returns {Promise<void>} Resolves once both lines have been asserted.
+ */
+async function theAcknowledgementLandsOnTheInformationLine(): Promise<void> {
+  const view = accountView();
+  readResolvingWith({ ...view, informationMessage: null, returnMessage: FOUND_ACCOUNT_DATA });
+  const rendered = await renderScreen();
+
+  await submitFilter(rendered, ACCOUNT_ID);
+  await waitFor(assertAccountBlockRendered);
+
+  const information = await informationBand();
+  await waitFor(
+    /**
+     * Waits for the advisory line to carry the found-account sentence.
+     *
+     * Assumptions: the band element is captured once and re-read inside the poll rather than being
+     * re-queried, because the shell keeps the row reserved and updates its text in place -- so the
+     * element identity is stable and what changes is its content.
+     * @returns {void} Nothing; the assertion fails until the sentence arrives.
+     */
+    (): void => {
+      expect(collapsedTextOf(information)).toContain(collapse(FOUND_ACCOUNT_DATA));
+    },
+  );
+
+  const refusal = await errorBand();
+  expect(isMessageBandEmpty(collapsedTextOf(refusal))).toBe(true);
+  expect(refusal.querySelector('.ant-alert-error')).toBeNull();
+  expect(within(refusal).queryByRole('alert')).toBeNull();
+}
+
+/**
+ * Every amount keeps the pad its picture suppressed into, so a column of amounts aligns.
+ *
+ * Purpose: the review measured the DOM holding a padded amount while the element computed
+ * `white-space: normal`, which collapses the pad -- the runs of blanks that right-align the decimal
+ * points down the column are the whole mechanism, and HTML's default whitespace handling removes
+ * them. Equal-width masks measured 84.016 pixels with the pad preserved against 67.219 without.
+ *
+ * Assumptions: the mode is read from the rendering rather than written here, because
+ * `ui/src/format/money.ts` returns it precisely so no screen decides it -- and asserting the
+ * formatter's own answer is what makes this a check on the SCREEN applying it.
+ * @returns {Promise<void>} Resolves once every amount's whitespace mode has been asserted.
+ */
+async function theAmountsKeepTheSuppressedPadTheirPictureLeaves(): Promise<void> {
+  const view = accountView();
+  readResolvingWith(view);
+  const rendered = await renderScreen();
+
+  await submitFilter(rendered, ACCOUNT_ID);
+  await waitFor(assertAccountBlockRendered);
+
+  const expectedMode = renderMoney(
+    view.account.currentBalance,
+    MONEY_PICTURES.accountGrouped,
+  ).whiteSpace;
+
+  for (const [label] of MONEY_FIELDS) {
+    expect(moneyElementFor(label).style.whiteSpace).toBe(expectedMode);
+  }
+}
+
+/**
+ * The three sign cases are painted in their own tokens, so a credit and a debit differ.
+ *
+ * Purpose: the AAP asks the money RENDERING to make the three cases distinguishable, and this screen
+ * painted all three identically. The sign character is present in the text in every case, so colour
+ * is redundant here and never the sole carrier.
+ *
+ * Assumptions: each expected colour is derived from the token the formatter names, and asserted as
+ * the design system's custom-property reference rather than as a resolved colour -- an inline style
+ * holding a literal hue would pass a colour assertion while having opted the element out of the
+ * theme, which is the failure the token bridge exists to prevent.
+ * @returns {Promise<void>} Resolves once all three sign cases have been asserted.
+ */
+async function theThreeSignCasesArePaintedInTheirOwnTokens(): Promise<void> {
+  const view = accountView();
+  const signed = {
+    ...view,
+    account: {
+      ...view.account,
+      creditLimit: '5000.00',
+      currentBalance: '-250.00',
+      cashCreditLimit: '0.00',
+    },
+  };
+  readResolvingWith(signed);
+  const rendered = await renderScreen();
+
+  await submitFilter(rendered, ACCOUNT_ID);
+  await waitFor(assertAccountBlockRendered);
+
+  const cases: readonly (readonly [string, string])[] = [
+    [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CREDIT_LIMIT, signed.account.creditLimit],
+    [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CURRENT_BALANCE, signed.account.currentBalance],
+    [ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS.CASH_CREDIT_LIMIT, signed.account.cashCreditLimit],
+  ];
+
+  const seen = new Set<string>();
+
+  for (const [label, wireAmount] of cases) {
+    const expectedToken = renderMoney(wireAmount, MONEY_PICTURES.accountGrouped).colorToken;
+    const reference = customPropertyReferenceFor(expectedToken);
+
+    expect(moneyElementFor(label).getAttribute('style') ?? '').toContain(reference);
+    seen.add(reference);
+  }
+
+  expect(seen.size).toBe(cases.length);
+}
+
+/**
+ * Both record blocks measure their label column the same.
+ *
+ * WHY : ⚠️ Purpose: a browser review measured the two grids' label columns differing by 28 pixels, and
+ *       the cause is in the data rather than in the styling: neither block stated a label width, so
+ *       each sized its own column to its own longest label -- 21 characters in the account block
+ *       against 30 in the customer block -- and content-driven sizing could not have agreed.
+ * WHY : Assumptions: the shared declaration is asserted rather than a resolved pixel width, because a
+ *       jsdom layout has no typography to measure and the declaration is what the screen controls. The
+ *       property under test is that ONE measure reaches every label cell of BOTH blocks.
+ * WHY : Assumptions: the expected measure is derived from the catalog the screen derives it from, so a
+ *       label lengthened upstream moves the case with the screen instead of failing it.
+ * @returns {Promise<void>} Resolves once every label cell has been asserted.
+ */
+async function bothRecordBlocksShareOneLabelMeasure(): Promise<void> {
+  const view = accountView();
+  readResolvingWith(view);
+  const rendered = await renderScreen();
+
+  await submitFilter(rendered, ACCOUNT_ID);
+  await waitFor(assertAccountBlockRendered);
+
+  const longest = Math.max(
+    ...Object.values(ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS).map(
+      /**
+       * Reads one label's character count.
+       * @param {string} label - The painted label, padding included.
+       * @returns {number} Its length in characters.
+       */
+      (label: string): number => label.length,
+    ),
+    ...Object.values(ACCOUNT_VIEW_CUSTOMER_FIELD_LABELS).map(
+      /**
+       * Reads one label's character count.
+       * @param {string} label - The painted label, padding included.
+       * @returns {number} Its length in characters.
+       */
+      (label: string): number => label.length,
+    ),
+  );
+
+  const labelCells = Array.from(
+    document.querySelectorAll<HTMLElement>('.ant-descriptions-item-label'),
+  );
+
+  expect(labelCells.length).toBeGreaterThan(Object.keys(ACCOUNT_VIEW_ACCOUNT_FIELD_LABELS).length);
+
+  const measures = new Set<string>();
+
+  for (const cell of labelCells) {
+    expect(cell.style.inlineSize).toBe(`${String(longest)}ch`);
+    measures.add(cell.style.inlineSize);
+  }
+
+  /*
+   * WHY : Assumptions: one distinct measure across every cell of both blocks is the assertion that
+   *       actually closes the finding -- checking each cell against the expected value alone would
+   *       pass if a later change gave the two blocks two different correct-looking widths.
+   */
+  expect(measures.size).toBe(1);
+}
+
+/**
+ * Registers every account-view case.
+ *
+ * Assumptions: registration is a named function rather than inline `it` calls at module scope so the
+ * suite reads as one list, in the order an operator meets the behaviours -- filter, cursor, refusal,
+ * then the record and its money.
+ * @returns {void} Nothing; the cases are registered as a side effect.
+ */
 function accountViewCases(): void {
   it(
     'bounds the filter to its declared width as the only editable control',
@@ -1281,6 +1618,27 @@ function accountViewCases(): void {
   );
   it('coerces an unmapped key into Enter', anUnmappedKeyIsCoercedIntoEnter);
   it('renders the protected identifiers masked only', theProtectedIdentifiersRenderOnlyMasked);
+  it(
+    'declares every advisory sentence on the information field',
+    everyAdvisorySentenceIsDeclaredOnTheInformationField,
+  );
+  it(
+    'routes each sentence to the line its catalog entry declares',
+    theRoutingSendsEachSentenceToTheLineItsEntryDeclares,
+  );
+  it(
+    "lands a successful read's acknowledgement on the information line",
+    theAcknowledgementLandsOnTheInformationLine,
+  );
+  it(
+    "keeps the suppressed pad every amount's picture leaves",
+    theAmountsKeepTheSuppressedPadTheirPictureLeaves,
+  );
+  it(
+    'paints the three sign cases in their own tokens',
+    theThreeSignCasesArePaintedInTheirOwnTokens,
+  );
+  it('measures both label columns the same', bothRecordBlocksShareOneLabelMeasure);
 }
 
 describe('the account view screen', accountViewCases);

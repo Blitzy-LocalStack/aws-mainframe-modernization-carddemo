@@ -102,8 +102,9 @@ const {
 const { AppShell } = await import('../../layout/AppShell');
 const { PF_KEY_BAR_REGION_LABEL } = await import('../../layout/PfKeyBar');
 const { MESSAGE_BAND_TEST_ID } = await import('../../layout/MessageBand');
+const { BUSY_ANNOUNCEMENT_TEST_ID } = await import('../../layout/fieldHelp');
 
-const { INVALID_KEY_PRESSED, PROGRAM_MESSAGES, SHARED_MESSAGES } =
+const { INVALID_KEY_PRESSED, PROGRAM_MESSAGES, REQUEST_IN_PROGRESS, SHARED_MESSAGES } =
   await import('../../messages/messages');
 
 /** The four controls this screen admits, in the order the reference validates them. */
@@ -491,15 +492,30 @@ async function discardsAWriteSupersededByAClear(): Promise<void> {
 }
 
 /**
- * The three keys that open a turn stand down while one is outstanding, and the two exits do not.
+ * ⚠️ The three keys that open a turn announce themselves BUSY while one is outstanding, not withdrawn.
  *
- * Assumptions: the enabled halves are asserted beside the disabled ones. Disabling every key would
- * satisfy the first three assertions and would trap an operator on a slow request with no way to clear
- * the screen or leave it, which is the failure the two exemptions exist to avoid.
+ * ⚠️ Refactoring Rationale: this case previously required those three keys to be `disabled`, and that
+ * requirement was the defect. `disabled` WITHDREW the control -- the legend greyed out a key whose own
+ * legend is on the glass in front of the operator, for the duration of its own turn -- and it withdrew
+ * it silently, because this screen already suppresses the disabled rejection's sentence. The screen now
+ * reports through the per-key `busy` channel instead: the control stays present, ENABLED, focusable and
+ * named, wears the design system's own in-flight affordance, and the press is declined silently. That is
+ * the 3270's input-inhibit behaviour -- the terminal swallowed the attention key without claiming it was
+ * invalid -- and it puts the affordance where the operator's attention already is.
  *
- * Assumptions: no invalid-key sentence may appear either. A stood-down key reports through the same
- * channel an unbound key does, so a screen that did not distinguish the two reasons would answer
- * `Invalid key pressed...` about a key whose own legend is on the glass in front of the operator.
+ * Assumptions: the enabled halves of the two EXITS are still asserted beside the three busy ones. PF4
+ * aborts the outstanding turn and PF12 leaves the screen, so neither may participate in the channel at
+ * all; a screen that marked all five busy would satisfy the first three assertions and trap an operator
+ * on a slow request with no way to clear the screen or leave it.
+ *
+ * ⚠️ Assumptions: `aria-busy` is asserted rather than only the visual class, because the announcement
+ * is the half a keyboard-only operator receives. A control that carried the spinner without the state
+ * would look busy and read idle.
+ *
+ * Assumptions: no invalid-key sentence may appear either, and that assertion is unchanged. It was
+ * already passing under `disabled` because the screen distinguishes the rejection reasons; it is kept
+ * because the `busy` channel must produce no sentence for a different reason -- `usePfKeys` never routes
+ * a busy press into the rejection channel at all -- and the case should fail if either mechanism breaks.
  * @returns {Promise<void>} Resolves once the assertions have run.
  */
 async function standsTheTurnKeysDownWhileARequestIsOutstanding(): Promise<void> {
@@ -508,14 +524,37 @@ async function standsTheTurnKeysDownWhileARequestIsOutstanding(): Promise<void> 
   const user = userEvent.setup();
   renderScreen(ALICE.userId, null);
 
-  expect(keyButton(USER_UPDATE_KEY_LABELS.ENTER)).toBeDisabled();
-  expect(keyButton(USER_UPDATE_KEY_LABELS.PFK03)).toBeDisabled();
-  expect(keyButton(USER_UPDATE_KEY_LABELS.PFK05)).toBeDisabled();
+  for (const label of [
+    USER_UPDATE_KEY_LABELS.ENTER,
+    USER_UPDATE_KEY_LABELS.PFK03,
+    USER_UPDATE_KEY_LABELS.PFK05,
+  ]) {
+    expect(keyButton(label), label).toBeEnabled();
+    expect(keyButton(label), label).toHaveAttribute('aria-busy', 'true');
+    expect(keyButton(label), label).toHaveAccessibleName(label);
+  }
+
   expect(keyButton(USER_UPDATE_KEY_LABELS.PFK04)).toBeEnabled();
+  expect(keyButton(USER_UPDATE_KEY_LABELS.PFK04)).not.toHaveAttribute('aria-busy');
   expect(keyButton(USER_UPDATE_KEY_LABELS.PFK12)).toBeEnabled();
+  expect(keyButton(USER_UPDATE_KEY_LABELS.PFK12)).not.toHaveAttribute('aria-busy');
 
   await user.keyboard('{F5}');
   expect(within(messageBand()).queryByText(INVALID_KEY_PRESSED)).toBeNull();
+  /*
+   * ⚠️ Assumptions: the press is asserted to have DISPATCHED NOTHING as well as to have said nothing.
+   * A silent decline that still wrote would be worse than the withdrawal it replaced, so the absence of
+   * a write is the load-bearing half and the absent sentence is the courtesy half.
+   */
+  expect(updateUserMock).not.toHaveBeenCalled();
+
+  /*
+   * WHY : ⚠️ Assumptions: the outstanding turn is ANNOUNCED as well as shown, asserted from inside the
+   *       window. `aria-busy` on the three controls suppresses chatter about elements mid-change; it
+   *       produces no sentence, so without this region an operator who cannot see the affordance is told
+   *       nothing at all that a turn is running.
+   */
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent(REQUEST_IN_PROGRESS);
 
   await act(
     /**
@@ -527,6 +566,12 @@ async function standsTheTurnKeysDownWhileARequestIsOutstanding(): Promise<void> 
       await outstanding.promise;
     },
   );
+
+  /*
+   * WHY : Assumptions: empty once the turn has landed, and still MOUNTED, because a live region has to
+   *       be in the accessibility tree before its content changes for the first change to be announced.
+   */
+  expect(screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID)).toHaveTextContent('');
 }
 
 /**
@@ -598,7 +643,7 @@ function userUpdateCases(): void {
   it('discards a read superseded by a clear', discardsAReadSupersededByAClear);
   it('discards a write superseded by a clear', discardsAWriteSupersededByAClear);
   it(
-    'stands the turn keys down while a request is outstanding',
+    'announces the turn keys busy while a request is outstanding, without withdrawing them',
     standsTheTurnKeysDownWhileARequestIsOutstanding,
   );
   it(

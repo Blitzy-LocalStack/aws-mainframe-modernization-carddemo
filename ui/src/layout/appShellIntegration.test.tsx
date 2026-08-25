@@ -511,10 +511,104 @@ function paintsItsOwnSentencesThroughTheTextGradeMap(): void {
 }
 
 /**
+ * The frame exposes one of each landmark, and states none of them invalidly.
+ *
+ * Purpose: an accessibility audit reported a `<header role="region">` nested inside the design
+ * system's own `<header>`. Per ARIA in HTML a `header` permits only `group`, `none`, `presentation`
+ * and `doc-footnote`, so that combination is invalid and axe-core reports it - while the OUTCOME the
+ * combination was reaching for, one region named by the application title, was correct and has to
+ * survive the fix.
+ *
+ * Assumptions: the census and the prohibition are asserted together, because either alone admits the
+ * other's defect. Dropping the role would satisfy a prohibition and lose the landmark on the three
+ * screens that compose the band inside their own body; keeping the role satisfies the census and
+ * leaves the invalid combination in place.
+ *
+ * Assumptions: the prohibition is written over every `<header>` in the document rather than over the
+ * band alone, so it also catches the same combination arriving on a different header later.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function exposesOneOfEachLandmarkWithNoInvalidRole(): void {
+  render(framed(<PublishingScreen onKey={vi.fn()} />));
+
+  expect(screen.getAllByRole('banner'), 'the frame must expose one banner').toHaveLength(1);
+  expect(screen.getAllByRole('main'), 'the frame must expose one content region').toHaveLength(1);
+  expect(screen.getAllByRole('contentinfo'), 'the frame must expose one footer').toHaveLength(1);
+  expect(
+    screen.getAllByRole('navigation', { name: PF_KEY_BAR_REGION_LABEL }),
+    'the frame must expose one key legend',
+  ).toHaveLength(1);
+  expect(
+    screen.getAllByRole('region', { name: APP_TITLE_DISPLAY }),
+    'the title band must remain one region named by the application title',
+  ).toHaveLength(1);
+
+  for (const header of document.querySelectorAll('header')) {
+    expect(
+      header.getAttribute('role'),
+      'a header element may not carry a role: the allowed set excludes every role this frame wants',
+    ).toBeNull();
+  }
+}
+
+/**
+ * The skip link renders differently when hovered and when pressed.
+ *
+ * Purpose: an inline colour outranks a stylesheet rule, so the contrast-safe hue this frame declares
+ * on the skip link also displaced the design system's hover and active colours - and the design system
+ * ships no hover underline to fall back on. Measured consequence: on all fifteen rendered screens the
+ * link's hover and active renderings were byte-identical to its resting one, so focus was the only
+ * state a pointer user could perceive.
+ *
+ * Assumptions: the RESTING declaration is asserted to survive the fix, because the obvious remedy -
+ * deleting the override so the component's own states return - drops the resting colour to the link
+ * anchor, which measures 4.10:1 against the surface this frame paints where AA asks 4.5:1. Restoring
+ * a state by breaking the contrast would be the same defect moved.
+ * @returns {Promise<void>} Resolves once the three renderings have been compared.
+ */
+async function rendersTheSkipLinkDifferentlyWhenHoveredAndPressed(): Promise<void> {
+  const user = userEvent.setup();
+  render(framed(<SilentScreen />));
+
+  const link = screen.getByRole('link', { name: SKIP_TO_CONTENT_LABEL });
+  const resting = link.getAttribute('style') ?? '';
+
+  expect(resting, 'the resting rendering must keep naming the text-grade colour').toContain(
+    `--ant-${KEBAB_CASED_TEXT_TOKENS.BLUE}`,
+  );
+
+  await user.hover(link);
+  const hovered = link.getAttribute('style') ?? '';
+  expect(hovered, 'hover must be perceptible, not byte-identical to rest').not.toBe(resting);
+  /*
+   * Assumptions: the hover rendering is required to keep the SAME colour and change a non-colour
+   * channel instead. Every lighter step of this ramp measures worse than the resting shade against the
+   * surface the frame paints, so the design system's own hover direction is the one direction this
+   * element cannot take, and an underline costs no contrast at all.
+   */
+  expect(hovered, 'hover must not trade contrast for perceptibility').toContain(
+    `--ant-${KEBAB_CASED_TEXT_TOKENS.BLUE}`,
+  );
+
+  await user.pointer({ keys: '[MouseLeft>]', target: link });
+  const pressed = link.getAttribute('style') ?? '';
+  expect(pressed, 'the pressed rendering must differ from the hovered one').not.toBe(hovered);
+  await user.pointer({ keys: '[/MouseLeft]', target: link });
+}
+
+/**
  * Registers the shell-integration cases.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
 function shellIntegrationCases(): void {
+  it(
+    'exposes one of each landmark with no invalid role',
+    exposesOneOfEachLandmarkWithNoInvalidRole,
+  );
+  it(
+    'renders the skip link differently when hovered and pressed',
+    rendersTheSkipLinkDifferentlyWhenHoveredAndPressed,
+  );
   it(
     'paints its own sentences through the text-grade map',
     paintsItsOwnSentencesThroughTheTextGradeMap,

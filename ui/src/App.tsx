@@ -61,6 +61,8 @@
  */
 import type { ReactElement } from 'react';
 
+import { useLayoutEffect } from 'react';
+
 /*
  * WHY : Assumptions: the provider is imported from the PACKAGE ROOT, never from a deep entry point
  *       inside the published package, and at this version that is what makes one theme reach every
@@ -82,7 +84,7 @@ import type { ReactElement } from 'react';
  *       hardest to attribute. It is named here so that a reader who remembers the version 5
  *       requirement can see it was considered rather than forgotten.
  */
-import { ConfigProvider } from 'antd';
+import { App as AntApp, ConfigProvider, theme } from 'antd';
 
 /*
  * WHY : Assumptions: ONE symbol is imported from the routing package here -- the provider component
@@ -105,6 +107,82 @@ import { RouterProvider } from 'react-router';
 
 import { cardDemoRouter } from './router';
 import { cardDemoTheme } from './theme/antdTheme';
+
+/**
+ * Carries the theme's typographic and surface reset onto `document.body`.
+ *
+ * Purpose: the library's own reset scope reaches only its wrapper and that wrapper's descendants,
+ * and `document.body` is neither -- it is their ancestor. A browser measurement of the running
+ * application found `document.body` computing `font-family` as `"Times New Roman"`, `color` as
+ * `rgb(0, 0, 0)` and `background-color` as `rgba(0, 0, 0, 0)`, with the only rule touching either
+ * element across all 43 loaded stylesheets being `html, body { margin: 0 }`. Every value applied
+ * here is read from the one provider above, so the theme remains the single source AAP section
+ * 0.4.4 requires.
+ *
+ * Parameters: none. The component takes no props; its inputs are the resolved theme tokens, which
+ * it reads from the provider it is rendered inside.
+ * @returns {null} Nothing is rendered. The component exists for its effect, so it adds no element
+ *   and cannot disturb the height chain the mount point owns.
+ *
+ * Exceptions or errors: none are raised. `useToken` resolves against the enclosing provider and
+ * `document.body` exists by the time any effect runs, so there is no absent collaborator to guard.
+ */
+function DocumentSurface(): null {
+  const { token } = theme.useToken();
+
+  useLayoutEffect(
+    /**
+     * Applies the resolved tokens to the document body and restores what was there before.
+     * @returns {() => void} A cleanup that puts each property back to its previous inline value,
+     *   so a test that mounts and unmounts the application leaves no residue behind.
+     */
+    function applyDocumentSurface(): () => void {
+      const { style } = document.body;
+      /*
+       * Assumptions: the previous INLINE values are captured rather than the computed ones, and
+       * restored as inline values. Writing computed values back would convert an inherited or
+       * stylesheet-supplied value into an inline override that outlives this component, which is
+       * the opposite of a clean teardown.
+       */
+      const previous = {
+        backgroundColor: style.backgroundColor,
+        color: style.color,
+        fontFamily: style.fontFamily,
+        fontSize: style.fontSize,
+        lineHeight: style.lineHeight,
+      };
+
+      /*
+       * Assumptions: the surface token is `colorBgContainer` rather than `colorBgLayout`, because
+       * the frame's own `Layout` paints `colorBgContainer` full bleed. Matching it means the strip
+       * a browser exposes on overscroll is the same colour as the frame above it instead of a
+       * visible seam. Nothing else about the body is touched -- no size, no display, no position --
+       * so the one-viewport flex column `ui/index.html` establishes and
+       * `ui/src/layout/appShell.test.tsx` asserts is untouched.
+       */
+      style.backgroundColor = token.colorBgContainer;
+      style.color = token.colorText;
+      style.fontFamily = token.fontFamily;
+      style.fontSize = `${String(token.fontSize)}px`;
+      style.lineHeight = String(token.lineHeight);
+
+      /**
+       * Restores each body property to the inline value it held before this component mounted.
+       * @returns {void} Nothing; the five properties are written back in place.
+       */
+      return function restoreDocumentSurface(): void {
+        style.backgroundColor = previous.backgroundColor;
+        style.color = previous.color;
+        style.fontFamily = previous.fontFamily;
+        style.fontSize = previous.fontSize;
+        style.lineHeight = previous.lineHeight;
+      };
+    },
+    [token.colorBgContainer, token.colorText, token.fontFamily, token.fontSize, token.lineHeight],
+  );
+
+  return null;
+}
 
 /**
  * Applies the single design-system theme around the CardDemo route tree.
@@ -152,14 +230,45 @@ export function App(): ReactElement {
     //   since it is the only wrapper here the ordering has exactly one constraint, satisfied by
     //   having a single provider at the top.
     //
-    // Alternatives Considered: two further application-wide wrappers were evaluated and BOTH are
-    //   deliberately absent, named here so their absence reads as a decision.
-    //   (1) The library's own `App` component, which exists so the static message, notification and
-    //   modal helpers can reach the theme context they otherwise cannot. Nothing in this tree calls
-    //   them: no module under `ui/src` consumes `useApp` or a static `message`, `notification` or
-    //   `Modal` helper, so the wrapper would bridge a context no caller asks for while adding an
-    //   element and a context read to every render.
-    //   (2) A top-level error boundary. What it would catch is real -- a render-time throw from a
+    // ⚠️ Refactoring Rationale: the library's own `App` component is now rendered here, and the note
+    //   that declined it is withdrawn. That note was accurate about the reason it examined -- nothing
+    //   in this tree calls the static `message`, `notification` or `Modal` helpers, and no module
+    //   consumes `useApp`, so bridging their context buys nothing -- but the helpers are not the only
+    //   thing that wrapper carries, and the other thing was measured missing. It is the only element
+    //   the library publishes that establishes a RESET SCOPE: its style rule sets `color`, `fontSize`,
+    //   `lineHeight` and `fontFamily` from the theme's own tokens (see the package's `app/style`
+    //   module), and without it nothing in the document carries them. A browser measurement of the
+    //   running application found exactly that: `document.body` computed `font-family` as
+    //   `"Times New Roman"` and `color` as `rgb(0, 0, 0)`, with no element matching `[class*=ant-app]`
+    //   anywhere -- so every text node that is not itself an antd component rendered in the user
+    //   agent's serif default, beside components rendering in the theme's font. A jsdom probe of the
+    //   same tree counted zero such elements before this change.
+    //
+    //   Assumptions: this also puts the CSS-variable scope on ONE ancestor of everything rather than
+    //   on each component separately, which is what lets a non-component element resolve a token at
+    //   all. `ui/src/theme/antdTheme.ts` sets `cssVar: { key: 'carddemo' }`, and the library emits the
+    //   token layers as `--ant-*` custom properties under the selector `.carddemo`, applying that
+    //   class to each component it renders -- 60 elements in the probed tree. Custom properties
+    //   inherit, so a scope on this wrapper reaches the whole subtree, where sixty sibling scopes
+    //   reach only themselves. A reader measuring `:root` and finding no `--ant-*` properties there is
+    //   seeing the keyed scope working as configured rather than a defect: `:root` is where the
+    //   library would emit them had the key been left unset, which that module declines for the
+    //   reasons it records.
+    //
+    // Alternatives Considered: importing the library's published `reset.css`, which is the other way
+    //   to give the document a reset and is the one a reader familiar with earlier majors reaches for.
+    //   Rejected on two grounds. It is a static sheet of literals -- it sets `font-family: sans-serif`
+    //   on `html`, among other values -- so it would put typographic values in a second place beside
+    //   the token bridge, which is the one thing `ui/index.html` records that it declined a stylesheet
+    //   to avoid, and which AAP section 0.4.4 forbids by requiring theming to happen in exactly one
+    //   place. And its `html, body { width: 100%; height: 100% }` rules would compete with the mount
+    //   point sizing that document owns and that `ui/src/layout/appShell.test.tsx` asserts. The
+    //   wrapper below resolves every value it sets from this provider's theme, so it adds no second
+    //   source of design values at all.
+    //
+    // Alternatives Considered: one further application-wide wrapper was evaluated and remains
+    //   deliberately absent, named here so its absence reads as a decision.
+    //   A top-level error boundary. What it would catch is real -- a render-time throw from a
     //   screen -- and it is still rejected on three grounds. Note that the data router
     //   `ui/src/router.tsx` now builds DOES offer a per-route error element, so this wrapper is not
     //   the only shape available; declining it here declines the outermost one specifically.
@@ -242,7 +351,45 @@ export function App(): ReactElement {
         composition root. `ROUTE_TABLE` in the route module is the same graph as inert data, so a test
         asserts reachability and access class without mounting React or this provider at all.
       */}
-      <RouterProvider router={cardDemoRouter} />
+      {/*
+        Assumptions: the reset wrapper is given `display: contents`, and that one declaration is what
+        makes it safe to add. The element it renders is a `div`, and `ui/index.html` sizes the mount
+        point as a flex column one viewport tall so that the frame's row-24 key legend sits at the
+        bottom edge exactly as terminal row 24 did. A normally-displayed div between the two would
+        become the flex item, the frame inside it would size to its content instead of to the window,
+        and the legend would float up under the content -- a measured regression, not a theoretical
+        one, since that height chain is asserted by `ui/src/layout/appShell.test.tsx`. With
+        `display: contents` the wrapper generates no box at all, so the frame remains the flex item of
+        the mount point, while inheritance still flows through the element tree and carries both the
+        reset and the `--ant-*` scope into the subtree.
+
+        Trade-offs: `display: contents` is a literal in a tree whose rule is that every value resolves
+        to a theme token, and it is accepted for the reason `ui/index.html` accepts its two: it carries
+        no design value. It is not a colour, a spacing step, a radius, a typographic value or a motion
+        duration, so no token can express it and it competes with nothing in `ui/src/theme/tokens.ts`.
+        The alternative -- a `height: 100%` chain through the wrapper -- would have introduced exactly
+        the layout literal this avoids, and would have had to be kept in step with the mount point's
+        own sizing by hand.
+
+        Assumptions: nothing semantic is lost. `display: contents` once removed elements from the
+        accessibility tree in some engines, which is why it is worth naming; the element it applies to
+        here is a generic `div` with no role, no name and no landmark, so there is nothing for the
+        omission to remove. Every landmark an operator navigates by -- the banner, the main region, the
+        contentinfo and the key-legend navigation -- is published by the frame inside it.
+      */}
+      {/*
+        ⚠️ Refactoring Rationale: the reset wrapper above is necessary and was measured NOT to be
+        sufficient. `display: contents` generates no box, so the wrapper's own reset rule reaches
+        its descendants through inheritance but cannot reach `document.body`, which is its
+        ancestor: a browser measurement after that change still found the body computing
+        `"Times New Roman"` on a transparent canvas. The component below closes exactly that gap
+        and nothing more -- it renders no element, so it cannot re-introduce the height-chain
+        regression `display: contents` exists to avoid.
+      */}
+      <AntApp style={{ display: 'contents' }}>
+        <DocumentSurface />
+        <RouterProvider router={cardDemoRouter} />
+      </AntApp>
     </ConfigProvider>
   );
 }

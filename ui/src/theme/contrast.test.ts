@@ -54,7 +54,9 @@ import { describe, expect, it } from 'vitest';
 import packageManifest from '../../package.json';
 import { cardDemoTheme } from './antdTheme';
 import {
+  ALERT_TINT_SURFACES,
   BMS_COLOR_TOKENS,
+  BMS_SEED_PALETTE_ANCHORS,
   BMS_TEXT_COLOR_TOKENS,
   CONTRAST_MEASURED_AT_ANTD_VERSION,
   CONTRAST_REFERENCE_SURFACES,
@@ -331,6 +333,70 @@ const SUCCESS_FAMILY_TOKENS: readonly AntdTokenName[] = [
 ];
 
 /**
+ * The tokens this application would have rendered with if only its two seeds were separated.
+ *
+ * Purpose: four of the corrections `ui/src/theme/antdTheme.ts` applies are ALIAS overrides rather
+ * than seed separations, and an alias override erases the value it replaces — once it is in place,
+ * the failing value is not reachable from `cardDemoTheme` at all. This resolution is that value:
+ * the same two seed separations, and none of the alias or component corrections. Every case below
+ * that asserts a shortfall measures it here, which is what keeps the evidence for G7 and G9 in the
+ * file that holds the evidence rather than in a commit message.
+ *
+ * Assumptions: the two seeds are reconstructed from {@link BMS_SEED_PALETTE_ANCHORS} exactly as the
+ * theme module reconstructs them, rather than imported from it — the module does not export them,
+ * and it should not, because nothing but the theme itself has a reason to seed a palette. The
+ * duplication is two token NAMES read out of the library's own default seed, so a palette change
+ * moves both copies together and neither can drift into a literal.
+ *
+ * Alternatives Considered: recording the failing ratios as numbers and asserting the numbers, which
+ * is what the register does in prose. Rejected because a recorded number cannot tell you whether it
+ * is still the library's behaviour — it would keep asserting a 2018 shortfall through a package
+ * upgrade that fixed it, and the whole point of a shortfall case is that it fails when the reason
+ * for the override expires.
+ */
+const UNCORRECTED_TOKENS = new Map<string, unknown>(
+  Object.entries(
+    theme.getDesignToken({
+      token: {
+        colorInfo: theme.defaultSeed[BMS_SEED_PALETTE_ANCHORS.TURQUOISE],
+        colorLink: theme.defaultSeed[BMS_SEED_PALETTE_ANCHORS.BLUE],
+      },
+    }),
+  ),
+);
+
+/**
+ * Reads one token's value from the uncorrected resolution.
+ *
+ * @param {AntdTokenName} name - Token to read from {@link UNCORRECTED_TOKENS}.
+ * @returns {string} The value the design system would have supplied without the alias corrections.
+ * @throws {TypeError} If the token does not resolve to a string, which would mean the caller has
+ *   asked for the contrast of a size or a duration.
+ */
+function uncorrectedColour(name: AntdTokenName): string {
+  const value = UNCORRECTED_TOKENS.get(name);
+  if (typeof value !== 'string') {
+    throw new TypeError(`${name} does not resolve to a colour, so it has no contrast to measure.`);
+  }
+  return value;
+}
+
+/**
+ * Contrast one uncorrected token measures against the surface the frame paints.
+ *
+ * Assumptions: the SURFACE is taken from the corrected theme even though the text colour is taken
+ * from the uncorrected one, and that is deliberate rather than an oversight. None of the four alias
+ * corrections touches a background, so the surface is identical in both resolutions, and measuring
+ * the pairing the application actually renders against is what makes the shortfall the one an
+ * operator saw.
+ * @param {AntdTokenName} name - Token carrying the text colour.
+ * @returns {number} The contrast ratio against the painted surface.
+ */
+function uncorrectedContrast(name: AntdTokenName): number {
+  return contrastRatio(uncorrectedColour(name), PAINTED_SURFACE);
+}
+
+/**
  * The design system's own header fill fails the mapsets' dominant colour as text.
  *
  * Purpose: this is the measurement that retired that fill. `COLOR=BLUE` is 289 of the measured
@@ -473,6 +539,172 @@ function rulesOutTheWholeSuccessFamilyForBodyText(): void {
 }
 
 /**
+ * The link alias fails as text AND gets lighter under the pointer, which is why all three moved.
+ *
+ * Purpose: this is the evidence for the link half of design gap G7. The design system's link alias
+ * is the colour `ui/src/layout/AppShell.tsx` painted its sign-off control in, because a link button
+ * with no colour of its own takes it verbatim, and it fell below the minimum at rest. The second
+ * assertion is the more important one: the hover shade is LIGHTER than the resting one, so the state
+ * a pointer reaches is worse than the state it starts from, and that is the property that made a
+ * seed-only correction useless — seeding the link darker still derives a lighter hover.
+ *
+ * Assumptions: asserted as shortfalls, so a package version that darkened the alias fails here and
+ * the three-state override is re-argued rather than kept for a reason that expired.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function recordsTheLinkShortfallThatForcedThreeStateOverrides(): void {
+  const rest = uncorrectedContrast('colorLink');
+  const hover = uncorrectedContrast('colorLinkHover');
+
+  expect(rest, 'the link alias must be the reason the resting state was overridden').toBeLessThan(
+    WCAG_AA_NORMAL_TEXT_MINIMUM,
+  );
+  expect(hover, 'the hover alias must be the reason the hover state was overridden').toBeLessThan(
+    WCAG_AA_NORMAL_TEXT_MINIMUM,
+  );
+  expect(
+    hover,
+    'the design system lightens a link on hover, which is why a seed-only fix does not work',
+  ).toBeLessThan(rest);
+  expect(
+    tokenContrast('colorLink', PAINTED_SURFACE),
+    'the shipped resting link must clear the threshold the alias missed',
+  ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
+  expect(
+    tokenContrast('colorLinkHover', PAINTED_SURFACE),
+    'the shipped hover link must clear the threshold the alias missed',
+  ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
+}
+
+/**
+ * The de-emphasis default fails as text, which is why every explanatory sentence was below AA.
+ *
+ * Purpose: the evidence for the hint and description half of G7. The design system's description
+ * grade is what its typography secondary variant, its form extra and help text, its result subtitle,
+ * its card meta description and its empty-state description all resolve to — so this single value
+ * governed every parenthesised width hint and every standing explanation in the tree, including the
+ * two that tell an operator why the national and government identifiers render blank.
+ *
+ * Assumptions: the secondary grade is asserted to have cleared the threshold all along, because that
+ * is what makes the correction a one-value change rather than a new colour: the override sets the
+ * description grade TO the secondary value, so the evidence has to show the target was already
+ * sound.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function recordsTheDeEmphasisShortfallThatRaisedTheDescriptionGrade(): void {
+  expect(
+    uncorrectedContrast('colorTextDescription'),
+    'the description grade must be the reason it was overridden',
+  ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
+  expect(
+    uncorrectedContrast('colorTextSecondary'),
+    'the value it was raised to must have cleared the threshold already',
+  ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
+  expect(
+    tokenContrast('colorTextDescription', PAINTED_SURFACE),
+    'the shipped description grade must clear the threshold',
+  ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
+}
+
+/**
+ * The error ramp's text-grade alias clears the threshold on the screen and fails on the alert tint.
+ *
+ * Purpose: the evidence for the message-band half of G7, and the only shortfall in this file that is
+ * invisible on the surface everything else is measured against. The red role resolved to the error
+ * ramp's own `…TextActive` alias, which measures above the minimum on the painted surface — so every
+ * per-role assertion passed — while the band renders that role on the design system's error tint,
+ * where the same alias falls below it. A pairing can only be judged on the surface it is painted on,
+ * and this case is what holds that.
+ *
+ * Assumptions: both halves are asserted, so the case explains the move rather than only recording
+ * it — the alias fails on the tint, and the shade the role was moved to clears it there.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function recordsTheAlertTintShortfallThatMovedTheRedRole(): void {
+  const tint = colourToken(ALERT_TINT_SURFACES.error);
+
+  expect(
+    tokenContrast('colorErrorTextActive', PAINTED_SURFACE),
+    'the alias cleared the threshold on the painted surface, which is why nothing caught it',
+  ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
+  expect(
+    tokenContrast('colorErrorTextActive', tint),
+    'the alias must fail on the tint the band paints it on',
+  ).toBeLessThan(WCAG_AA_NORMAL_TEXT_MINIMUM);
+  expect(
+    tokenContrast(BMS_TEXT_COLOR_TOKENS.RED, tint),
+    'the shade the red role was moved to must clear the threshold on that tint',
+  ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
+}
+
+/**
+ * The shared focus ring is fainter than every hover state, which is the evidence for design gap G9.
+ *
+ * Purpose: the design system composes every button's focus outline from one token, and that token is
+ * a light tint. Measured against the painted surface it is barely distinguishable from the surface
+ * itself, while the outlined variant's hover — governed by this tree's own primary overrides —
+ * recolours label and border to a strong shade. So the state a keyboard operator depends on was the
+ * faintest one on every button in the application, and a pointer operator got the strongest for
+ * free. That inversion is what the hue-neutral ring corrects.
+ *
+ * Assumptions: the comparison is against the SHIPPED hover rather than the library's, because the
+ * inversion being recorded is the one this application actually rendered — its hover overrides were
+ * already in place when the ring was measured, and they are what made the gap wide rather than
+ * narrow.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function recordsTheFocusRingShortfallThatForcedAHueNeutralRing(): void {
+  const libraryRing = uncorrectedContrast('colorPrimaryBorder');
+  const shippedHover = contrastRatio(
+    String(cardDemoTheme.components?.Button?.colorPrimaryHover),
+    PAINTED_SURFACE,
+  );
+  const shippedRing = contrastRatio(
+    String(cardDemoTheme.components?.Button?.colorPrimaryBorder),
+    PAINTED_SURFACE,
+  );
+
+  expect(libraryRing, 'the shared ring token must be the reason it was overridden').toBeLessThan(
+    WCAG_AA_NORMAL_TEXT_MINIMUM,
+  );
+  expect(
+    libraryRing,
+    'the ring was fainter than hover, which is the inversion the override corrects',
+  ).toBeLessThan(shippedHover);
+  expect(
+    shippedRing,
+    'the shipped ring must be at least as strong as the hover state it was weaker than',
+  ).toBeGreaterThanOrEqual(shippedHover);
+}
+
+/**
+ * A destructive control loses contrast under the pointer by default, the other half of G9.
+ *
+ * Purpose: the design system paints its dangerous variant in the error ramp's mid anchor and
+ * LIGHTENS it on hover, so the two destructive controls in this application — the user delete and
+ * the reference-type delete — were below the minimum at rest and further below it at the moment of
+ * the gesture. Both halves are asserted, because the shortfall alone would justify a darker resting
+ * shade while the direction is what justifies overriding all three states.
+ * @returns {void} Nothing; the assertions carry the outcome.
+ */
+function recordsTheDestructiveShortfallThatForcedThreeStateOverrides(): void {
+  const rest = uncorrectedContrast('colorError');
+  const hover = uncorrectedContrast('colorErrorHover');
+
+  expect(rest, 'the error anchor must be the reason the resting state was overridden').toBeLessThan(
+    WCAG_AA_NORMAL_TEXT_MINIMUM,
+  );
+  expect(
+    hover,
+    'the design system lightens a destructive control on hover, which is the direction corrected',
+  ).toBeLessThan(rest);
+  expect(
+    contrastRatio(String(cardDemoTheme.components?.Button?.colorError), PAINTED_SURFACE),
+    'the shipped destructive control must clear the threshold at rest',
+  ).toBeGreaterThanOrEqual(WCAG_AA_NORMAL_TEXT_MINIMUM);
+}
+
+/**
  * The recorded dark-chrome fill still describes the installed design system.
  *
  * Assumptions: that hex is the library's own `Layout.headerBg` default, recorded in the bridge
@@ -487,7 +719,12 @@ function pinsTheMeasurementToTheInstalledVersion(): void {
 }
 
 /**
- * Registers the eight contrast cases.
+ * Registers the contrast cases.
+ *
+ * ⚠️ Refactoring Rationale: this said "the eight contrast cases" and now says neither a count nor a
+ * list, because the count was the part that went stale — five cases were added for the shortfalls
+ * that forced the alias and component overrides, and a number in a doc block is a second place to
+ * remember to edit. The cases themselves are the list.
  * @returns {void} Nothing; the cases are registered as a side effect.
  */
 function contrastCases(): void {
@@ -512,6 +749,26 @@ function contrastCases(): void {
   it(
     'rules out the whole warning family for title text',
     rulesOutTheWholeWarningFamilyForTitleText,
+  );
+  it(
+    'records the link shortfall that forced three-state overrides',
+    recordsTheLinkShortfallThatForcedThreeStateOverrides,
+  );
+  it(
+    'records the de-emphasis shortfall that raised the description grade',
+    recordsTheDeEmphasisShortfallThatRaisedTheDescriptionGrade,
+  );
+  it(
+    'records the alert-tint shortfall that moved the red role',
+    recordsTheAlertTintShortfallThatMovedTheRedRole,
+  );
+  it(
+    'records the focus-ring shortfall that forced a hue-neutral ring',
+    recordsTheFocusRingShortfallThatForcedAHueNeutralRing,
+  );
+  it(
+    'records the destructive shortfall that forced three-state overrides',
+    recordsTheDestructiveShortfallThatForcedThreeStateOverrides,
   );
   it('pins the measurement to the installed version', pinsTheMeasurementToTheInstalledVersion);
 }

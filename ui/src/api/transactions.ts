@@ -125,7 +125,14 @@
  * money depends on.
  */
 
-import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import {
+  CONFIRMATION_ANSWERS,
+  getApiClient,
+  isConfirmingAnswer,
+  keysetPagingMembers,
+  requestPath,
+  requireWithinPublishedWidths,
+} from './client';
 import { MASKED_CARD_NUMBER } from './masking';
 import type {
   BillPaymentOutcome,
@@ -856,6 +863,8 @@ export async function viewTransaction(transactionId: string): Promise<Transactio
  *   `confirmation` set to a 'Y' answer to write and omitted or set to 'N' to preview.
  * @returns {Promise<TransactionAddOutcome>} `CREATED` carrying the identifier the service assigned
  *   and the amount as it normalised it, or `PREVIEWED` carrying that amount with nothing written.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `TransactionCreateRequest` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If the body the service sent does not carry the members its status's shape
  *   requires -- a capture without its identifier, amount or sentence, or a preview without its amount
  *   -- which is reported as a malformed response and never re-read as the other outcome.
@@ -868,7 +877,14 @@ export async function viewTransaction(transactionId: string): Promise<Transactio
 export async function addTransaction(
   request: TransactionCreateRequest,
 ): Promise<TransactionAddOutcome> {
-  const response = await getApiClient().post<unknown>(requestPath(ADD_TRANSACTION), request);
+  const response = await getApiClient().post<unknown>(
+    requestPath(ADD_TRANSACTION),
+    // Assumptions: the description and the two merchant names are what this guard is for -- 100, 50
+    //   and 50 characters at `TRAN-DESC`, `TRAN-MERCHANT-NAME` and `TRAN-MERCHANT-CITY` in
+    //   `app/cpy/CVTRA05Y.cpy` -- and the amount is bounded too, at the thirteen characters the wire
+    //   format admits, so a mistyped figure is refused before it is offered for confirmation.
+    requireWithinPublishedWidths('TransactionCreateRequest', request),
+  );
 
   if (response.status === HTTP_CREATED) {
     return { outcome: 'CREATED', created: requireTransactionCreated(response.data) };
@@ -894,6 +910,8 @@ export async function addTransaction(
  * @returns {Promise<TransactionAddOutcome>} `CREATED` carrying the identifier the service assigned to
  *   the copied record, or `PREVIEWED` carrying the normalised amount together with the ten other copied
  *   members and the identifier of the row they came from.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `CopyLastRequest` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If the body the service sent does not carry the members its status's shape
  *   requires, which is reported as a malformed response and never re-read as the other outcome.
  * @throws {Error} An `ApiRequestError` from `./client` for every transport failure, carrying the
@@ -905,7 +923,10 @@ export async function addTransaction(
 export async function copyLastTransaction(
   request: CopyLastTransactionRequest,
 ): Promise<TransactionAddOutcome> {
-  const response = await getApiClient().post<unknown>(requestPath(COPY_LAST_TRANSACTION), request);
+  const response = await getApiClient().post<unknown>(
+    requestPath(COPY_LAST_TRANSACTION),
+    requireWithinPublishedWidths('CopyLastRequest', request),
+  );
 
   if (response.status === HTTP_CREATED) {
     return { outcome: 'CREATED', created: requireTransactionCreated(response.data) };
@@ -928,6 +949,8 @@ export async function copyLastTransaction(
  * @returns {Promise<BillPaymentOutcome>} `PAID` carrying the transaction the payment wrote and the
  *   balance as it stood before it, or `PREVIEWED` carrying the balance a confirmed request would pay
  *   -- null on a declined answer, which reaches no account read at all.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `BillPaymentRequest` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If the body the service sent does not carry the members its status's shape
  *   requires -- a payment without its transaction identifier, account or balance, or either shape whose
  *   `paid` flag contradicts the status -- which is reported as a malformed response and never re-read as
@@ -944,7 +967,7 @@ export async function payAccountBalanceInFull(
 ): Promise<BillPaymentOutcome> {
   const response = await getApiClient().post<unknown>(
     requestPath(PAY_ACCOUNT_BALANCE_IN_FULL),
-    request,
+    requireWithinPublishedWidths('BillPaymentRequest', request),
   );
 
   if (response.status === HTTP_CREATED) {
@@ -965,4 +988,90 @@ export async function payAccountBalanceInFull(
   //       writes it on every response and carries null on the declined turn, so a cast would assert
   //       precisely the shape the wire is no longer guaranteed to match. Narrowing observes it instead.
   return { outcome: 'PREVIEWED', preview: requireBillPaymentPreview(response.data) };
+}
+
+/**
+ * Reads the balance a bill payment would pay, and CANNOT pay it.
+ *
+ * Purpose: ⚠️ this is the client half of a measured hazard. The inquiry and the money movement are one
+ * operation on one target, distinguished only by whether a `confirmation` member is present -- so a
+ * caller holding a request object with a stale confirming answer in it moves money while believing it
+ * is reading a balance, and nothing about the call site says which of the two it is. This function
+ * cannot: it composes the body itself from the account alone, so no answer a caller is holding can
+ * reach the wire through it.
+ *
+ * Assumptions: the one operation stays one operation, and splitting it is REFUSED rather than
+ * overlooked. The baseline decides between previewing and posting inside a single `EVALUATE` at
+ * `app/cbl/COBIL00C.cbl` L173 to L191, within one transaction and one input set, and the published
+ * contract states that splitting the preview off "would invent an endpoint the baseline does not have".
+ * A separate read target would also have to read the balance from the context that owns accounts. So
+ * what is separated here is the CALL SITE and not the operation.
+ *
+ * Assumptions: a `PAID` answer to this request is treated as a failure and not returned. It would mean
+ * money moved on a request that carried no confirmation -- so reporting it as a preview would hide a
+ * posted payment from the operator, and returning it as a payment would present one nobody confirmed.
+ * Raising is the only outcome that leaves the discrepancy visible.
+ * @param {string} accountId - The account whose payable balance is to be read.
+ * @returns {Promise<BillPaymentPreview>} The account, the balance a confirmed request would pay, and
+ *   the prompt the baseline shows with it.
+ * @throws {RangeError} If the account identifier is longer than the width `BillPaymentRequest`
+ *   publishes for it, in which case nothing is sent; or if the service reports a payment for a request
+ *   that carried no confirmation.
+ * @throws {Error} An `ApiRequestError` from `./client` for every transport failure, on the terms
+ *   {@link payAccountBalanceInFull} documents.
+ */
+export async function inquireAccountPayableBalance(accountId: string): Promise<BillPaymentPreview> {
+  const settled = await payAccountBalanceInFull({ accountId });
+  if (settled.outcome === 'PAID') {
+    throw new RangeError(
+      'A bill-payment inquiry carrying no confirmation was answered with a posted payment; the' +
+        ' balance was not read and the payment is not being reported as one.',
+    );
+  }
+  return settled.preview;
+}
+
+/**
+ * Pays an account's balance in full, and CANNOT be answered by a preview.
+ *
+ * Purpose: the mirror of {@link inquireAccountPayableBalance}, and it closes the other half of the same
+ * hazard. A caller that means to pay but whose confirmation went missing -- a form reset, a member
+ * dropped in transit through a screen's state -- gets a 200 preview today, which carries `paid: false`
+ * and a prompt, and a call site that only awaited the promise would report the payment as made. This
+ * function refuses the request locally when the answer does not confirm, and refuses to return when the
+ * service says nothing was posted.
+ *
+ * Assumptions: the answer is checked with `isConfirmingAnswer`, which accepts exactly what the baseline
+ * accepts -- both cases of the confirming letter and nothing else -- so this function and the service
+ * cannot disagree about whether a given character was a confirmation.
+ * @param {string} accountId - The account whose balance is to be paid in full.
+ * @param {string} [confirmation] - The answer collected from the operator. Defaults to the confirming
+ *   answer, because a caller reaching THIS function has already decided to pay; passing a declining or
+ *   empty answer is refused rather than quietly previewing.
+ * @returns {Promise<BillPaymentResponse>} The transaction the payment wrote, the account and the
+ *   balance as it stood before the payment.
+ * @throws {RangeError} If the answer does not confirm, in which case nothing is sent; if the account
+ *   identifier exceeds its published width, in which case nothing is sent; or if the service answered
+ *   with a preview, meaning nothing was posted and no payment may be reported.
+ * @throws {Error} An `ApiRequestError` from `./client` for every transport failure, on the terms
+ *   {@link payAccountBalanceInFull} documents.
+ */
+export async function payAccountBalanceConfirmed(
+  accountId: string,
+  confirmation: string = CONFIRMATION_ANSWERS.CONFIRM,
+): Promise<BillPaymentResponse> {
+  if (!isConfirmingAnswer(confirmation)) {
+    throw new RangeError(
+      'A bill payment was requested with an answer that does not confirm, so nothing was sent. Read' +
+        ' the payable balance with inquireAccountPayableBalance instead.',
+    );
+  }
+  const settled = await payAccountBalanceInFull({ accountId, confirmation });
+  if (settled.outcome === 'PREVIEWED') {
+    throw new RangeError(
+      'A confirmed bill payment was answered with a preview, so nothing was posted and no payment is' +
+        ' being reported.',
+    );
+  }
+  return settled.payment;
 }

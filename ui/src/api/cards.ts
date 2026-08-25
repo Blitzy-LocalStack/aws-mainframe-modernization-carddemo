@@ -71,7 +71,13 @@
  * prevents.
  */
 
-import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import {
+  getApiClient,
+  keysetPagingMembers,
+  requestPath,
+  requireConditionalOn,
+  requireWithinPublishedWidths,
+} from './client';
 import { MASKED_CARD_NUMBER } from './masking';
 import type {
   AdminCardDetail,
@@ -281,6 +287,8 @@ export const CARD_CONTRACT_OPERATIONS: readonly ContractOperation[] = [
  * @returns {Promise<PageResponse<CardSummary>>} One bounded page whose rows each render the card
  *   number's last four digits beside the selector that addresses it, together with the two sealed
  *   positions and the forward-availability flag the following request is built from.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `CardPageQuery` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If a direction is supplied without a usable cursor, if any row's rendering is not
  *   the masked form the contract declares, or if the row carries no well-formed selector.
  * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
@@ -323,7 +331,7 @@ export async function listCards(query: CardListQuery = {}): Promise<PageResponse
 
   const response = await getApiClient().post<PageResponse<CardSummary>>(
     requestPath(LIST_CARDS),
-    body,
+    requireWithinPublishedWidths('CardPageQuery', body),
   );
 
   return {
@@ -483,6 +491,8 @@ export async function getAdminCardDetail(cardKey: string): Promise<AdminCardDeta
  *   optimistic-lock version the card was last read at.
  * @returns {Promise<CardDetail>} The card as now stored, carrying the incremented version so a second
  *   change needs no intervening read, and a freshly minted selector.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `CardUpdateRequest` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If the value is not the published selector shape, or the response is malformed.
  * @throws {Error} If the request fails, as the normalised failure `./client` raises, carrying the
  *   service's problem document: HTTP 400 for a field the service refuses or a selector that cannot be
@@ -495,7 +505,10 @@ export async function updateCard(cardKey: string, request: CardUpdateRequest): P
   const identifier = requireCardSelector(cardKey);
   const response = await getApiClient().put<CardDetail>(
     requestPath(UPDATE_CARD, { cardKey: identifier }),
-    request,
+    // Assumptions: the embossed name is the member this guard exists for -- fifty characters at
+    //   `CARD-EMBOSSED-NAME PIC X(50)` in `app/cpy/CVACT02Y.cpy` -- and the version member is not
+    //   checked because it is an integer, which a length bound does not describe.
+    requireWithinPublishedWidths('CardUpdateRequest', request),
   );
   return validateCardDetail(response.data);
 }
@@ -558,9 +571,15 @@ function validateCardSummary(card: CardSummary): CardSummary {
  *   version is invalid.
  */
 function validateCardDetail(card: CardDetail): CardDetail {
-  if (!Number.isSafeInteger(card.version) || card.version < 0) {
-    throw new RangeError('Card detail version must be a non-negative safe integer.');
-  }
+  /*
+   * WHY : Refactoring Rationale: the check is `requireConditionalOn`, shared with the account edit's
+   *       revision check. Both ask whether an edit can be conditional on the revision it was read at;
+   *       both had their own branch and their own message, and the account one refused a blank tag
+   *       while this one refused a negative integer, so the shared rule now states BOTH unusable forms
+   *       in one place. The encodings stay different because the contracts publish different ones --
+   *       a body member here, a header there -- and that difference is reported rather than hidden.
+   */
+  requireConditionalOn(card.version, 'A card edit');
   /*
    * WHY : Assumptions: the detail-only members are carried across explicitly rather than being
    *       picked up by spreading the whole record again. validateCardSummary returns the SUMMARY

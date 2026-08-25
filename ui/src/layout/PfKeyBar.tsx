@@ -46,14 +46,40 @@
  * Design values come from `ui/src/theme/tokens.ts` by name and are turned into CSS
  * custom-property REFERENCES through the design system's own runtime token hook, so
  * every value this module writes into a style stays on the theme's variable surface
- * rather than being frozen at render. This module does not instantiate the theme
- * provider - `ui/src/App.tsx` is the sole injection point - and it writes no
- * literal colour, spacing or radius, and no resolved one either.
+ * rather than being frozen at render. `ui/src/App.tsx` remains the application's sole
+ * theme injection point and this module writes no literal colour, spacing or radius,
+ * and no resolved one either.
+ *
+ * ⚠️ Refactoring Rationale: that paragraph used to end "this module does not instantiate the
+ * theme provider", flatly. It now instantiates exactly one, around exactly one kind of control:
+ * a legend key whose action is destructive is wrapped in a nested provider carrying
+ * `destructiveFocusTheme`, which is the mechanism `ui/src/theme/antdTheme.ts` publishes for that
+ * purpose and the shape its own usage note prescribes. The narrower statement is the accurate
+ * one - the application's provider is still the only one that seeds the theme, and the nested one
+ * changes a single token on a single control. The reasoning is at the wrap itself, in
+ * {@link renderLegendControl}.
+ *
+ * What a screen states about a key, and what this module decides from it
+ * ---------------------------------------------------------------------
+ * Two members of {@link PfKeyBinding} exist for this module to read and are new:
+ *
+ * - `risk` fixes the control's EMPHASIS, because emphasis has to follow what an action does rather
+ *   than which key carries it. `PFK05` is `F5=Delete` on `app/bms/COUSR03.bms:L148` and `F5=Save`
+ *   on `app/bms/COACTUP.bms`, and `PFK03` is `F3=Save&&Exit` on `app/bms/COUSR02.bms:L163`, so the
+ *   AID-keyed table in {@link PRIMARY_ACTION_AIDS} is right on most screens and wrong on exactly
+ *   those. It is retained as the fallback for a binding that states no risk, so this is a widening:
+ *   a screen that says nothing renders as it did. {@link pfKeyEmphasisFor} is the whole rule.
+ * - `busy` paints the in-flight affordance on the control the operator actually pressed, which no
+ *   rendered key had: a measured double-submit left the pressed control indistinguishable from idle
+ *   and desynchronised a list. See {@link BUSY_AFFORDANCE_IDLE_SLOT} for why a participating control
+ *   reserves the affordance's box while it is idle.
  */
 
-import { Button, Flex, theme } from 'antd';
+import { LoadingOutlined } from '@ant-design/icons';
+import { Button, ConfigProvider, Flex, theme } from 'antd';
 import type { ReactElement } from 'react';
 
+import { destructiveFocusTheme } from '../theme/antdTheme';
 import { BMS_COLOR_TOKENS, SPACING_TOKENS } from '../theme/tokens';
 import { KEYBOARD_KEY_TO_AID, PF_KEY_ALIASES } from './usePfKeys';
 import type { CicsAid, PfKeyBinding } from './usePfKeys';
@@ -263,6 +289,151 @@ export function decodeBmsLegendText(mapsetInitial: string): string {
 function isPrimaryActionAid(aid: CicsAid): boolean {
   return PRIMARY_ACTION_AIDS.includes(aid);
 }
+
+/**
+ * The two design-system props that together paint one legend control's emphasis.
+ *
+ * Assumptions: two members and not one, because the design system expresses emphasis and danger on
+ * separate props and the combination matters: `type="primary"` with `danger` yields the SOLID
+ * dangerous variant, while `danger` on its own yields the outlined one. Verified in the pinned
+ * package at `ui/node_modules/antd/lib/button/Button.js` L96-L107, where the colour/variant pair is
+ * resolved from `ButtonTypeMap[mergedType]` and `danger` replaces only the colour: `['primary',
+ * 'solid']` becomes `['danger', 'solid']`, whereas the default pair `['default', 'outlined']`
+ * becomes `['danger', 'outlined']`. A rendering review measured that exact difference as a defect —
+ * the destructive confirm inside a dialog was the QUIETER of the two controls because `danger`
+ * arrived without a type — so the pair is modelled explicitly rather than left to one prop.
+ */
+export interface PfKeyEmphasis {
+  /** The design system's `Button` emphasis: its primary variant, or its default one. */
+  readonly type: 'primary' | 'default';
+  /** Whether the control also takes the dangerous colour, which needs `type` to be solid. */
+  readonly danger: boolean;
+}
+
+/** Emphasis for a key whose action writes nothing, and for the fallback's non-primary AIDs. */
+const DEFAULT_EMPHASIS: PfKeyEmphasis = Object.freeze({ type: 'default', danger: false });
+
+/** Emphasis for a key whose action writes a record the operator can come back and edit. */
+const PRIMARY_EMPHASIS: PfKeyEmphasis = Object.freeze({ type: 'primary', danger: false });
+
+/**
+ * Emphasis for a key whose action destroys a record or moves money.
+ *
+ * Assumptions: `type: 'primary'` is carried ALONGSIDE `danger` deliberately, and it is not a
+ * contradiction. The pair resolves to the solid dangerous variant, which a browser measurement of
+ * the accepted rendering recorded as `ant-btn-primary ant-btn-dangerous ant-btn-variant-solid`
+ * painted `rgb(207, 19, 34)` — the destructive resting shade `ui/src/theme/antdTheme.ts` scopes to
+ * the button. Dropping the type to "avoid claiming primary" is what produces the outlined variant,
+ * i.e. a destructive control with less visual weight than the benign one beside it.
+ */
+const DESTRUCTIVE_EMPHASIS: PfKeyEmphasis = Object.freeze({ type: 'primary', danger: true });
+
+/**
+ * Resolves one binding's emphasis from what its action DOES, falling back to the AID.
+ *
+ * Purpose: this is the whole of the emphasis decision, in one exported function so a screen suite
+ * can assert the rule it depends on instead of restating it.
+ *
+ * Refactoring Rationale: emphasis used to come from {@link PRIMARY_ACTION_AIDS} alone, which is
+ * wrong in both directions at once and was measured wrong in both. On the user-delete screen
+ * `PFK05` is `F5=Delete` (`app/bms/COUSR03.bms:L148`) and rendered primary blue, byte-identical in
+ * all four states to the benign `ENTER=Fetch` three positions to its left, while the same delete
+ * rendered danger-outlined inside the screen's own body — one action, two contradictory paints,
+ * visible in a single frame. On the account-update screen the same AID is `F5=Save` and primary is
+ * exactly right. Meanwhile `app/bms/COUSR02.bms:L163` paints `F3=Save&&Exit`, a key that writes,
+ * and PF3 is not in the list at all, so the weaker variant went to one of the screen's three
+ * mutating keys. No AID-keyed table can be right on all three of those screens, so the input has to
+ * be the risk the screen states.
+ *
+ * Assumptions: the fallback is retained rather than replaced, and that makes this a WIDENING. A
+ * binding that states no risk resolves exactly as it did before this function existed, so all 21
+ * screens keep their current rendering until each one classifies its own keys; nothing has to opt
+ * out and no screen changes as a side effect of this change.
+ *
+ * Alternatives Considered: deriving risk from {@link PfKeyBinding.action}, which already
+ * distinguishes `save` from `back` and would need no new member. Rejected on the same measurement:
+ * `action` defaults from the AID (`DEFAULT_PF_KEY_ACTIONS` maps `PFK05` to `save`), so a delete
+ * bound to PF5 reports `save` unless the screen overrides it — and a screen that did override it
+ * would then be describing risk through a member whose declared purpose is presentation and
+ * analytics. Two meanings on one member is how the AID-keyed table went wrong.
+ *
+ * @param {PfKeyBinding} binding - Descriptor for the control being rendered.
+ * @returns {PfKeyEmphasis} The `type` and `danger` props to paint that control with.
+ */
+export function pfKeyEmphasisFor(binding: PfKeyBinding): PfKeyEmphasis {
+  switch (binding.risk) {
+    case 'destructive':
+      return DESTRUCTIVE_EMPHASIS;
+    case 'mutating':
+      return PRIMARY_EMPHASIS;
+    case 'read-only':
+      // Assumptions: an explicit `read-only` OVERRIDES the AID fallback rather than deferring to
+      // it, which is what lets a screen take `ENTER=Fetch` off the primary emphasis. A measured bar
+      // carried two primary controls at once — `ENTER=Fetch` and `F5=Save` — so the emphasis
+      // distinguished neither the writing key nor the reading one; a screen can now say which is
+      // which, and saying "this reads" has to be able to lower emphasis or it says nothing.
+      return DEFAULT_EMPHASIS;
+    default:
+      return isPrimaryActionAid(binding.aid) ? PRIMARY_EMPHASIS : DEFAULT_EMPHASIS;
+  }
+}
+
+/**
+ * Element that holds the busy affordance's own box open while a participating key is NOT busy.
+ *
+ * Purpose: make the appearance of the in-flight affordance width-neutral. The design system inserts
+ * its spinner through a motion that animates the icon box from zero width to its measured width —
+ * `ui/node_modules/antd/lib/button/DefaultLoadingIcon.js` L32-L40 supply `getCollapsedWidth` and
+ * `getRealWidth` to that motion — so a control with no icon while idle grows when it becomes busy.
+ * That growth was measured on the sign-on control at 78.5 to roughly 99 pixels, a 26 percent jump,
+ * and it is the one genuine layout jump a rendering review found in the application. Passing an
+ * `icon` takes the other branch: at `ui/node_modules/antd/lib/button/Button.js` L280-L281 the icon
+ * is wrapped and rendered while idle, and the busy render puts its own icon in the SAME wrapper at
+ * the SAME position in the element tree, so React updates one span rather than creating one.
+ *
+ * Assumptions: the placeholder is the very glyph the busy state shows, so the two boxes are
+ * identical by construction rather than by inference. Any other glyph would rest on the further
+ * assumption that all icon boxes measure alike, which is true of the pinned package's own icon CSS
+ * and is one assumption more than this needs.
+ *
+ * Assumptions: it paints nothing and announces nothing. `opacity` is the mechanism because `0` is
+ * one of the six literals this tree's no-hardcoded-values rule admits, so no invented design value
+ * is introduced; and `aria-hidden` is set for the reason given at
+ * {@link BUSY_AFFORDANCE_ACTIVE_CONFIG}. The reference painted no glyph on row 24 at all, so a
+ * VISIBLE placeholder would have been an invention; reserving the space invisibly keeps the
+ * legend's appearance and removes the jump.
+ */
+const BUSY_AFFORDANCE_IDLE_SLOT = <LoadingOutlined aria-hidden style={{ opacity: 0 }} />;
+
+/**
+ * The busy affordance itself, supplied to the design system rather than left to its default.
+ *
+ * Refactoring Rationale: this is passed as the design system's loading CONFIG — the object form of
+ * its `loading` prop, whose `icon` member it renders in place of the button's own icon — rather than
+ * as a bare `loading={true}`. The bare form reaches
+ * `ui/node_modules/antd/lib/button/Button.js` L282-L285, which renders the package's own
+ * `LoadingOutlined` with no `aria-hidden`; that component emits `role="img"` with
+ * `aria-label="loading"`
+ * (`ui/node_modules/@ant-design/icons/lib/components/AntdIcon.js` L57-L58), and an `img` inside a
+ * button contributes to the button's accessible NAME. A control named `ENTER=Fetch` would therefore
+ * be renamed `loading ENTER=Fetch` for the duration of its own turn.
+ *
+ * Assumptions: renaming a control mid-turn is a defect and not an announcement. The legend's name is
+ * the mapset's row-24 literal, carried byte for byte, and every screen suite locates its controls by
+ * it; a name that changes while a turn is outstanding breaks that locator exactly when a screen is
+ * least stable, and tells a screen-reader user the control is now a different control rather than
+ * that it is busy. The busy STATE is announced instead through `aria-busy` on the button, which is
+ * the attribute defined for it and which the design system does not set for itself at this version.
+ *
+ * Trade-offs: supplying the icon means this module owns a glyph the design system would otherwise
+ * own, so a future package version that changes its default spinner will not change this one. That
+ * is accepted because the glyph is the same component the package uses, imported from the same
+ * package, so the two can only diverge if the package replaces it outright — and the alternative
+ * costs a renamed control on every busy turn.
+ */
+const BUSY_AFFORDANCE_ACTIVE_CONFIG = Object.freeze({
+  icon: <LoadingOutlined aria-hidden />,
+});
 
 /**
  * Selects the descriptors that correspond to a painted legend field.
@@ -493,86 +664,173 @@ export function PfKeyBar({
          * @param {PfKeyBinding} binding - Descriptor for a single key.
          * @returns {ReactElement} The control for that key.
          */
-        (binding: PfKeyBinding): ReactElement => (
-          <Button
-            // Assumptions: the AID identifies the control, not its position. The
-            // alternative, the array index, would let a screen that reveals a key
-            // mid-session - which the baseline does, by un-darkening a legend -
-            // re-key every control after the insertion point and so discard their
-            // focus and press state. The AID is safe to use because
-            // selectRenderableKeys has already made it unique.
-            key={binding.aid}
-            // Assumptions: the design-system mapping fixes primary emphasis to
-            // ENTER and PF5 and the default to the rest; see
-            // PRIMARY_ACTION_AIDS.
-            type={isPrimaryActionAid(binding.aid) ? 'primary' : 'default'}
-            // Trade-offs: the two activation paths are NOT equivalent for a
-            // disabled binding, and the difference is intended rather than
-            // incidental. A disabled control cannot fire its click handler, so a
-            // click never reaches `onInvoke` and nothing is reported. The key path
-            // does reach dispatch: `usePfKeys` recognises the AID, finds the
-            // handler disabled, and reports a rejection carrying the baseline's own
-            // `INVALID_KEY_PRESSED` text through its invalid-key channel. So
-            // pressing the key surfaces a message and clicking the greyed control
-            // surfaces none.
-            // Assumptions: that asymmetry is correct because only one of the two
-            // channels exists in the baseline. The terminal had no pointer, so the
-            // key press is the fidelity-bearing path and it must keep reporting the
-            // way the source's message channel does. The button is additive, and
-            // for an additive control inertness is the stronger feedback: it is
-            // continuous and visible before the user commits, where a message is
-            // only available after a failed attempt. Emitting a message on a click
-            // that the browser already refused would also have to be synthesised,
-            // since no click event fires at all.
-            // Alternatives Considered: rendering the control enabled with
-            // `aria-disabled` and routing its click through `onInvoke` so both
-            // paths report identically. Rejected because it buys symmetry with a
-            // control that looks unavailable but responds, which is a worse
-            // affordance than one that is plainly inert, and because it would
-            // change focus order and tab stops to fix a difference that is only
-            // observable to someone deliberately comparing the two channels.
-            disabled={!binding.enabled}
-            // Assumptions: this is stated rather than left to the component's
-            // default because the bar is rendered inside screens that are
-            // themselves forms, and a control that defaulted to submit would
-            // give ENTER two effects at once - the browser's implicit form
-            // submission and this bar's own dispatch. Naming the non-submitting
-            // type removes that ambiguity at the point it would arise.
-            htmlType="button"
-            // Assumptions: this advertises the real key to assistive technology
-            // instead of describing it in prose, which keeps the keyboard half
-            // of the contract discoverable without inventing a user-visible
-            // string that no baseline source holds. The value is derived from
-            // the same table `usePfKeys` dispatches on.
-            aria-keyshortcuts={AID_TO_CANONICAL_BROWSER_KEY[binding.aid]}
-            onClick={
-              /**
-               * Dispatches this key's AID through the caller's validated path.
-               * @returns {void} Completion is represented by the caller's own
-               * side effects.
-               * @throws {unknown} Caller-owned dispatch failures propagate.
-               */
-              (): void => {
-                onInvoke(binding.aid);
-              }
-            }
-          >
-            {/*
-             * Assumptions: the label is rendered exactly as supplied, with no
-             * trimming, so the descriptor carries the mapset's text byte for
-             * byte - `app/bms/COACTVW.bms` paints `  F3=Exit ` with two leading
-             * spaces and one trailing space, and that value survives into the
-             * DOM. HTML's own whitespace collapsing renders it as the operator
-             * saw it, so fidelity and appearance need no reconciling here.
-             * Assumptions: the accessible name comes from this text rather than
-             * from a separate label, because the legend already encodes both the
-             * key and its action in one `KEY=Action` string, so an added label
-             * could only restate it in words no baseline source holds.
-             */}
-            {binding.label}
-          </Button>
-        ),
+        (binding: PfKeyBinding): ReactElement => renderLegendControl(binding, onInvoke),
       )}
     </Flex>
+  );
+}
+
+/**
+ * Renders one legend entry as an activatable control, with its emphasis and busy affordance.
+ *
+ * Refactoring Rationale: this is a function rather than the inline callback body it used to be,
+ * because the control now needs a computed value before it can be built — its emphasis — and a
+ * dangerous one is additionally wrapped, so the callback would otherwise hold a statement, an
+ * element and a conditional wrap inside a `.map` argument. Prettier detaches a block comment that
+ * follows an argument comma, which is why the whole body moves out rather than growing in place.
+ *
+ * @param {PfKeyBinding} binding - Descriptor for a single key, as the screen published it.
+ * @param {(aid: CicsAid) => void} onInvoke - Dispatch for the AID this control activates.
+ * @returns {ReactElement} The control for that key, wrapped when its action is destructive.
+ * @throws {unknown} Dispatch errors raised by `onInvoke` propagate to the application error
+ * boundary.
+ */
+function renderLegendControl(
+  binding: PfKeyBinding,
+  onInvoke: (aid: CicsAid) => void,
+): ReactElement {
+  const emphasis = pfKeyEmphasisFor(binding);
+
+  const control = (
+    <Button
+      // Assumptions: the AID identifies the control, not its position. The
+      // alternative, the array index, would let a screen that reveals a key
+      // mid-session - which the baseline does, by un-darkening a legend -
+      // re-key every control after the insertion point and so discard their
+      // focus and press state. The AID is safe to use because
+      // selectRenderableKeys has already made it unique.
+      key={binding.aid}
+      // Assumptions: both props come from one resolution rather than from two
+      // independent tests, so a control cannot be given the dangerous colour
+      // without the solid variant that makes it read as the strongest control on
+      // the bar. See pfKeyEmphasisFor for the rule and for what it replaced.
+      type={emphasis.type}
+      danger={emphasis.danger}
+      // Trade-offs: the two activation paths are NOT equivalent for a
+      // disabled binding, and the difference is intended rather than
+      // incidental. A disabled control cannot fire its click handler, so a
+      // click never reaches `onInvoke` and nothing is reported. The key path
+      // does reach dispatch: `usePfKeys` recognises the AID, finds the
+      // handler disabled, and reports a rejection carrying the baseline's own
+      // `INVALID_KEY_PRESSED` text through its invalid-key channel. So
+      // pressing the key surfaces a message and clicking the greyed control
+      // surfaces none.
+      // Assumptions: that asymmetry is correct because only one of the two
+      // channels exists in the baseline. The terminal had no pointer, so the
+      // key press is the fidelity-bearing path and it must keep reporting the
+      // way the source's message channel does. The button is additive, and
+      // for an additive control inertness is the stronger feedback: it is
+      // continuous and visible before the user commits, where a message is
+      // only available after a failed attempt. Emitting a message on a click
+      // that the browser already refused would also have to be synthesised,
+      // since no click event fires at all.
+      // Alternatives Considered: rendering the control enabled with
+      // `aria-disabled` and routing its click through `onInvoke` so both
+      // paths report identically. Rejected because it buys symmetry with a
+      // control that looks unavailable but responds, which is a worse
+      // affordance than one that is plainly inert, and because it would
+      // change focus order and tab stops to fix a difference that is only
+      // observable to someone deliberately comparing the two channels.
+      disabled={!binding.enabled}
+      // Assumptions: this is stated rather than left to the component's
+      // default because the bar is rendered inside screens that are
+      // themselves forms, and a control that defaulted to submit would
+      // give ENTER two effects at once - the browser's implicit form
+      // submission and this bar's own dispatch. Naming the non-submitting
+      // type removes that ambiguity at the point it would arise.
+      htmlType="button"
+      // Assumptions: this advertises the real key to assistive technology
+      // instead of describing it in prose, which keeps the keyboard half
+      // of the contract discoverable without inventing a user-visible
+      // string that no baseline source holds. The value is derived from
+      // the same table `usePfKeys` dispatches on.
+      aria-keyshortcuts={AID_TO_CANONICAL_BROWSER_KEY[binding.aid]}
+      // Assumptions: the three busy props are spread TOGETHER and only for a
+      // binding that reports on the channel at all, because they are one
+      // decision. `icon` holds the affordance's box open so that showing the
+      // affordance cannot change the control's width - see
+      // BUSY_AFFORDANCE_IDLE_SLOT for the mechanism; `loading` shows it, in the
+      // object form so the glyph is ours and the control's accessible name does
+      // not change - see BUSY_AFFORDANCE_ACTIVE_CONFIG; and `aria-busy`
+      // announces it, which the design system does not do for itself at the
+      // pinned version. A binding that reports nothing gets none of the three,
+      // so its rendered control is byte-identical to what it was before this
+      // channel existed and the 21 screens are unaffected until each opts in.
+      // Trade-offs: the reserved box is visible as extra leading space on a
+      // participating control even while it is idle, and that cost is accepted.
+      // The alternative is the measured 26 percent width jump at the moment the
+      // operator is least able to absorb it - the frame in which the control
+      // they just pressed changes size under the pointer.
+      // Assumptions: the control is NOT disabled while busy, and that is the
+      // reference's own behaviour rather than a concession. A 3270 announced a
+      // running task and withdrew nothing, so the control stays present,
+      // focusable and named; the design system's own button refuses the second
+      // click for us (`ui/node_modules/antd/lib/button/Button.js` L195-L202
+      // returns before `onClick` while it is loading), and
+      // `ui/src/layout/usePfKeys.ts` refuses the corresponding key press, so
+      // the double submit is closed on both paths without greying anything.
+      {...(binding.busy === undefined
+        ? {}
+        : {
+            'aria-busy': binding.busy,
+            icon: BUSY_AFFORDANCE_IDLE_SLOT,
+            loading: binding.busy ? BUSY_AFFORDANCE_ACTIVE_CONFIG : false,
+          })}
+      onClick={
+        /**
+         * Dispatches this key's AID through the caller's validated path.
+         * @returns {void} Completion is represented by the caller's own
+         * side effects.
+         * @throws {unknown} Caller-owned dispatch failures propagate.
+         */
+        (): void => {
+          onInvoke(binding.aid);
+        }
+      }
+    >
+      {/*
+       * Assumptions: the label is rendered exactly as supplied, with no
+       * trimming, so the descriptor carries the mapset's text byte for
+       * byte - `app/bms/COACTVW.bms` paints `  F3=Exit ` with two leading
+       * spaces and one trailing space, and that value survives into the
+       * DOM. HTML's own whitespace collapsing renders it as the operator
+       * saw it, so fidelity and appearance need no reconciling here.
+       * Assumptions: the accessible name comes from this text rather than
+       * from a separate label, because the legend already encodes both the
+       * key and its action in one `KEY=Action` string, so an added label
+       * could only restate it in words no baseline source holds.
+       */}
+      {binding.label}
+    </Button>
+  );
+
+  if (!emphasis.danger) {
+    return control;
+  }
+
+  /*
+   * Refactoring Rationale: a destructive control is wrapped in a nested theme provider, and this is
+   * the one place this module instantiates one - the file overview's statement that it does not was
+   * written while no control here could be destructive. The wrap is not decoration: the design
+   * system derives ONE focus ring for every button variant from a single token, so a dangerous
+   * control focused from the keyboard asserts no danger at all while its resting and hovered states
+   * both do. `destructiveFocusTheme` in `ui/src/theme/antdTheme.ts` closes exactly that gap and its
+   * own usage note prescribes this shape - wrap the destructive control, not the screen - so the
+   * footer's delete now carries the same three states as the in-content delete it duplicates. That
+   * duplication is what a rendering review measured: one action, rendered two ways, in one frame.
+   * Assumptions: the nesting is safe with respect to the single-provider rule this tree applies to
+   * the APPLICATION's provider. Five screens already nest this same theme around their own
+   * destructive controls; a nested provider merges rather than replaces, so the control keeps every
+   * decision the application's theme makes and changes only its ring; and it renders no element of
+   * its own, so the layout primitive above still lays this button out as its own flex item.
+   * Alternatives Considered: leaving the ring neutral on the footer copy and accepting the
+   * difference. Rejected because the neutral ring is the treatment a NON-destructive key gets, so
+   * the one state in which the two copies of a delete would still disagree is the state a
+   * keyboard-only operator spends the whole interaction in.
+   */
+  return (
+    <ConfigProvider key={binding.aid} theme={destructiveFocusTheme}>
+      {control}
+    </ConfigProvider>
   );
 }

@@ -85,7 +85,7 @@
  * argument comma.
  */
 
-import { screen, within } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 import { useState } from 'react';
 import type { ReactElement } from 'react';
 import { describe, expect, it } from 'vitest';
@@ -100,6 +100,7 @@ import {
   PfKeyBar,
   UNIFORM_PF_KEY_LABELS,
   decodeBmsLegendText,
+  pfKeyEmphasisFor,
 } from '../layout/PfKeyBar';
 import {
   CICS_AIDS,
@@ -116,6 +117,7 @@ import type {
   PfKeyHandlerEntry,
   PfKeyHandlerMap,
   PfKeyRejection,
+  PfKeyRisk,
 } from '../layout/usePfKeys';
 import {
   ACCOUNT_VIEW_KEY_LABELS,
@@ -625,11 +627,36 @@ function BrowseProbe({ hasNextOnOpeningPage }: BrowseProbeProps): ReactElement {
   const browse = usePagedQuery<string>({ pageSize: 2, fetchPage });
 
   /**
+   * Discards a settled page turn, because the browse publishes its own outcome.
+   *
+   * ⚠️ Refactoring Rationale: `usePagedQuery`'s `prevPage`/`nextPage`/`reset` returned `void` until the
+   * hook gained an awaitable turn, so a screen could not paint a busy affordance over the control whose
+   * turn was outstanding and could not coalesce a repeated press. They now return `Promise<void>`, which
+   * makes a bare call a floating promise under `@typescript-eslint/no-floating-promises`.
+   *
+   * Alternatives Considered: `void browse.nextPage()` is unavailable -- `ui/eslint.config.js` configures
+   * the rule with `{ignoreVoid: false}`. Making these two helpers `async` is worse still: they are bound
+   * as PF-key handlers, whose declared return is `void`, and `no-misused-promises` (arriving through
+   * `recommendedTypeChecked`, `checksVoidReturn` on by default) rejects a promise-returning function in a
+   * void-return position. Attaching both settlement handlers is the shape `usePagedQuery.ts:1479` itself
+   * uses for its own opening turn, so this follows the module under test rather than inventing a third
+   * idiom.
+   *
+   * Assumptions: the turn cannot reject -- the hook resolves a failed turn instead, and publishes the
+   * failure through its own `isFailed`/`failure` members -- so a rejection handler here is defensive
+   * rather than load-bearing, and the same no-op serves both arms.
+   * @returns {void} Nothing; the assertion reads the browse's published state instead.
+   */
+  function ignoreSettledTurn(): void {
+    return undefined;
+  }
+
+  /**
    * Steps to the page before the one on display, which is PF7's action.
    * @returns {void} Nothing; the browse publishes the outcome on a later render.
    */
   function pageBackward(): void {
-    browse.prevPage();
+    browse.prevPage().then(ignoreSettledTurn, ignoreSettledTurn);
   }
 
   /**
@@ -637,7 +664,7 @@ function BrowseProbe({ hasNextOnOpeningPage }: BrowseProbeProps): ReactElement {
    * @returns {void} Nothing; the browse publishes the outcome on a later render.
    */
   function pageForward(): void {
-    browse.nextPage();
+    browse.nextPage().then(ignoreSettledTurn, ignoreSettledTurn);
   }
 
   const { bindings, invoke } = usePfKeys({
@@ -1790,3 +1817,526 @@ function pagingKeyCases(): void {
 }
 
 describe('the paging keys and the keyset envelope', pagingKeyCases);
+
+/**
+ * Builds a render-ready descriptor that STATES what its key's action risks.
+ *
+ * Assumptions: `risk` is always supplied rather than optional with a default, and the un-classified
+ * shape keeps its own builder in {@link binding}. Keeping the two separate is what lets a case
+ * assert the fallback is unchanged without that assertion depending on how this helper spells
+ * absence — `ui/tsconfig.json` sets `exactOptionalPropertyTypes`, under which an explicitly
+ * `undefined` member is a different value from an omitted one, and the renderer reads exactly that
+ * difference.
+ * @param {CicsAid} aid - The AID the control activates.
+ * @param {string} label - The mapset's row-24 text for that key, carried verbatim.
+ * @param {PfKeyRisk} risk - What the screen says this key's action does to stored state.
+ * @returns {PfKeyBinding} One descriptor carrying that classification.
+ */
+function classifiedBinding(aid: CicsAid, label: string, risk: PfKeyRisk): PfKeyBinding {
+  return { aid, action: 'screen-defined', enabled: true, label, risk };
+}
+
+/**
+ * The box a participating control reserves for its in-flight affordance.
+ *
+ * ⚠️ Trade-offs: the box is located by the design system's own icon-wrapper class, because that is
+ * the only observable the component publishes for it — the wrapper is a plain `span` with no role,
+ * no test identifier and no ARIA attribute of its own
+ * (`ui/node_modules/antd/lib/button/IconWrapper.js` L18-L23). Coupling to one internal class name of
+ * the pinned antd 6.5.2 is the cost accepted; against it, the alternative is to assert nothing about
+ * the box at all, and the box IS the mechanism that keeps a control's width stable when the
+ * affordance appears.
+ * @param {HTMLElement} control - One legend control.
+ * @returns {HTMLElement | null} The reserved box, or `null` when the control reserves none.
+ */
+function affordanceBox(control: HTMLElement): HTMLElement | null {
+  return control.querySelector<HTMLElement>('span.ant-btn-icon');
+}
+
+/**
+ * A notional screen that reports ONE key's own turn as in flight, exactly as a real one would.
+ *
+ * Purpose
+ * -------
+ * The subject is the round trip a screen actually makes: a key is pressed, the screen marks THAT
+ * key busy, and the legend re-renders from the changed descriptor. Driving it through a real state
+ * update rather than by re-rendering the bar with a second descriptor array is what makes the
+ * width-stability claim assertable — React reconciles the same element positions across a state
+ * update, so a case can ask whether the affordance's box is the SAME DOM node before and after, and
+ * a fresh render would answer that question trivially and wrongly.
+ *
+ * Assumptions: only ENTER participates in the busy channel and PF3 does not, which is the shape a
+ * real screen has. `usePfKeys.ts` documents the flag as per-key precisely so that a screen stays
+ * escapable while a read is outstanding — `app/bms/COUSR03.bms:L148` paints `F3=Back` beside
+ * `ENTER=Fetch`, and an operator who starts a fetch must still be able to leave. Having the two
+ * keys differ here also means one render exercises both the participating and the non-participating
+ * path.
+ * @returns {ReactElement} The legend, and a readout of how many dispatches it accepted.
+ */
+function BusyTurnProbe(): ReactElement {
+  const [accepted, setAccepted] = useState(0);
+
+  /**
+   * Counts one accepted dispatch of the reading key, which is what puts that key in flight.
+   * @param {CicsAid} aid - The AID the legend or the keyboard dispatched.
+   * @returns {void} Nothing; the state update is the observable effect.
+   */
+  function acceptDispatch(aid: CicsAid): void {
+    if (aid === 'ENTER') {
+      setAccepted(accepted + 1);
+    }
+  }
+
+  const keys: readonly PfKeyBinding[] = [
+    {
+      action: 'submit',
+      aid: 'ENTER',
+      busy: accepted > 0,
+      enabled: true,
+      label: USER_DELETE_KEY_LABELS.ENTER,
+      risk: 'read-only',
+    },
+    binding('PFK03', USER_DELETE_KEY_LABELS.PFK03, true, 'back'),
+  ];
+
+  return (
+    <div>
+      <PfKeyBar keys={keys} onInvoke={acceptDispatch} />
+      <span data-testid="accepted-dispatches">{accepted}</span>
+    </div>
+  );
+}
+
+/**
+ * Proves a destructive key reads as the strongest control on a bar that also carries benign ones.
+ *
+ * ⚠️ Assumptions: the delete-user legend is the measured counter-example that forced emphasis off
+ * the AID. `app/bms/COUSR03.bms:L148` paints `ENTER=Fetch   F3=Back   F5=Delete`, so on THIS screen
+ * PF5 destroys a record — while `app/bms/COACTUP.bms` paints `F5=Save` for the same AID. A rendering
+ * review measured the consequence: the footer's `F5=Delete` came out primary blue and byte-identical
+ * in all four states to the benign `ENTER=Fetch` two positions to its left, while the same delete
+ * inside the screen's body came out danger-red — one action, two contradictory paints, in one frame.
+ *
+ * Assumptions: the assertion names the design system's solid-dangerous class TRIO rather than
+ * `ant-btn-dangerous` alone, because the dangerous colour without the solid variant is the outlined
+ * treatment, which is quieter than the primary control beside it and is itself a measured defect.
+ * `ui/node_modules/antd/lib/button/Button.js` L96-L107 is where the pair is resolved.
+ *
+ * Assumptions: the label order is asserted alongside, and that is load-bearing rather than
+ * incidental — a destructive control is wrapped in a nested theme provider, and this is what proves
+ * the wrapper contributes no element of its own and leaves the control a direct flex item in
+ * document order.
+ * @returns {Promise<void>} Resolves once the three controls have been asserted.
+ */
+async function paintsADestructiveKeyAsTheStrongestControlOnTheBar(): Promise<void> {
+  const log = createKeyLog();
+
+  await renderWithProviders(
+    <PfKeyBar
+      keys={[
+        classifiedBinding('ENTER', USER_DELETE_KEY_LABELS.ENTER, 'read-only'),
+        classifiedBinding('PFK03', USER_DELETE_KEY_LABELS.PFK03, 'read-only'),
+        classifiedBinding('PFK05', USER_DELETE_KEY_LABELS.PFK05, 'destructive'),
+      ]}
+      onInvoke={log.record}
+    />,
+  );
+
+  expect(legendLabels()).toEqual([
+    USER_DELETE_KEY_LABELS.ENTER,
+    USER_DELETE_KEY_LABELS.PFK03,
+    USER_DELETE_KEY_LABELS.PFK05,
+  ]);
+
+  const deleteKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.PFK05 });
+  const fetchKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.ENTER });
+
+  expect(deleteKey).toHaveClass('ant-btn-primary', 'ant-btn-dangerous', 'ant-btn-variant-solid');
+  expect(fetchKey).toHaveClass('ant-btn-default');
+  expect(fetchKey).not.toHaveClass('ant-btn-dangerous');
+  expect(fetchKey).not.toHaveClass('ant-btn-primary');
+  expect(
+    pfKeyEmphasisFor(classifiedBinding('PFK05', USER_DELETE_KEY_LABELS.PFK05, 'destructive')),
+  ).toEqual({ danger: true, type: 'primary' });
+}
+
+/**
+ * Proves a writing key takes primary emphasis even when the AID table has never listed it.
+ *
+ * ⚠️ Assumptions: `app/bms/COUSR02.bms:L163` paints `F3=Save&&Exit`, so on the update-user screen
+ * PF3 WRITES — while nine other mapsets paint `F3=Back` or `F3=Exit` for the same AID, which is why
+ * PF3 is absent from `PRIMARY_ACTION_AIDS` and why its absence is correct for those nine. The case
+ * asserts the absence explicitly, so that it is testing the widening rather than a table that
+ * happened to be edited.
+ *
+ * Assumptions: the label is produced by the module's own decoder rather than transcribed, because
+ * the doubled ampersand is BMS macro escaping and the terminal displayed one character; the decoder
+ * and its idempotence are asserted by their own case elsewhere in this file.
+ * @returns {Promise<void>} Resolves once the control's emphasis has been asserted.
+ */
+async function emphasisesAMutatingKeyTheAidTableOmits(): Promise<void> {
+  const log = createKeyLog();
+  const savedAndExited = decodeBmsLegendText('F3=Save&&Exit');
+
+  expect(PRIMARY_ACTION_AIDS).not.toContain('PFK03');
+  expect(pfKeyEmphasisFor(classifiedBinding('PFK03', savedAndExited, 'mutating'))).toEqual({
+    danger: false,
+    type: 'primary',
+  });
+
+  await renderWithProviders(
+    <PfKeyBar
+      keys={[classifiedBinding('PFK03', savedAndExited, 'mutating')]}
+      onInvoke={log.record}
+    />,
+  );
+
+  const saveKey = screen.getByRole('button', { name: savedAndExited });
+
+  expect(saveKey).toHaveClass('ant-btn-primary');
+  expect(saveKey).not.toHaveClass('ant-btn-dangerous');
+}
+
+/**
+ * Proves a reading key can be taken OFF primary emphasis, which is the other half of the widening.
+ *
+ * ⚠️ Assumptions: ENTER is in `PRIMARY_ACTION_AIDS`, so a screen whose ENTER only reads gets the
+ * writing treatment by default. A rendering review measured the result on the delete-user legend:
+ * `ENTER=Fetch` and `F5=Delete` were both primary, so the emphasis distinguished neither the reading
+ * key nor the destructive one. An override that could only ever RAISE emphasis would leave that
+ * legend exactly as it was, which is why `read-only` overrides the fallback rather than deferring to
+ * it.
+ * @returns {Promise<void>} Resolves once the control's emphasis has been asserted.
+ */
+async function deEmphasisesAReadOnlyKeyTheAidTableCallsPrimary(): Promise<void> {
+  const log = createKeyLog();
+
+  expect(PRIMARY_ACTION_AIDS).toContain('ENTER');
+
+  await renderWithProviders(
+    <PfKeyBar
+      keys={[classifiedBinding('ENTER', USER_DELETE_KEY_LABELS.ENTER, 'read-only')]}
+      onInvoke={log.record}
+    />,
+  );
+
+  const fetchKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.ENTER });
+
+  expect(fetchKey).toHaveClass('ant-btn-default');
+  expect(fetchKey).not.toHaveClass('ant-btn-primary');
+  expect(fetchKey).not.toHaveClass('ant-btn-dangerous');
+}
+
+/**
+ * Proves a descriptor that classifies nothing renders exactly as it did before the risk member.
+ *
+ * ⚠️ Purpose: this is the case that makes the change a WIDENING rather than a migration. All 21
+ * screens publish descriptors that state no risk today, so if this case fails the change has altered
+ * screens that were never touched. It asserts three things per control at once: that the descriptor
+ * really carries no classification, that the resolver falls through to the AID-keyed table, and that
+ * the rendered class is the one that table implies.
+ *
+ * Assumptions: the absence of the dangerous class and of a reserved affordance box are asserted too,
+ * because those are the two additions that could leak into an un-opted control — one from the
+ * emphasis resolution and one from the busy channel — and neither is visible in an emphasis
+ * assertion alone.
+ * @returns {Promise<void>} Resolves once every control has been asserted against the fallback.
+ */
+async function leavesAnUnclassifiedKeyOnTheAidKeyedFallback(): Promise<void> {
+  const log = createKeyLog();
+  const descriptors: readonly PfKeyBinding[] = [
+    binding('ENTER', MAIN_MENU_KEY_LABELS.ENTER),
+    binding('PFK03', MAIN_MENU_KEY_LABELS.PFK03),
+    binding('PFK04', UNIFORM_PF_KEY_LABELS.PFK04),
+    binding('PFK05', USER_DELETE_KEY_LABELS.PFK05),
+    binding('PFK12', USER_ADD_KEY_LABELS.PFK12),
+  ];
+
+  await renderWithProviders(<PfKeyBar keys={descriptors} onInvoke={log.record} />);
+
+  for (const descriptor of descriptors) {
+    const takesPrimary = PRIMARY_ACTION_AIDS.includes(descriptor.aid);
+    const control = screen.getByRole('button', { name: descriptor.label });
+
+    expect(descriptor.risk).toBeUndefined();
+    expect(descriptor.busy).toBeUndefined();
+    expect(pfKeyEmphasisFor(descriptor)).toEqual({
+      danger: false,
+      type: takesPrimary ? 'primary' : 'default',
+    });
+    expect(control).toHaveClass(takesPrimary ? 'ant-btn-primary' : 'ant-btn-default');
+    expect(control).not.toHaveClass('ant-btn-dangerous');
+    expect(affordanceBox(control)).toBeNull();
+  }
+}
+
+/**
+ * Proves both new members survive the HOOK, which is the path every real screen uses.
+ *
+ * ⚠️ Purpose: the four cases above build descriptors by hand and so exercise the bar alone. No real
+ * screen does that — a screen registers a handler map and `usePfKeys` builds the descriptors from it,
+ * so a member declared on a handler entry and dropped on the way into the descriptor would leave
+ * every screen unable to state anything while the bar's own cases kept passing. That is not
+ * hypothetical: removing the risk carry-through from `createBindings` left all four of those cases
+ * green, which is how this gap was found and why this case exists.
+ *
+ * Assumptions: the two members are asserted in ONE render because they travel the same path and
+ * `exactOptionalPropertyTypes` makes each a separate conditional spread — so each is a separate
+ * chance to drop a member, and a case covering one would not cover the other.
+ *
+ * Assumptions: ENTER declares its in-flight state through the PREDICATE form and PF5 through the
+ * boolean form, so both branches of the resolution are exercised. The predicate form exists for a
+ * screen holding its in-flight state in a ref, which is the pattern this tree already uses to make a
+ * guard effective on the same task as the click rather than one render later.
+ *
+ * Assumptions: PF5's `false` is meaningful rather than filler — a key that reports `false` reserves
+ * the affordance box, which is asserted, while a key that reports nothing reserves none, which the
+ * fallback case asserts. The two are what distinguish an absent member from a present false one.
+ * @returns {Promise<void>} Resolves once both controls have been asserted.
+ */
+async function carriesHandlerDeclaredRiskAndBusyIntoTheLegend(): Promise<void> {
+  const log = createKeyLog();
+
+  /**
+   * Reports the reading key's turn as outstanding, standing for a screen answering from a ref.
+   * @returns {boolean} Always `true`, because this render is the in-flight one.
+   */
+  function readIsInFlight(): boolean {
+    return true;
+  }
+
+  const handlers: PfKeyHandlerMap = {
+    ENTER: {
+      busy: readIsInFlight,
+      label: USER_DELETE_KEY_LABELS.ENTER,
+      onInvoke: log.record,
+      risk: 'read-only',
+    },
+    PFK05: {
+      busy: false,
+      label: USER_DELETE_KEY_LABELS.PFK05,
+      onInvoke: log.record,
+      risk: 'destructive',
+    },
+  };
+
+  await renderReportingScreen(handlers);
+
+  const fetchKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.ENTER });
+  const deleteKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.PFK05 });
+
+  expect(fetchKey).toHaveClass('ant-btn-default');
+  expect(fetchKey).not.toHaveClass('ant-btn-primary');
+  expect(fetchKey).toHaveClass('ant-btn-loading');
+  expect(fetchKey).toHaveAttribute('aria-busy', 'true');
+
+  expect(deleteKey).toHaveClass('ant-btn-primary', 'ant-btn-dangerous', 'ant-btn-variant-solid');
+  expect(deleteKey).toHaveAttribute('aria-busy', 'false');
+  expect(deleteKey).not.toHaveClass('ant-btn-loading');
+  expect(affordanceBox(deleteKey)).not.toBeNull();
+}
+
+/**
+ * Registers the cases covering the emphasis a control takes from what its action risks.
+ * @returns {void} Nothing; the cases are registered with the runner.
+ */
+function riskDrivenEmphasisCases(): void {
+  it(
+    'carries a handler-declared risk and in-flight state into the legend',
+    carriesHandlerDeclaredRiskAndBusyIntoTheLegend,
+  );
+  it(
+    'paints a destructive key as the strongest control on a bar that also carries benign ones',
+    paintsADestructiveKeyAsTheStrongestControlOnTheBar,
+  );
+  it(
+    'emphasises a writing key the AID table has never listed',
+    emphasisesAMutatingKeyTheAidTableOmits,
+  );
+  it(
+    'de-emphasises a reading key the AID table would call primary',
+    deEmphasisesAReadOnlyKeyTheAidTableCallsPrimary,
+  );
+  it(
+    'leaves a descriptor that classifies nothing on the AID-keyed fallback',
+    leavesAnUnclassifiedKeyOnTheAidKeyedFallback,
+  );
+}
+
+describe('the emphasis a legend control takes from what its action risks', riskDrivenEmphasisCases);
+
+/**
+ * Proves the control that started a turn announces it, without being withdrawn while it runs.
+ *
+ * ⚠️ Assumptions: the announcement is `aria-busy` on the control plus the design system's loading
+ * class, and the control's accessible NAME is unchanged. The name is asserted by locating the same
+ * control twice — once before the turn and once during it — and comparing the nodes, which fails if
+ * the busy render renamed it. That is a real hazard rather than a hypothetical one: the design
+ * system's default spinner is an `img` with the accessible name `loading`
+ * (`ui/node_modules/@ant-design/icons/lib/components/AntdIcon.js` L57-L58), and an `img` inside a
+ * button contributes to the button's name, so a bare `loading` prop would rename `ENTER=Fetch` to
+ * `loading ENTER=Fetch` for the duration of its own turn.
+ *
+ * Assumptions: the control must NOT be disabled while busy. The reference announced a running task
+ * and withdrew nothing — `PfKeyBar.tsx` records the same contract for an unavailable key, citing
+ * `app/cbl/COACTUPC.cbl:L905-L916` where an unaccepted key is reduced to a screen refresh rather
+ * than removed — so a busy control that greyed out would both lose its own name to assistive
+ * technology and tell the operator the key had stopped working.
+ *
+ * Assumptions: PF3 is asserted untouched, because a screen must stay escapable while a read is
+ * outstanding and because a per-screen busy flag would fail exactly this assertion.
+ * @returns {Promise<void>} Resolves once the idle and in-flight states have both been asserted.
+ */
+async function announcesTheTurnOnTheControlThatStartedIt(): Promise<void> {
+  const { user } = await renderWithProviders(<BusyTurnProbe />);
+  const fetchKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.ENTER });
+
+  expect(fetchKey).not.toHaveClass('ant-btn-loading');
+  expect(fetchKey).toHaveAttribute('aria-busy', 'false');
+
+  await user.click(fetchKey);
+
+  expect(screen.getByTestId('accepted-dispatches')).toHaveTextContent('1');
+  expect(fetchKey).toHaveClass('ant-btn-loading');
+  expect(fetchKey).toHaveAttribute('aria-busy', 'true');
+  expect(fetchKey).toBeEnabled();
+  expect(screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.ENTER })).toBe(fetchKey);
+
+  const exitKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.PFK03 });
+
+  expect(exitKey).toBeEnabled();
+  expect(exitKey).not.toHaveClass('ant-btn-loading');
+  expect(exitKey).not.toHaveAttribute('aria-busy');
+}
+
+/**
+ * Proves the affordance cannot change the control's width, by proving it changes no box.
+ *
+ * ⚠️ Trade-offs: the claim is width stability and the observable is DOM identity, because this
+ * runner has no layout engine — jsdom answers every `getBoundingClientRect` with zeros, so a pixel
+ * measurement here would compare 0 with 0 and pass against any implementation, including the one
+ * that jumps. What produces the jump is a box that does not exist while idle and is animated open
+ * from zero width when the affordance arrives
+ * (`ui/node_modules/antd/lib/button/DefaultLoadingIcon.js` L32-L40 supply `getCollapsedWidth` and
+ * `getRealWidth` to that motion), so the property that rules it out is that the box already exists,
+ * survives the transition as the same node, and keeps the same class — no creation, no motion
+ * wrapper, nothing to animate. That is checkable here and is the actual mechanism; the pixels are
+ * the dispatching engineer's browser pass.
+ *
+ * Assumptions: PF3 reserves no box at all, which is asserted in the same render. That is what proves
+ * the reservation is opt-in — a control that never reports busy is unchanged — and it is the reason
+ * the reserved space is not simply given to every control.
+ * @returns {Promise<void>} Resolves once the box has been observed idle and in flight.
+ */
+async function keepsTheAffordanceBoxOpenAcrossTheTransition(): Promise<void> {
+  const { user } = await renderWithProviders(<BusyTurnProbe />);
+  const fetchKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.ENTER });
+  const idleBox = affordanceBox(fetchKey);
+
+  expect(idleBox).not.toBeNull();
+  expect(
+    affordanceBox(screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.PFK03 })),
+  ).toBeNull();
+
+  const idleBoxClassName = idleBox?.className ?? '';
+
+  await user.click(fetchKey);
+
+  const busyBox = affordanceBox(fetchKey);
+
+  expect(busyBox).toBe(idleBox);
+  expect(busyBox?.className).toBe(idleBoxClassName);
+  expect(idleBoxClassName).not.toMatch(/loading-icon/);
+  expect(busyBox?.querySelector('.anticon-loading')).toHaveAttribute('aria-hidden', 'true');
+}
+
+/**
+ * Proves a second press of a key whose own turn is in flight does nothing, on both input paths.
+ *
+ * ⚠️ Assumptions: this is the defect the busy channel exists to close. A rendering review measured
+ * two clicks 400 ms apart on a read control producing two identical requests and a list that
+ * displayed page 2 while reporting page 3, because nothing in the frame said the first turn was
+ * still running. Closing it on one path only would leave the keyboard — the fidelity-bearing path,
+ * since the terminal had no pointer — unprotected, so both are exercised: the pointer half here and
+ * the key half in the case that follows.
+ *
+ * Assumptions: the second press is dispatched with `fireEvent` rather than through the operator,
+ * because the design system's loading style sets `pointer-events: none` and
+ * `@testing-library/user-event` refuses to click through that with an error rather than a silent
+ * no-op. Firing the event directly asserts the stronger property anyway — that the component's own
+ * handler declines the click (`ui/node_modules/antd/lib/button/Button.js` L195-L202 returns before
+ * `onClick` while it is loading) — which holds whether or not the stylesheet reached the document.
+ * @returns {Promise<void>} Resolves once the second press has been observed to change nothing.
+ */
+async function refusesASecondPointerPressWhileTheTurnIsInFlight(): Promise<void> {
+  const { user } = await renderWithProviders(<BusyTurnProbe />);
+  const fetchKey = screen.getByRole('button', { name: USER_DELETE_KEY_LABELS.ENTER });
+
+  await user.click(fetchKey);
+
+  expect(screen.getByTestId('accepted-dispatches')).toHaveTextContent('1');
+  expect(fetchKey).toHaveClass('ant-btn-loading');
+
+  fireEvent.click(fetchKey);
+
+  expect(screen.getByTestId('accepted-dispatches')).toHaveTextContent('1');
+}
+
+/**
+ * Proves the key path declines an in-flight key SILENTLY, and leaves every other key live.
+ *
+ * ⚠️ Assumptions: no message is raised, which is the one behaviour that distinguishes busy from
+ * disabled. A disabled key reports the baseline's own `CCDA-MSG-INVALID-KEY` sentence through the
+ * screen's channel; a busy key is a VALID key pressed early, so reporting that sentence for it would
+ * tell the operator the key does not work. The reference did neither: a 3270 inhibited the keyboard
+ * for the duration of a task and discarded what was typed into it, painting nothing. The absence of
+ * the sentence is therefore asserted, on a probe that HAS a message channel — asserting it on a
+ * silent screen would prove nothing.
+ *
+ * Assumptions: PF3 is pressed afterwards and dispatches, so the case cannot be satisfied by a hook
+ * that had stopped dispatching altogether.
+ * @returns {Promise<void>} Resolves once the silence and the surviving key have been asserted.
+ */
+async function declinesTheKeyPathWhileTheTurnIsInFlight(): Promise<void> {
+  const log = createKeyLog();
+  const handlers: PfKeyHandlerMap = {
+    ENTER: { busy: true, label: USER_DELETE_KEY_LABELS.ENTER, onInvoke: log.record },
+    PFK03: { label: USER_DELETE_KEY_LABELS.PFK03, onInvoke: log.record },
+  };
+  const { user } = await renderReportingScreen(handlers);
+
+  await user.click(screen.getByLabelText('Entry'));
+  await pressBrowserKey(user, 'Enter');
+
+  expect(log.received).toEqual([]);
+  expect(screen.queryByText(INVALID_KEY_PRESSED.trimEnd())).toBeNull();
+
+  await pressBrowserKey(user, functionKeyName(3));
+
+  expect(log.received).toEqual(['PFK03']);
+}
+
+/**
+ * Registers the cases covering the in-flight affordance and the double-press it closes.
+ * @returns {void} Nothing; the cases are registered with the runner.
+ */
+function inFlightAffordanceCases(): void {
+  it(
+    'announces the turn on the control that started it, without withdrawing it',
+    announcesTheTurnOnTheControlThatStartedIt,
+  );
+  it(
+    'reserves the affordance box while idle so the transition changes no box',
+    keepsTheAffordanceBoxOpenAcrossTheTransition,
+  );
+  it(
+    "refuses a second pointer press while that key's turn is in flight",
+    refusesASecondPointerPressWhileTheTurnIsInFlight,
+  );
+  it(
+    'declines the key path while the turn is in flight without reporting it',
+    declinesTheKeyPathWhileTheTurnIsInFlight,
+  );
+}
+
+describe('the in-flight affordance on the control that started the turn', inFlightAffordanceCases);

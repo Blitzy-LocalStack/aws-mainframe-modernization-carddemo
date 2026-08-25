@@ -80,9 +80,10 @@ import { useLocation, useNavigate, useParams } from 'react-router';
 
 import { getCard, lookupCard } from '../../api/cards';
 import type { CardDetail } from '../../api/cards';
+import { isTransientFailure } from '../../api/client';
 import type { ApiError } from '../../api/types';
 import { useShellSlot } from '../../layout/AppShell';
-import { MessageBand } from '../../layout/MessageBand';
+import { busyAnnouncement } from '../../layout/fieldHelp';
 import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { usePfKeys } from '../../layout/usePfKeys';
@@ -90,10 +91,12 @@ import {
   ACCESS_DENIED_NOT_AUTHORIZED,
   CARD_DETAIL_EDIT_CONTROL_LABEL,
   CARD_DETAIL_INVALID_LINK_GUIDANCE,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
 } from '../../messages/messages';
-import { FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, FIELD_ERROR_TOKENS, TYPOGRAPHY_TOKENS } from '../../theme/tokens';
 import { cardDetailPath, cardEditPath, isCardSelector } from '../../routes/cards';
 // WHY : Refactoring Rationale: `navigationHandler` is no longer imported here. It builds a handler for
 //       a transition that hands over NOTHING, and this screen's only transferring control now hands
@@ -538,6 +541,30 @@ export function describeRetrievalFailure(reason: unknown): string | null {
   if (problem.status === NOT_FOUND_STATUS) {
     return CARD_DETAIL_MESSAGES.DID_NOT_FIND_ACCTCARD_COMBO.text;
   }
+  /*
+   * WHY : ⚠️ Refactoring Rationale: a TRANSIENT failure is now separated from a persistent one, where
+   *       every 5xx reported `Error reading Card Data File`. That sentence is a claim about the FILE --
+   *       the program composes it from a CICS file response (`app/cbl/COCRDSLC.cbl` L762-L771) -- and a
+   *       gateway that timed out or a service that answered 503 never reached a file, so the sentence
+   *       described an event that did not happen. The two also call for different operator actions: a
+   *       file read error is reported, an outage is retried. This branch is placed BEFORE the 5xx test
+   *       because two of the transient statuses are 502 and 504 and would otherwise be swallowed by
+   *       it, and after the authority and absence tests because a 403 or a 404 is neither transient nor
+   *       a file error.
+   * WHY : ⚠️ Assumptions: the verdict is read through `isTransientFailure` and not from a status list
+   *       written here. `ui/src/api/client.ts` owns which kinds and statuses are transient -- a timeout
+   *       plus 408, 429, 502, 503 and 504 -- and it classifies a TIMEOUT, which carries no status at
+   *       all and so cannot be recognised from `problem.status`. A local list would both drift from
+   *       that definition and miss the one case with nothing to compare.
+   * WHY : ⚠️ Trade-offs: the persistent branch KEEPS the program's own `XREF-READ-ERROR` rather than
+   *       taking the authored `PERSISTENT_FAILURE_REPORT_IT`. Rule T8 holds a string with a mainframe
+   *       source to its verbatim form, and a 500 from the card read is exactly the outcome the program
+   *       writes that sentence for. The authored sentence exists for a case the reference never had,
+   *       which is why only the transient branch takes one.
+   */
+  if (isTransientFailure(reason)) {
+    return TRANSIENT_FAILURE_TRY_AGAIN;
+  }
   if (problem.status >= SERVICE_FAULT_STATUS) {
     return CARD_DETAIL_MESSAGES.XREF_READ_ERROR.text;
   }
@@ -697,18 +724,52 @@ export function CardDetailScreen(): ReactElement {
    */
   const forwardedOrigin = inApplicationRoute(screenTransitionState(location.state).from);
 
+  /*
+   * WHY : ⚠️ Assumptions: the arrival's narrowing is a waypoint through this screen, forwarded onward on
+   *       a transfer and handed back on the exit arm, and never read here. That is the COMMAREA round
+   *       trip: the browse writes `CDEMO-ACCT-ID` before its `XCTL` (`app/cbl/COCRDLIC.cbl` L532), this
+   *       program receives that same area and never writes that field, and both its transfer arm and
+   *       its exit arm hand the area on (`app/cbl/COCRDSLC.cbl` L305 to L333). So an operator who
+   *       narrowed the browse, opened a card, and exited -- or went on to the update screen and exited
+   *       from there -- returns to the browse still narrowed. In the target the area does not travel by
+   *       itself, so the one member this screen is a waypoint for is forwarded explicitly.
+   */
+  const forwardedNarrowing = screenTransitionState(location.state).accountId;
+
   /**
-   * Builds the handover for a transfer out of this screen, carrying an origin only when one arrived.
+   * Builds the handover for a transfer out of this screen: the origin, and the narrowing in force.
    *
-   * Assumptions: `undefined` is returned rather than an empty object when this screen was entered
-   * without a caller, because `navigateSafely` treats an absent state as "hand nothing over" and
-   * publishes no state member at all -- so the destination reads its own first-entry state instead of
-   * a present-but-empty handover it would have to interpret.
-   * @returns {ScreenTransitionState | undefined} The origin to hand on, or `undefined` when this
-   *   screen was entered by a typed address, a bookmark or a reload.
+   * Assumptions: `undefined` is returned rather than an empty object when this screen was entered with
+   * neither, because `navigateSafely` treats an absent state as "hand nothing over" and publishes no
+   * state member at all -- so the destination reads its own first-entry state instead of a
+   * present-but-empty handover it would have to interpret.
+   *
+   * Assumptions: each member is spread in on presence rather than assigned, because
+   * `ui/tsconfig.json` enables `exactOptionalPropertyTypes` -- an absent member and a member holding
+   * nothing are different types there, and only the first is a state `ScreenTransitionState` has.
+   * @returns {ScreenTransitionState | undefined} What to hand on, or `undefined` when this screen was
+   *   entered by a typed address, a bookmark or a reload and so has nothing to hand on.
    */
   function transferHandover(): ScreenTransitionState | undefined {
-    return forwardedOrigin === undefined ? undefined : { from: forwardedOrigin };
+    const handover: ScreenTransitionState = {
+      ...(forwardedOrigin === undefined ? {} : { from: forwardedOrigin }),
+      ...(forwardedNarrowing === undefined ? {} : { accountId: forwardedNarrowing }),
+    };
+
+    return Object.keys(handover).length === 0 ? undefined : handover;
+  }
+
+  /**
+   * Builds the hand-back the exit arm carries to the browse.
+   *
+   * Assumptions: the ORIGIN is deliberately not included. This arm's destination IS the origin, so
+   * handing it back would give the browse itself as the browse's own caller -- and the browse's exit key
+   * reads that member (`app/cbl/COCRDLIC.cbl` L838 to L842 distinguishes an entry from the menu by it),
+   * so the return would change how the screen being returned to behaves.
+   * @returns {ScreenTransitionState | undefined} The narrowing to hand back, or nothing to hand back.
+   */
+  function exitHandover(): ScreenTransitionState | undefined {
+    return forwardedNarrowing === undefined ? undefined : { accountId: forwardedNarrowing };
   }
 
   const openRead = useCallback(
@@ -1037,6 +1098,18 @@ export function CardDetailScreen(): ReactElement {
    *       aliasing `app/cpy/CSSTRPFY.cpy` L54-L77 performs is applied once by the hook rather than by
    *       every screen. Exactly the two identifiers `app/cbl/COCRDSLC.cbl` L292-L293 admits are
    *       bound, and both carry a label because this mapset paints both of them.
+   * WHY : ⚠️ Refactoring Rationale: both keys now DECLARE what their action risks, and neither did.
+   *       `ui/src/layout/PfKeyBar.tsx` used to derive emphasis from the attention identifier alone,
+   *       through `PRIMARY_ACTION_AIDS`, and that table cannot be right across this application: the
+   *       same identifier carries a browse on one mapset and a save or a delete on another, so one
+   *       AID-keyed answer paints them identically. The risk is read off the LABEL -- what the key says
+   *       it does -- and never off the key it is bound to.
+   * WHY : ⚠️ Assumptions: BOTH keys are `read-only`, and that is what this screen's labels say. This is
+   *       the record-VIEW program: `ENTER=Search Cards` reads (`app/cbl/COCRDSLC.cbl` L336-L345 and
+   *       L357-L371) and `F3=Exit` transfers control back (L305-L333). Neither arm performs a
+   *       `REWRITE`, a `WRITE` or a `DELETE` anywhere in the program, so nothing on this screen is
+   *       `mutating` and the emphasis belongs on neither -- which is a visible change from the AID
+   *       fallback, under which `ENTER` was painted as an acting key on a screen that acts on nothing.
    */
   const { bindings, invoke } = usePfKeys(
     {
@@ -1051,6 +1124,24 @@ export function CardDetailScreen(): ReactElement {
           submitTurn();
         },
         label: CARD_DETAIL_KEY_LABELS.ENTER,
+        risk: 'read-only',
+        /*
+         * WHY : ⚠️ Assumptions: this key alone is marked busy while a read is outstanding, and `F3` is
+         *       deliberately NOT -- a key is declined per key, so leaving the screen stays available
+         *       while it waits. Withdrawing every key would strand an operator on a read that never
+         *       answers, and the reference never withdraws a key at all.
+         * WHY : Assumptions: a busy key stays present, enabled, focusable and named, and the key path
+         *       declines it SILENTLY. That is the 3270 input-inhibit analogue -- the terminal locked
+         *       the keyboard for the duration of a turn -- and this program emits no invalid-key
+         *       sentence, so a message here would be inventing one. Note the coercion below is
+         *       unaffected: it fires on an UNMAPPED key, and a declined busy key is mapped.
+         * WHY : Trade-offs: the flag is the render state and not a ref, unlike the sibling save
+         *       screen's. A second press inside one task would still start a second READ, which is
+         *       harmless here -- `openRead` supersedes the earlier turn by generation, and a read
+         *       changes nothing -- whereas a second WRITE is not, which is why only that screen pays
+         *       for a ref.
+         */
+        busy: loading,
       },
       PFK03: {
         /**
@@ -1060,9 +1151,10 @@ export function CardDetailScreen(): ReactElement {
          * @returns {void} Nothing; the transition is performed as a side effect on the router.
          */
         onInvoke: () => {
-          navigateSafely(navigate, '/cards');
+          navigateSafely(navigate, '/cards', exitHandover());
         },
         label: CARD_DETAIL_KEY_LABELS.PFK03,
+        risk: 'read-only',
       },
     },
     {
@@ -1091,46 +1183,10 @@ export function CardDetailScreen(): ReactElement {
   );
 
   /*
-   * WHY : Refactoring Rationale: the three persistent zones are DELEGATED to the one `AppShell` that
-   *       `ui/src/App.tsx` mounts, where this screen used to compose all three itself. The per-screen
-   *       composition was how the application worked before the shell was wired in, and keeping it
-   *       once a shell is mounted would render a second title band, a second message line and a second
-   *       named legend region on this screen.
-   * WHY : Assumptions: the publication is made unconditionally, ABOVE the early return below, and WHAT
-   *       it publishes is what varies. A hook called after an early return changes hook order between
-   *       renders, which React reports as a broken component rather than a missing band, so the call
-   *       site cannot move; the ternary is therefore the only place the distinction can live.
-   * WHY : Assumptions: the ONE erased state is a read in flight, and an unaddressable selector is no
-   *       longer one of them. A loading state has no counterpart in the reference at all, so a header
-   *       whose clock and identifiers describe a record not yet read would be an invention; an arrival
-   *       carrying no usable selector, by contrast, is a map the reference SENDS -- header rows, legend
-   *       row and both message fields included -- under the comment "COMING FROM SOME OTHER CONTEXT /
-   *       SELECTION CRITERIA TO BE GATHERED" at `app/cbl/COCRDSLC.cbl` L350-L356, so it publishes the
-   *       whole slot and the operator can take a turn from it.
-   * WHY : ⚠️ Trade-offs: the empty list is published rather than the `pfKeys` member being
-   *       omitted, and the difference IS cosmetic where this note said it was not. The reason given was
-   *       that omitting the member would activate key handling of the shell's own beside this screen's,
-   *       and one PF12 press would then both end the session and take a turn; it is withdrawn, because
-   *       the shell installs NO keyboard listener at all and offers sign-off as a rendered control, for
-   *       the reason recorded at `SHELL_SIGN_OFF_LABEL`. The two forms also render the same thing --
-   *       `PfKeyBar` returns `null` for an empty binding list, so neither paints a legend. The empty list
-   *       is kept so the two arms of this ternary differ only in which zones carry content, which is what
-   *       makes the erased arm reviewable against the one beside it.
+   * WHY : Refactoring Rationale: these two derivations sit ABOVE the shell publication because the
+   *       publication now carries the row-22 line, and a value cannot be published before it is
+   *       derived. Nothing about either derivation changed in the move.
    */
-  useShellSlot(
-    loading
-      ? { pfKeys: { keys: [], onInvoke: invoke } }
-      : {
-          screen: {
-            transactionId: CARD_DETAIL_TRANSACTION_ID,
-            programName: CARD_DETAIL_PROGRAM_NAME,
-          },
-          now: paintedAt,
-          message: { text: error, mapset: CARD_DETAIL_MAPSET },
-          pfKeys: { keys: bindings, onInvoke: invoke },
-        },
-  );
-
   /*
    * WHY : Refactoring Rationale: an unusable selector no longer returns a shell-less result surface.
    *       It renders the whole screen with the two search fields ACTIVE, which is the reference's own
@@ -1150,40 +1206,6 @@ export function CardDetailScreen(): ReactElement {
    *       that names no card, the sentence saying how to get a usable one.
    */
   const searchActive = selector === null;
-  /*
-   * WHY : Alternatives Considered: keeping the header band and the message band mounted around the
-   *       spinner, so only the record region swapped. Rejected as out of proportion to what it buys
-   *       here. A loading state has NO counterpart in the reference at all -- a 3270 terminal holds
-   *       the previous map until the next one arrives, so there is no painted state to be faithful to
-   *       -- which means neither choice can be argued from the source, and the plain spinner is the
-   *       one that cannot go stale: composing the band would mean rendering a header whose clock and
-   *       identifiers describe a record not yet read. Trade-offs: the accepted cost is one layout
-   *       shift when the record arrives and the chrome appears beneath it. That cost is bounded to
-   *       this first paint only; the band that exists specifically to stop LATER shifts -- reserving
-   *       its own height whether or not it holds a message -- is mounted for every subsequent state.
-   */
-  if (loading) {
-    return <Spin size="large" />;
-  }
-
-  /*
-   * WHY : Assumptions: the three FIXED-WIDTH values below are rendered in the code face and the two
-   *       free-text ones are not, which is the distinction `TYPOGRAPHY_TOKENS.fixedPitchData` records:
-   *       the 3270 cell grid aligned every column for free, and a proportional face gives digits
-   *       different advance widths, so the eleven-digit account identifier, the twelve asterisks and
-   *       four digits of the masked rendering, and the `MM/YYYY` expiry stop lining up down the value
-   *       column. The embossed name and the one-character active flag are excluded deliberately -- a
-   *       name is proportional text with nothing to align against, and a single character cannot
-   *       misalign.
-   * WHY : Alternatives Considered: setting the face on the `Descriptions` component so every value
-   *       inherited it. Rejected because it would put the 50-character embossed name in the code face
-   *       as well, which neither aligns anything nor matches the reference: `CRDNAME` is the one data
-   *       field on this mapset that carries no numeric or fixed-width content.
-   */
-  const fixedPitchValueStyle: CSSProperties = {
-    fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData],
-  };
-
   /*
    * WHY : ⚠️ Refactoring Rationale: the source's INFORMATION line is rendered, where this screen painted
    *       only its error line and dropped the other entirely. The mapset declares TWO message fields, not
@@ -1233,8 +1255,246 @@ export function CardDetailScreen(): ReactElement {
         ? CARD_DETAIL_INVALID_LINK_GUIDANCE
         : CARD_DETAIL_MESSAGES.WS_PROMPT_FOR_INPUT.text;
 
+  /*
+   * WHY : Refactoring Rationale: the three persistent zones are DELEGATED to the one `AppShell` that
+   *       `ui/src/App.tsx` mounts, where this screen used to compose all three itself. The per-screen
+   *       composition was how the application worked before the shell was wired in, and keeping it
+   *       once a shell is mounted would render a second title band, a second message line and a second
+   *       named legend region on this screen.
+   * WHY : Assumptions: the publication is made unconditionally, ABOVE the early return below, and WHAT
+   *       it publishes is what varies. A hook called after an early return changes hook order between
+   *       renders, which React reports as a broken component rather than a missing band, so the call
+   *       site cannot move; the ternary is therefore the only place the distinction can live.
+   * WHY : Assumptions: the ONE erased state is a read in flight, and an unaddressable selector is no
+   *       longer one of them. A loading state has no counterpart in the reference at all, so a header
+   *       whose clock and identifiers describe a record not yet read would be an invention; an arrival
+   *       carrying no usable selector, by contrast, is a map the reference SENDS -- header rows, legend
+   *       row and both message fields included -- under the comment "COMING FROM SOME OTHER CONTEXT /
+   *       SELECTION CRITERIA TO BE GATHERED" at `app/cbl/COCRDSLC.cbl` L350-L356, so it publishes the
+   *       whole slot and the operator can take a turn from it.
+   * WHY : ⚠️ Trade-offs: the empty list is published rather than the `pfKeys` member being
+   *       omitted, and the difference IS cosmetic where this note said it was not. The reason given was
+   *       that omitting the member would activate key handling of the shell's own beside this screen's,
+   *       and one PF12 press would then both end the session and take a turn; it is withdrawn, because
+   *       the shell installs NO keyboard listener at all and offers sign-off as a rendered control, for
+   *       the reason recorded at `SHELL_SIGN_OFF_LABEL`. The two forms also render the same thing --
+   *       `PfKeyBar` returns `null` for an empty binding list, so neither paints a legend. The empty list
+   *       is kept so the two arms of this ternary differ only in which zones carry content, which is what
+   *       makes the erased arm reviewable against the one beside it.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the loading arm now publishes THE SAME bindings the loaded arm
+   *       publishes, and it published an EMPTY list. That emptied the legend for the whole of a read:
+   *       `F3=Exit` vanished from the glass while the keyboard binding behind it stayed installed, so an
+   *       operator on a read that was slow to answer could see no way out of the screen and had no
+   *       indication that pressing the key they could no longer see would still work. The reference does
+   *       not do that -- a 3270 terminal inhibits input for a turn and keeps the map, function-key
+   *       legend included, exactly where it was -- and `app/bms/COCRDSL.bms` L133-L138 paints that
+   *       legend as part of the map rather than as something a program adds and removes.
+   * WHY : ⚠️ Assumptions: the two keys are distinguished by their own `busy` declarations rather than by
+   *       withdrawing the list, which is what `ui/src/layout/usePfKeys.ts` provides the flag for. The
+   *       search key declares itself busy while the read is outstanding and is declined silently; the
+   *       exit key declares nothing and stays live. That is the per-key shape the emptied list could not
+   *       express: it withdrew both or neither.
+   * WHY : Trade-offs: the `screen` and `message` slots are still omitted on this arm, unchanged. The
+   *       reasoning for that is the paragraph below -- a header whose clock and identifiers describe a
+   *       record not yet read would be stale, whereas the legend describes the KEYS, which are the same
+   *       two keys before and after the record arrives.
+   */
+  useShellSlot(
+    loading
+      ? { pfKeys: { keys: bindings, onInvoke: invoke } }
+      : {
+          screen: {
+            transactionId: CARD_DETAIL_TRANSACTION_ID,
+            programName: CARD_DETAIL_PROGRAM_NAME,
+          },
+          now: paintedAt,
+          /*
+           * WHY : ⚠️ Refactoring Rationale: the row-20 INFORMATION line is delegated here, and it was
+           *       composed at the close of this screen's own body. That is not a tidying. The frame
+           *       pins the zone holding rows 22, 23 and 24 (`ui/src/layout/AppShell.tsx` L1324-L1332,
+           *       `position: sticky`, `inset-block-end: 0`), so a band composed inside the scrolling
+           *       body is painted UNDERNEATH that pinned zone: on the sibling card-update screen a
+           *       browser measured exactly that -- the band at 775.67-815.67 inside `main` against a
+           *       pinned zone spanning 764-860, with `document.elementFromPoint` returning an element
+           *       the band did not contain -- so the sentence was fully occluded until the operator
+           *       scrolled. This screen composed its line the same way and had the same defect
+           *       available to it. Published through the channel, the line renders as a direct child
+           *       of the pinned zone immediately above row 23, which is the order `COCRDSL.bms`
+           *       declares: `INFOMSG` at `POS=(20,25)` (L139-L143) above `ERRMSG` at `POS=(23,1)`
+           *       (L144-L148).
+           * WHY : ⚠️ Assumptions: `information` is a MEMBER of the `message` slot rather than a sibling
+           *       of it, so ONE mapset name governs both rows and one screen cannot claim two widths.
+           *       That name is this screen's own for the reason it always was:
+           *       `app/cpy-bms/COCRDSL.CPY` L102/L194 declare `ERRMSGI`/`ERRMSGO` at `PIC X(80)` where
+           *       nineteen mapsets declare `X(78)`.
+           * WHY : ⚠️ Assumptions: NO severity is passed, and the omission is the instruction rather
+           *       than an oversight. `INFOMSG` is declared `COLOR=NEUTRAL` (`app/bms/COCRDSL.bms`
+           *       L141) and the channel resolves an absent severity to `neutral`, where naming `info`
+           *       -- which this screen once did -- painted the line in the TURQUOISE role's text shade
+           *       on a field the mapset paints neutral. That is the substitution the token bridge's G3
+           *       note exists to prevent.
+           * WHY : Assumptions: the line is published on EVERY turn of this arm, never conditionally,
+           *       because the program moves a value into `INFOMSGO` on every sent map
+           *       (`app/cbl/COCRDSLC.cbl` L496) and falls back to its prompt whenever the field would
+           *       otherwise be blank (L490-L491). Publishing it always is also what reserves the row,
+           *       so the rows below it do not move as the sentence changes.
+           */
+          message: {
+            text: error,
+            mapset: CARD_DETAIL_MAPSET,
+            information: { text: informationLine },
+          },
+          pfKeys: { keys: bindings, onInvoke: invoke },
+        },
+  );
+
+  /*
+   * WHY : Alternatives Considered: keeping the header band and the message band mounted around the
+   *       spinner, so only the record region swapped. Rejected as out of proportion to what it buys
+   *       here. A loading state has NO counterpart in the reference at all -- a 3270 terminal holds
+   *       the previous map until the next one arrives, so there is no painted state to be faithful to
+   *       -- which means neither choice can be argued from the source, and the plain spinner is the
+   *       one that cannot go stale: composing the band would mean rendering a header whose clock and
+   *       identifiers describe a record not yet read. Trade-offs: the accepted cost is one layout
+   *       shift when the record arrives and the chrome appears beneath it. That cost is bounded to
+   *       this first paint only; the band that exists specifically to stop LATER shifts -- reserving
+   *       its own height whether or not it holds a message -- is mounted for every subsequent state.
+   */
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the outstanding read is now ANNOUNCED, and it was announced nowhere
+   *       -- `loading` replaced the whole body with a spinner, which is a visual signal and nothing
+   *       else, so a screen reader was told nothing between the key press and the record.
+   * WHY : ⚠️ Assumptions: the live region is the FIRST child of a Fragment in BOTH arms, at the same
+   *       position, and that is what keeps it from being remounted when the body changes. React matches
+   *       keyless children by index, so child 0 -- this span -- is UPDATED across the two arms while
+   *       child 1 changes type and remounts. `ui/src/layout/fieldHelp.tsx` records why identity matters:
+   *       a live region has to be in the accessibility tree before its content changes for the change to
+   *       be announced, and a region that mounts with its sentence already in place is frequently read
+   *       by nothing.
+   * WHY : ⚠️ Trade-offs: the FIRST load is therefore not announced, because on that paint the region
+   *       mounts with the sentence already present. Every later read is -- a re-read on `ENTER`, a
+   *       resolution of a typed number -- because the region is by then mounted and empty. The
+   *       alternative was to suppress the sentence until a record had once arrived, which would need a
+   *       flag whose only purpose is to make the first turn silent; the accepted cost is that one turn,
+   *       and the operator has the spinner and the arriving record on it either way.
+   * WHY : Assumptions: the sentence is imported, not composed. `REQUEST_IN_PROGRESS` is authored rather
+   *       than transcribed, which is admissible because the reference has nothing to transcribe: a 3270
+   *       terminal inhibits input for the duration of a turn through the keyboard itself, so
+   *       `app/cbl/COCRDSLC.cbl` never writes a working message -- there was no moment at which an
+   *       operator could have read one.
+   */
+  if (loading) {
+    return (
+      <Flex vertical gap="large">
+        {busyAnnouncement(REQUEST_IN_PROGRESS)}
+        <Spin size="large" />
+      </Flex>
+    );
+  }
+
+  /*
+   * WHY : Assumptions: the three FIXED-WIDTH values below are rendered in the code face and the two
+   *       free-text ones are not, which is the distinction `TYPOGRAPHY_TOKENS.fixedPitchData` records:
+   *       the 3270 cell grid aligned every column for free, and a proportional face gives digits
+   *       different advance widths, so the eleven-digit account identifier, the twelve asterisks and
+   *       four digits of the masked rendering, and the `MM/YYYY` expiry stop lining up down the value
+   *       column. The embossed name and the one-character active flag are excluded deliberately -- a
+   *       name is proportional text with nothing to align against, and a single character cannot
+   *       misalign.
+   * WHY : Alternatives Considered: setting the face on the `Descriptions` component so every value
+   *       inherited it. Rejected because it would put the 50-character embossed name in the code face
+   *       as well, which neither aligns anything nor matches the reference: `CRDNAME` is the one data
+   *       field on this mapset that carries no numeric or fixed-width content.
+   */
+  const fixedPitchValueStyle: CSSProperties = {
+    fontFamily: cssVar[TYPOGRAPHY_TOKENS.fixedPitchData],
+  };
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: a PROTECTED search field paints its value in the base text colour,
+   *       where it previously took the design system's disabled text shade. A browser measured the
+   *       consequence: the account number and the masked rendering rendered at `rgba(0,0,0,0.25)` on
+   *       `rgba(0,0,0,0.04)`, so two real record values read exactly like placeholder text -- an
+   *       operator could not tell whether the field held the record's key or a hint about what to type.
+   * WHY : ⚠️ Refactoring Rationale: the SURFACE is now supplied here as well, and it was not before,
+   *       because the control below is `readOnly` where it used to be `disabled` -- see the note on the
+   *       account control for why that mapping changed. The design system attaches its tinted
+   *       refuses-input surface to the disabled state ALONE, so dropping `disabled` dropped the surface
+   *       with it and left a protected field indistinguishable from an editable one but for its border
+   *       -- which is the exact pattern a measurement records against the account-update screen's
+   *       read-only fields. Naming `colorBgContainerDisabled` restores the surface a browser already
+   *       measured on this screen while the semantics move to the faithful mapping, so the paint is
+   *       unchanged and only the state it is reached through differs. The token is read as a `cssVar`
+   *       member rather than through a named map in `ui/src/theme/tokens.ts`, which is the established
+   *       form for a token no BMS role maps to -- the sibling `ui/src/screens/accountUpdate/index.tsx`
+   *       paints its own protected controls from the same member for the same reason.
+   * WHY : ⚠️ Assumptions: the colour is the REFERENCE'S own, moved on exactly this arrival rather than
+   *       chosen for legibility. `1300-SETUP-SCREEN-ATTRS` protects the two fields on the arrival from
+   *       the browse -- `MOVE DFHBMPRF TO ACCTSIDA / CARDSIDA` at `app/cbl/COCRDSLC.cbl` L507-L508 --
+   *       and its "SETUP COLOR" block then moves `DFHDFCOL`, the DEFAULT colour, into those same two
+   *       fields' colour subfields under the identical condition (L526-L531). The map already declares
+   *       them `COLOR=DEFAULT` (`app/bms/COCRDSL.bms` L84-L88 and L96-L100), so the program is
+   *       asserting the default colour a second time for the protected case specifically: the field is
+   *       painted at full intensity whether or not it accepts input, and only its attribute byte
+   *       changes. `BMS_TEXT_COLOR_TOKENS.DEFAULT` is the bridge that source role resolves through, so
+   *       no colour value is written here.
+   * WHY : ⚠️ Trade-offs: the design system's disabled SURFACE is kept and only the text is lifted. The
+   *       3270 has no background concept at all, so the tinted surface is an addition either way -- but
+   *       it is the one affordance left that distinguishes a field which refuses input from one that
+   *       accepts it, now that the two share a text colour. Lifting the surface as well would produce
+   *       exactly the pattern a separate measurement records against the account-update screen, whose
+   *       read-only fields keep the editable background and are "indistinguishable from editable except
+   *       by border". What is given up is that the surface is not the terminal's; what is kept is that
+   *       real data never reads as a placeholder.
+   * WHY : Alternatives Considered: two. Overriding `colorTextDisabled` for `Input` through a nested
+   *       `ConfigProvider`, the mechanism `destructiveFocusTheme` establishes -- rejected because it
+   *       redefines what "disabled text" MEANS for every control in that subtree, when the claim being
+   *       made is narrower: these two fields are protected rather than inert. Rendering the two values
+   *       as `Typography.Text` instead of as controls on this arrival -- rejected because the reference
+   *       paints the FIELDS on both arrivals and only changes their attribute byte, so replacing them
+   *       would drop the two controls the mapset declares.
+   */
+  const protectedValueStyle: CSSProperties = {
+    color: cssVar[BMS_TEXT_COLOR_TOKENS.DEFAULT],
+    backgroundColor: cssVar.colorBgContainerDisabled,
+  };
+
+  /*
+   * WHY : ⚠️ Refactoring Rationale: the two criteria controls are painted in the FIXED-PITCH face, and
+   *       they were painted in the system sans. The face is not new to this screen -- it was carried by
+   *       the two record rows that used to render the same account number and the same masked rendering
+   *       a second time, in `SFMono-Regular, Consolas, ...` beside the controls' own sans. Those rows
+   *       are deleted, because the mapset declares one field per identifier and both are these
+   *       controls; the ALIGNMENT argument they carried is not deleted with them, because it was never
+   *       about which element held the value. An eleven-digit account identifier and a sixteen-character
+   *       masked rendering are digit runs whose columns only line up in a face with one advance width,
+   *       and the 3270 got that for free from its character cell grid.
+   * WHY : Assumptions: the two arrivals differ only by the protected additions, so the face applies to
+   *       both. A value that changes typeface when a field stops accepting input would tell an operator
+   *       something about the field's state through a property that means nothing about state.
+   * WHY : Assumptions: the style is built here and passed UNCONDITIONALLY, where the protected half used
+   *       to be spread in conditionally to satisfy `exactOptionalPropertyTypes` -- under which
+   *       `style={undefined}` is a type error rather than an omission. Both arrivals now carry a style,
+   *       so there is no absent case left to model and the conditional collapses into this expression.
+   */
+  const criteriaControlStyle: CSSProperties = searchActive
+    ? fixedPitchValueStyle
+    : { ...fixedPitchValueStyle, ...protectedValueStyle };
+
   return (
     <Flex vertical gap="large">
+      {/*
+       * WHY : Assumptions: the live region is child 0 here too, at the same position it holds in the
+       *       loading arm above, and both arms return a `Flex` of the same shape -- which is what lets
+       *       React UPDATE this span rather than remount it when the body changes. It is EMPTY on this
+       *       arm, because nothing is outstanding; the helper renders it visually hidden, so it costs no
+       *       layout. Alternatives Considered: wrapping each arm in a Fragment instead, which reads more
+       *       naturally -- rejected because it nests this whole body one level deeper and reindents every
+       *       line of it, for no behavioural difference at all.
+       */}
+      {busyAnnouncement(undefined)}
       {/*
        * Assumptions: level 3 sits below the band's own level-4 application heading in size but is a
        * SEPARATE field in the source -- the mapset paints its title at row 4, under the two title
@@ -1302,11 +1562,49 @@ export function CardDetailScreen(): ReactElement {
              *       needs no `stringMode` to stay clear of an IEEE-754 double, because it never holds
              *       a number at all.
              */}
+            {/*
+             * WHY : ⚠️ Refactoring Rationale: a PROTECTED arrival renders this control `readOnly`
+             *       where it used to render it `disabled`, and the difference is what the mapset
+             *       actually says. `1300-SETUP-SCREEN-ATTRS` moves `DFHBMPRF` into `ACCTSIDA` when
+             *       the caller was the browse program (`app/cbl/COCRDSLC.cbl` L507-L508), and
+             *       `DFHBMPRF` is PROTECT with the modified-data tag set -- NOT `DFHBMASK`, which is
+             *       the autoskip constant this mapset uses for its display fields. A 3270 protected
+             *       field is readable, cursor-addressable and only refuses TYPING; the program
+             *       positions the cursor into this very field on that arrival, since the `WHEN OTHER`
+             *       arm of the cursor `EVALUATE` moves -1 into `ACCTSIDL` unconditionally (L520-L523).
+             *       `disabled` was therefore a stronger claim than the source makes: it removes the
+             *       control from the focus order and from the accessibility tree, so the two values an
+             *       operator arrives to read could not be reached by a keyboard and were announced by
+             *       nothing. `readOnly` is the faithful mapping. The sibling
+             *       `ui/src/screens/accountUpdate/index.tsx` reached the same conclusion from the same
+             *       constant.
+             * WHY : ⚠️ Refactoring Rationale: it is also what fixes the measured contrast defect at
+             *       its root rather than over the top of it. The design system emits
+             *       `.ant-input-outlined.ant-input-disabled{color:var(--ant-color-text-disabled)}`, so
+             *       while the control was disabled a real record value was painted in the placeholder
+             *       shade and an inline colour had to override it. Nothing attaches that shade to a
+             *       read-only control, so the override is now a guarantee rather than a repair -- the
+             *       style still names the colour explicitly, because the assertion that holds this is a
+             *       COMPUTED-value assertion and naming the token is what makes it hold whichever rule
+             *       the cascade resolves.
+             * WHY : ⚠️ Assumptions: `autoFocus` stays keyed to the EDITABLE arrival, even though the
+             *       reference positions its cursor here on both and the control can now accept focus at
+             *       all. React implements `autoFocus` by focusing the node on mount, and on the
+             *       protected arrival this control mounts when the read RESOLVES -- so an unconditional
+             *       attribute would move focus at an arbitrary later moment, with no operator action
+             *       behind it, which is the change of context WCAG 3.2.1 and 3.2.2 exist to prevent.
+             *       The terminal had no such exposure: it composed the whole screen and sent it once,
+             *       so its cursor was placed before the operator ever saw the field. Trade-offs: what
+             *       is given up is one cursor placement on an arrival where nothing can be typed; what
+             *       is kept is that focus never moves on its own. Later turns move it through the ref,
+             *       which is an operator action.
+             */}
             <Input
               id={ACCOUNT_SEARCH_FIELD_ID}
               ref={accountControl}
               autoFocus={searchActive}
-              disabled={!searchActive}
+              readOnly={!searchActive}
+              style={criteriaControlStyle}
               aria-invalid={edit !== undefined && edit !== null && edit.account !== 'ISVALID'}
               inputMode="numeric"
               maxLength={ACCOUNT_SEARCH_WIDTH}
@@ -1336,10 +1634,17 @@ export function CardDetailScreen(): ReactElement {
              *       the rendered form this control shows on the selector arrival -- twelve asterisks
              *       and four digits is sixteen characters -- so neither arrival can overflow it.
              */}
+            {/*
+             * WHY : Assumptions: `readOnly` rather than `disabled` on the protected arrival, for the
+             *       reason recorded on the account control above -- `1300-SETUP-SCREEN-ATTRS` moves the
+             *       same `DFHBMPRF` into `CARDSIDA` on the same line pair, and a protected 3270 field
+             *       refuses typing without becoming unreachable.
+             */}
             <Input
               id={CARD_SEARCH_FIELD_ID}
               ref={cardControl}
-              disabled={!searchActive}
+              readOnly={!searchActive}
+              style={criteriaControlStyle}
               aria-invalid={edit !== undefined && edit !== null && edit.card !== 'ISVALID'}
               inputMode="numeric"
               maxLength={CARD_SEARCH_WIDTH}
@@ -1388,27 +1693,45 @@ export function CardDetailScreen(): ReactElement {
       {card === null ? null : (
         <Descriptions bordered column={RECORD_VIEW_COLUMNS}>
           {/*
-           * Assumptions: the five labels and their order are the mapset's, read top to bottom from
-           * `app/bms/COCRDSL.bms` -- account number, card number, name on card, active flag, expiry
-           * date. An earlier revision of this screen labelled them `Card`, `Account`, `Embossed
-           * name`, `Expiration` and `Status`, none of which the source screen paints.
+           * WHY : ⚠️ Refactoring Rationale: the account number and the card number are NOT rows here,
+           *       and they were. A browser measured the consequence: each identifier was rendered
+           *       TWICE on one screen and in two different typefaces -- `INPUT#card-detail-account-search`
+           *       carrying `00000000011` in the system sans beside a `SPAN.ant-typography` carrying the
+           *       same eleven digits in `SFMono-Regular, Consolas, ...` inside `.ant-descriptions`, and
+           *       the same duplication for `************0001`. Two renderings of one value in two faces
+           *       invite an operator to wonder which is authoritative, and a screen reader announces
+           *       each identifier twice under an identical label.
+           * WHY : ⚠️ Assumptions: the presentation KEPT is the pair of controls above, and the choice
+           *       is the mapset's rather than a preference between two equally good options.
+           *       `app/bms/COCRDSL.bms` declares exactly one field for each identifier and both are
+           *       input fields in the criteria zone -- `ACCTSID` at `POS=(7,45) LENGTH=11` with
+           *       `ATTRB=(FSET,IC,NORM,UNPROT)` (L84-L88) under the label `Account Number    :` at
+           *       `POS=(7,23)` (L79-L83), and `CARDSID` at `POS=(8,45) LENGTH=16` with
+           *       `ATTRB=(FSET,NORM,UNPROT)` (L96-L100) under `Card Number       :` at `POS=(8,23)`
+           *       (L91-L95). The record zone below them declares only `CRDNAME` at `POS=(11,25)`
+           *       (L107-L109), `CRDSTCD` at `POS=(13,25)` (L116-L119) and the `EXPMON`/`EXPYEAR` pair
+           *       at `POS=(15,25)` and `POS=(15,30)` (L126-L136) -- there is no second field for either
+           *       identifier anywhere in the 31 `DFHMDF` definitions of that file. The program agrees
+           *       from the other side: `1200-SETUP-SCREEN-VARS` moves the retrieved record's keys INTO
+           *       those two criteria fields, `MOVE CC-ACCT-ID TO ACCTSIDO` and `MOVE CC-CARD-NUM TO
+           *       CARDSIDO` at `app/cbl/COCRDSLC.cbl` L463 and L471, and moves only the other four
+           *       values into the record fields (L475-L484). So the controls ARE the mapset's
+           *       presentation of the identity, and these two rows were the invention.
+           * WHY : Alternatives Considered: deleting the two CONTROLS instead and keeping the rows.
+           *       Rejected because the reference paints the fields on both arrivals and changes only
+           *       their attribute byte -- `1300-SETUP-SCREEN-ATTRS` chooses `DFHBMPRF` or `DFHBMFSE`
+           *       for them at L505-L512 -- so removing them would drop the two controls the mapset
+           *       declares and leave the search arrival, which has no record at all, with nothing to
+           *       type into.
+           * WHY : Assumptions: the fixed-pitch face the deleted rows carried is not lost with them. The
+           *       controls hold the same two digit runs and the same alignment argument applies, so
+           *       {@link fixedPitchValueStyle} is applied to them; what changes is that each value is
+           *       painted once.
+           * WHY : Assumptions: the three labels below and their order are the mapset's, read top to
+           *       bottom from `app/bms/COCRDSL.bms` -- name on card, active flag, expiry date. An
+           *       earlier revision of this screen labelled them `Embossed name`, `Status` and
+           *       `Expiration`, none of which the source screen paints.
            */}
-          <Descriptions.Item label={CARD_DETAIL_FIELD_LABELS.accountNumber}>
-            <Typography.Text style={fixedPitchValueStyle}>{card.accountId}</Typography.Text>
-          </Descriptions.Item>
-          {/*
-           * WHY : Assumptions: the rendering is emitted EXACTLY as the service returned it -- this
-           *       screen neither masks nor unmasks. `ui/src/api/cards.ts` produces the masked form
-           *       server-side and checks it on arrival against the contract's own
-           *       `^\*{12}[0-9]{4}$`, and the whole sixteen-digit number is published only by
-           *       `getAdminCardDetail`, a SEPARATE address under a separate authority that answers an
-           *       ordinary caller with HTTP 403. Reformatting here would either undo a deliberate
-           *       redaction or re-apply one to a value already redacted, and re-masking would hide a
-           *       server-side rendering failure the client is positioned to report.
-           */}
-          <Descriptions.Item label={CARD_DETAIL_FIELD_LABELS.cardNumber}>
-            <Typography.Text style={fixedPitchValueStyle}>{card.displayCardNumber}</Typography.Text>
-          </Descriptions.Item>
           <Descriptions.Item label={CARD_DETAIL_FIELD_LABELS.nameOnCard}>
             {card.embossedName}
           </Descriptions.Item>
@@ -1480,29 +1803,15 @@ export function CardDetailScreen(): ReactElement {
         </Flex>
       )}
       {/*
-       * WHY : Assumptions: ONE band is rendered here and it is the row-20 INFORMATIONAL line, because
-       *       the mapset declares two independent message fields at two different rows and only one of
-       *       them belongs to this screen's own field area -- `INFOMSG` at `POS=(20,25)`,
-       *       `ATTRB=(PROT) COLOR=NEUTRAL`, `LENGTH=40` (`app/bms/COCRDSL.bms` L139-L143). It takes the
-       *       `info` severity, which is the appearance its source field always had; the row-23
-       *       `COLOR=RED` `ERRMSG` beside it (L144-L148) is the shell's, delegated above.
-       * WHY : Assumptions: it closes the body, which is the reading order the source paints -- row 20
-       *       sits below the last record field at row 15 and above the row-23 error line, and the shell
-       *       paints rows 23 and 24 immediately beneath this region.
-       * WHY : Alternatives Considered: capping the band at the source field's own 40 characters instead
-       *       of naming the mapset. Rejected because the width the band publishes is a MEASURED census
-       *       of the twenty-one `ERRMSGI`/`ERRMSGO` declarations, typed `78 | 80`, and a per-screen
-       *       per-field third figure would move a design value out of the band and into a screen. The
-       *       figure is a `maxInlineSize` CAP rather than a truncation, and both sentences this line can
-       *       hold are 31 and 36 characters, so no cap at or above 40 changes what is painted; naming
-       *       the mapset is also what every other band on the delivered screens does.
+       * WHY : ⚠️ Refactoring Rationale: NOTHING is composed here, where this screen used to close its
+       *       body with the row-20 information band. That line is delegated to the frame in the
+       *       `useShellSlot` call above, for the reason recorded there: the frame's pinned zone is
+       *       sticky, so a band left in this scrolling region is painted underneath it and the
+       *       sentence an operator has to read can be occluded entirely. The reading order the
+       *       source paints is preserved by the delegation rather than by this position -- row 20
+       *       sits below the last record field at row 15 and above the row-23 error line, and the
+       *       frame paints rows 22, 23 and 24 in that order immediately beneath this region.
        */}
-      <MessageBand
-        mapset={CARD_DETAIL_MAPSET}
-        severity="info"
-        message={informationLine}
-        line="information"
-      />
       {/*
        * Refactoring Rationale: the key legend that used to close this body, the message line above it
        * and the title band that opened it are all delegated to the shell in the `useShellSlot` call

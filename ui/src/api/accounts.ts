@@ -46,7 +46,13 @@
  * numeric conversion at all rather than by judging the one that was excepted.
  */
 
-import { getApiClient, keysetPagingMembers, requestPath } from './client';
+import {
+  getApiClient,
+  keysetPagingMembers,
+  requestPath,
+  requireConditionalOn,
+  requireWithinPublishedWidths,
+} from './client';
 import { MASKED_CARD_NUMBER } from './masking';
 import type {
   AccountDetail,
@@ -558,6 +564,8 @@ export async function readAccountView(accountId: string): Promise<{
  *   state as stored, both protected identifiers already masked, the screen's information and message
  *   lines, the per-field error array the form binds to, and the NEW revision so that consecutive
  *   edits need no intervening read -- `null` when the response carried no entity tag.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `AccountUpdateRequest` publishes for it, in which case nothing is sent.
  * @throws {RangeError} If the supplied revision is empty. ⚠️ Note what this is NOT: it is not a stand-in
  *   for the service's refusal of an ABSENT `If-Match`, which is a 400 this function cannot reach because
  *   it always sends the header. A blank value is sent as a blank header, and the service treats a blank
@@ -578,7 +586,7 @@ export async function updateAccount(
   readonly account: AccountUpdateResponse;
   readonly revision: string | null;
 }> {
-  if (revision.length === 0) {
+  {
     // Trade-offs: refused here rather than sent as an empty header, and the two ways a precondition can
     //   be missing have DIFFERENT answers, which is what makes the local refusal worth its one branch.
     //   An absent `If-Match` is refused by the framework before any account code runs, because
@@ -592,12 +600,24 @@ export async function updateAccount(
     //   concurrent change that does not exist. Failing locally names the real defect -- a caller that
     //   lost the revision its read returned -- and the cost is one branch that anticipates a rule the
     //   service still enforces on its own.
-    throw new RangeError('An account edit requires the revision the account read returned.');
+    //
+    // Refactoring Rationale: the branch itself moved to `requireConditionalOn`, which the card edit's
+    //   version check now shares. The two operations were answering one question -- is this edit
+    //   conditional on the revision it was read at -- in two hand-written forms with two messages, and
+    //   an operation acquiring optimistic concurrency next would have written a third. What could NOT
+    //   move is the wire form: this one is a header against an opaque entity tag because
+    //   `account-api.yaml` declares `If-Match` required, and that is reported as a service-side
+    //   divergence rather than papered over with a facade here.
+    requireConditionalOn(revision, 'An account edit');
   }
 
   const response = await getApiClient().post<AccountUpdateResponse>(
     requestPath(UPDATE_ACCOUNT),
-    request,
+    // Assumptions: forty-three members are bound-checked here, which is the widest request this
+    //   package sends and the one where a form attribute is least likely to be the only guard the value
+    //   passed -- a restored draft, a paste into a grouped field, or a screen that composes a date from
+    //   three parts all reach this body without passing through the input that bounds it.
+    requireWithinPublishedWidths('AccountUpdateRequest', request),
     { headers: { [PRECONDITION_HEADER]: revision } },
   );
 
@@ -618,13 +638,18 @@ export async function updateAccount(
  * @param {SensitiveAccountUpdateRequest} request - The submission to judge, exactly as the write would
  *   receive it.
  * @returns {Promise<AccountUpdateValidationResponse>} The verdict those edits reached.
+ * @throws {RangeError} If a member carries a value longer than the width
+ *   `AccountUpdateRequest` publishes for it, in which case nothing is sent.
  */
 export async function validateAccountUpdate(
   request: SensitiveAccountUpdateRequest,
 ): Promise<AccountUpdateValidationResponse> {
   const response = await getApiClient().post<AccountUpdateValidationResponse>(
     requestPath(VALIDATE_ACCOUNT_UPDATE),
-    request,
+    // Assumptions: the verdict turn is guarded with the SAME schema as the write, because it receives
+    //   the same body -- so an over-long value is refused on the first turn rather than surviving the
+    //   preview and failing on the write, which would report it against a different action.
+    requireWithinPublishedWidths('AccountUpdateRequest', request),
   );
 
   return response.data;

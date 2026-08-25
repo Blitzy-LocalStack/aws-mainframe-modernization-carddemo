@@ -77,7 +77,7 @@ import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
 
 import { USER_ID_MAX_LENGTH, getUser, updateUser } from '../../api/auth';
-import { isApiRequestError } from '../../api/client';
+import { isApiRequestError, retainOutcomeAcrossNavigation } from '../../api/client';
 import type {
   ApiError,
   FieldValidationState,
@@ -87,7 +87,13 @@ import type {
 } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp, fieldHintId } from '../../layout/fieldHelp';
+import {
+  BLANK_FIELD_MARKER_CHARACTERS,
+  busyAnnouncement,
+  fieldAriaProps,
+  fieldErrorHelp,
+  fieldHintId,
+} from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
 import { UNIFORM_PF_KEY_LABELS, decodeBmsLegendText } from '../../layout/PfKeyBar';
 import { usePfKeys } from '../../layout/usePfKeys';
@@ -96,16 +102,22 @@ import {
   INVALID_KEY_PRESSED,
   MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
+  fitsDeclaredWidth,
   formatMessageTemplate,
+  normaliseForWire,
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
 import {
   ADMIN_MENU_ROUTE,
+  USER_LIST_ROUTE,
+  USER_UPDATE_ROUTE_TEMPLATE,
   inApplicationRoute,
   navigateSafely,
   screenTransitionState,
 } from '../../routes/navigation';
+import { copybookFieldWidthStyle } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import {
   BMS_COLOR_TOKENS,
@@ -132,6 +144,45 @@ export const USER_UPDATE_PROGRAM_NAME = 'COUSR02C';
  * exists for a caller that does not know its mapset, and this one does.
  */
 export const USER_UPDATE_MAPSET = 'COUSR02' as const satisfies MapsetName;
+
+/**
+ * The band this screen published for a save it then left, for whichever screen the operator lands on.
+ *
+ * Purpose: carry ONE sentence and its tone across a route change, and nothing else. A save reached by
+ * `F3=Save&&Exit` publishes its outcome onto a band and then transfers away in the same turn, so the
+ * band it published is discarded by the unmount before it can be read.
+ *
+ * Assumptions: the tone travels beside the sentence rather than being re-derived at the destination. It
+ * is the tone the reference itself moved into the message field's colour attribute -- `DFHGREEN` for a
+ * committed write at `app/cbl/COUSR02C.cbl` L371, `DFHRED` for a refusal at L241 -- and a destination
+ * screen has no way to recover which of those a sentence carried by inspecting the sentence.
+ */
+export interface UserUpdateSaveHandover {
+  /** The sentence, already composed, exactly as this screen put it on its own band. */
+  readonly message: string;
+  /** The tone that sentence was published with, from the colour the reference moved beside it. */
+  readonly severity: MessageBandSeverity;
+}
+
+/**
+ * Name the save handover is retained and collected under.
+ *
+ * Assumptions: the name is COMPOSED from the route template both screens already import from
+ * `ui/src/routes/navigation.ts`, rather than being written out as a literal in each of them. The
+ * retention and the collection are in two different modules here -- this screen retains, the browse
+ * collects -- so the claim is a name two call sites have to agree on, and deriving both from one shared
+ * constant is what makes agreement structural instead of a matter of two literals staying in step.
+ *
+ * ⚠️ Alternatives Considered: exporting this constant and importing it in the browse, which is what
+ * `ui/src/api/client.ts` assumes when it records that "both call sites are in the same screen".
+ * Rejected because every screen in this tree is mounted through `lazy()` in `ui/src/router.tsx`, so a
+ * static import from one screen module into another would fold this screen's chunk into the browse's and
+ * charge every operator who opens the list for code they may never reach. The suffix is the only
+ * duplicated text, and it is inert: a mismatch would leave an outcome uncollected rather than mis-routed,
+ * and the pair of cases in `ui/src/test/userList.test.tsx` and `ui/src/test/userUpdate.test.tsx` fails on
+ * exactly that.
+ */
+const USER_UPDATE_SAVE_CLAIM = `${USER_UPDATE_ROUTE_TEMPLATE}#saved`;
 
 /**
  * The screen's own caption, verbatim from `app/bms/COUSR02.bms` L75-L79.
@@ -236,6 +287,72 @@ export const USER_UPDATE_FIELD_WIDTHS = {
   lastName: 20,
   userType: 1,
 } as const satisfies Readonly<Record<UserUpdateField, number>>;
+
+/*
+ * WHY : ⚠️ Refactoring Rationale: entry is now measured against the declared width in the two units the
+ *       RECORD is stated in, where the control's `maxLength` was the only bound. `maxLength` stops the
+ *       keystroke, which is the right interaction, but it counts UTF-16 CODE UNITS -- a unit neither
+ *       `PIC X(20)` nor a `VARCHAR(20)` column is declared in. A rendering review measured the
+ *       consequence on these name fields directly: `Ünïcödé Émoji 🎉🏦` is sixteen characters and
+ *       eighteen code units, so a twenty-position field stops accepting after eighteen of them, and a
+ *       field filled entirely with astral characters stops after ten. The operator meets a field that
+ *       silently holds half of what its own hint advertises, and nothing says so.
+ * WHY : ⚠️ Assumptions: BOTH measures have to fit and the BYTE measure usually binds, which is why the
+ *       shared predicate is used rather than a character count here. `SEC-USR-FNAME PIC X(20)`
+ *       (`app/cpy/CSUSR01Y.cpy` L19) is twenty BYTES on the record, so twenty accented letters are
+ *       twenty code points and forty bytes -- a value `maxLength` admits and the record cannot hold.
+ *       In the other direction one astral character is a single code point that `maxLength` counts
+ *       twice, refusing a character the field has room for. Clamping on the record's own units removes
+ *       both errors at once.
+ * WHY : ⚠️ Trade-offs: an over-long entry is CLAMPED rather than refused with a sentence, and the reason
+ *       is that no sentence exists to say it in. `app/cbl/COUSR02C.cbl` L182-L206 declares five field
+ *       refusals -- the four controls this screen paints plus the withdrawn credential's -- and every
+ *       one of them is a BLANK test, `... can NOT be empty...`, with no length arm at all, because a 3270
+ *       field of length n physically cannot hold n+1 characters, so an over-length condition never
+ *       arose for the program to report. The catalog is transcribed from the program, so stating one
+ *       here would mean authoring operator prose the reference never wrote. Clamping is the terminal's
+ *       own behaviour: the keyboard simply stopped accepting into a full field.
+ * WHY : Alternatives Considered: importing the identically-reasoned clamp from the sibling add screen or
+ *       from `ui/src/screens/accountUpdate`. Rejected because every screen is mounted through `lazy()`
+ *       in `ui/src/router.tsx`, so a value import from another screen folds that screen's chunk into
+ *       this one; the rule is restated and the shared PREDICATES it consults -- `normaliseForWire` and
+ *       `fitsDeclaredWidth` -- are imported, so the screens agree by construction on the part that
+ *       could actually diverge.
+ */
+
+/**
+ * Clamps one entry to a declared field width, measured as the record measures it.
+ *
+ * Purpose: keep the value the operator can see identical to the value the field can store, so nothing
+ * is accepted on the glass that the record then cannot hold.
+ *
+ * Assumptions: the entry is normalised to Normalization Form C FIRST and the clamp then walks whole
+ * CODE POINTS rather than UTF-16 units, so a surrogate pair is kept or dropped as one character and can
+ * never be cut in half into a lone surrogate -- a value no byte measure could make sense of.
+ *
+ * Trade-offs: the fit is re-tested per candidate length rather than computed from a byte count in one
+ * step. That is a loop over at most the entry's own length on a keystroke, and it buys the property that
+ * this function and any validator agree BY CONSTRUCTION because both consult one predicate, where byte
+ * arithmetic of its own here would be a second implementation of the same rule.
+ * @param {string} entry - The value the control reported, exactly as it arrived.
+ * @param {number} declaredWidth - The field's `PIC X(n)` width; a positive integer.
+ * @returns {string} The normalised entry, shortened by whole code points until it fits the width.
+ * @throws {RangeError} If `declaredWidth` is negative or not an integer, raised by the predicate.
+ */
+export function clampToDeclaredWidth(entry: string, declaredWidth: number): string {
+  const normalised = normaliseForWire(entry);
+  if (fitsDeclaredWidth(normalised, declaredWidth)) {
+    return normalised;
+  }
+
+  const codePoints = Array.from(normalised);
+  let kept = codePoints.length - 1;
+  while (kept > 0 && !fitsDeclaredWidth(codePoints.slice(0, kept).join(''), declaredWidth)) {
+    kept -= 1;
+  }
+
+  return codePoints.slice(0, kept).join('');
+}
 
 /*
  * WHY : Assumptions: the labels are transcribed in the mapset's OWN spelling -- including the doubled
@@ -432,6 +549,15 @@ export function resolveApiFieldErrors(problem: ApiError): readonly UserUpdateFie
  * screen let through, so its sentence is shown for the control it names, which is the same shape the
  * reference produces for its own refusals: one sentence, about the first offending field, with the
  * cursor on it.
+ *
+ * ⚠️ Alternatives Considered: the message catalogue now publishes two AUTHORED failure sentences --
+ * `TRANSIENT_FAILURE_TRY_AGAIN` for a condition that may clear and `PERSISTENT_FAILURE_REPORT_IT` for
+ * one that will not -- selected on the classification `ui/src/api/client.ts` already computes. Neither
+ * is taken here, and the reason is Rule T8 rather than inertia: every failure sentence this function
+ * can reach HAS a mainframe source, so substituting an authored one would replace a verbatim
+ * operator-facing string with a better-worded invention. The authored pair is for screens and states
+ * the reference never had a sentence for -- which is why the busy announcement this screen renders does
+ * take one.
  * @param {unknown} failure - Whatever the request rejected with, normally the normalised
  *   `ApiRequestError` that `ui/src/api/client.ts` mints.
  * @param {UserUpdateStage} stage - Which file operation the failure came out of, selecting the
@@ -599,6 +725,31 @@ export function UserUpdateScreen(): ReactElement {
   const [severity, setSeverity] = useState<MessageBandSeverity>('error');
   const [fieldErrors, setFieldErrors] = useState<readonly UserUpdateFieldError[]>([]);
   const [busy, setBusy] = useState(false);
+
+  /**
+   * What the save turn now running published onto the band, or `null` before it has published anything.
+   *
+   * Purpose: make the outcome of a save readable by {@link handleSaveAndExit} at the moment it leaves.
+   *
+   * ⚠️ Assumptions: a ref and not the `message` state above, because the exit arm reads this INSIDE the
+   * continuation that published it. A state setter's effect is not visible to the closure that called it
+   * -- `message` in that closure is still whatever it held when the render was created -- so reading the
+   * state there would hand the destination the PREVIOUS turn's sentence, or `null` on the first save.
+   * That is the same class of defect as the write itself: a message that describes the wrong thing is
+   * worse than no message, because an operator cannot tell it apart from a right one.
+   *
+   * Assumptions: it is reset at the head of each save turn and written by every arm of that turn, so it
+   * is turn-scoped rather than a running log of everything the band has ever shown. The read arm's
+   * failures are written through {@link applyFailureReport} as well, which is harmless precisely because
+   * of that reset: the exit arm only ever reads it after the save turn it opened has settled.
+   *
+   * Alternatives Considered: changing {@link attemptSave} to resolve with its outcome instead of `void`.
+   * Rejected because that promise is also what the exit arm SEQUENCES on -- it is awaited for its
+   * ordering, which is the reference's synchronous `EXEC CICS REWRITE` before `EXEC CICS XCTL` -- and
+   * the other caller, PF5, wants neither the value nor the ordering. Threading a value through a promise
+   * two callers read for two different reasons buys nothing a ref does not.
+   */
+  const saveTurnBand = useRef<UserUpdateSaveHandover | null>(null);
   /*
    * WHY : Refactoring Rationale: the cursor destination is held as STATE and applied by the effect
    *       below rather than by calling `.focus()` where the refusal is decided. An inline call is the
@@ -693,21 +844,27 @@ export function UserUpdateScreen(): ReactElement {
   }
 
   /*
-   * WHY : Assumptions: the cleanup invalidates rather than cancels, for the reason recorded on the
-   *       trade-off above. Trade-offs: this half is DEFENSIVE and is not observable in the React version
-   *       this bundle pins -- a state update on an unmounted component is a silent no-op in React 19,
-   *       measured rather than assumed -- so no test distinguishes it. It is kept because it completes
-   *       the invariant at no runtime cost and because the guarantee it leans on belongs to React rather
-   *       than to this screen, which a later upgrade could withdraw.
+   * WHY : ⚠️ Refactoring Rationale: an effect used to register {@link invalidateTurnsInFlight} as an
+   *       UNMOUNT cleanup, and it is withdrawn. Its own note recorded it as purely defensive and as not
+   *       observable in the React version this bundle pins -- a state update on an unmounted component
+   *       is a silent no-op in React 19 -- so nothing it protected is lost. What it cost is not
+   *       hypothetical: React runs an effect's cleanup and then the effect again when a MOUNTED tree
+   *       suspends and resumes, and this screen is mounted through `lazy()` under a `Suspense` boundary
+   *       in `ui/src/router.tsx`. A replay therefore invalidated the read that was still on the wire,
+   *       and the screen recovered only because the replayed effect issued a SECOND read whose answer
+   *       was current -- which is exactly the duplicate `GET` a browser sweep measured on one arrival at
+   *       this route. Suppressing that duplicate through {@link requestedRouteUserId} while keeping this
+   *       cleanup would have left the first answer discarded and the second never issued, so the row
+   *       would never have landed at all: the duplicate was load-bearing, and both halves have to go
+   *       together.
+   * WHY : Assumptions: every OTHER caller of {@link invalidateTurnsInFlight} is unaffected, because each
+   *       of them is an operator act rather than a lifecycle event. PF4 still invalidates -- clearing
+   *       the screen is precisely the abort of an outstanding turn -- and every outcome is still gated
+   *       on {@link isCurrentTurn}, so the A-then-B navigation race the counter exists for is closed
+   *       exactly as before. Alternatives Considered: keeping the cleanup and distinguishing an unmount
+   *       from a replay. Rejected because React publishes no such signal: a cleanup is a cleanup, and
+   *       code that guessed which one it was would be guessing on every release.
    */
-  useEffect(
-    /**
-     * Registers the unmount invalidation.
-     * @returns {() => void} The cleanup that makes an outstanding turn inert.
-     */
-    (): (() => void) => invalidateTurnsInFlight,
-    [],
-  );
 
   /*
    * WHY : Assumptions: this is declared before {@link load} and is one of its dependencies, rather than
@@ -729,6 +886,15 @@ export function UserUpdateScreen(): ReactElement {
       setBusy(false);
       setMessage(report.message);
       setSeverity('error');
+      /*
+       * WHY : Assumptions: a REFUSED save is recorded for the handover as well as a committed one, and
+       *       the mechanism's own note says why: "a FAILURE is retained as well as a success, and that
+       *       is half the value of the mechanism". `F3=Save&&Exit` transfers on either outcome -- no
+       *       `ERR-FLG` test sits between the two `PERFORM`s at `app/cbl/COUSR02C.cbl` L112 and L119 --
+       *       so an operator who takes it after a refused write would otherwise be told nothing at all
+       *       about a change they believe they made.
+       */
+      saveTurnBand.current = { message: report.message, severity: 'error' };
       setFieldErrors(report.fieldErrors);
       setPendingFocus(report.focus);
     },
@@ -856,9 +1022,21 @@ export function UserUpdateScreen(): ReactElement {
            *       reference's own: L336 sets it and L338 moves `DFHNEUTR` -- the neutral attribute -- into
            *       the message field's colour, where every refusal on this screen moves `DFHRED`. Rendering
            *       it as an error would invert what an operator is told about a successful read.
+           * WHY : ⚠️ Assumptions: the severity is `'neutral'` and NOT `'info'`, because `DFHNEUTR` is the
+           *       NEUTRAL role and not the TURQUOISE one. `ui/src/theme/tokens.ts` resolves NEUTRAL to
+           *       `colorTextSecondary` and TURQUOISE to `colorInfo`, and `ui/src/layout/MessageBand.tsx`
+           *       records that keeping those two apart is precisely what the token bridge's G3 decision
+           *       exists to enforce -- so `'info'` painted a de-emphasised line in the informational hue,
+           *       which a rendering review recorded as informational-looking content in the outcome band.
+           *       The same one-word correction is applied to the sibling delete screen, whose program
+           *       recolours its own awaiting sentence the same way (`app/cbl/COUSR03C.cbl` L285), so the
+           *       two administrative screens that have such a line render it identically.
+           *       Assumptions: the CHANNEL is unchanged, and correctly so: `app/bms/COUSR02.bms` declares
+           *       `ERRMSG` at `POS=(23,1)` and no `INFOMSG`, so row 22 does not exist on this mapset, and
+           *       the sentence reports the outcome of the read just taken rather than standing guidance.
            */
           setMessage(UPDATE_MESSAGES.PRESS_PF5_KEY_TO_SAVE_YOUR_UPDATES);
-          setSeverity('info');
+          setSeverity('neutral');
           /*
            * WHY : Assumptions: the cursor returns to the identifier after a successful read, because
            *       L153 sets `MOVE -1 TO USRIDINL` on the arm that proceeds to read and the map is then
@@ -891,6 +1069,42 @@ export function UserUpdateScreen(): ReactElement {
     [applyFailureReport],
   );
 
+  /**
+   * The route identifier this screen has already issued a read for, or `null` before the first one.
+   *
+   * Purpose: make the effect below read one identifier ONCE however many times React runs it.
+   *
+   * ⚠️ Assumptions: a mounted effect can run again without the route having changed, so "runs once per
+   * mount" is not a property this screen may assume. Two mechanisms produce it here and both are real:
+   * this screen is mounted through `lazy()` under a `Suspense` boundary in `ui/src/router.tsx`, and
+   * React re-runs a mounted tree's effects when that tree suspends and resumes; and React's development
+   * mode deliberately double-invokes every effect to surface exactly this class of defect. A browser
+   * sweep of the PRODUCTION bundle measured two `GET /api/v1/auth/users/{id}` requests carrying two
+   * distinct correlation identifiers for ONE arrival at `/users/:id/edit`, which rules the development
+   * double-invoke out as the explanation of what was measured and leaves suspend-and-resume as the
+   * cause. Guarding on the identifier answers both, because both re-run the effect with the same route
+   * parameter.
+   *
+   * Assumptions: a ref and not state, because the value must be readable and writable inside the effect
+   * without scheduling a render. Holding it in state would re-render on every arrival and would still
+   * not be observable by the effect run that has to be suppressed, since a state write made from an
+   * effect is visible only to the NEXT run.
+   *
+   * Alternatives Considered: deduplicating the read in the transport layer, beside the destructive-write
+   * guard `withoutConcurrentDuplicate` in `ui/src/api/client.ts`. Rejected, and the rejection is
+   * measured rather than assumed: a lookup is safe and repeatable, so collapsing two identical reads
+   * there would also collapse a DELIBERATE re-read -- and this screen has one, because
+   * {@link attemptSave} re-reads the row on every save exactly as `app/cbl/COUSR02C.cbl` L215-L217
+   * does. A transport that joined those two requests would make a save compare against the fetch arm's
+   * answer instead of against the row as it now stands.
+   *
+   * Trade-offs: a route that names the same identifier twice in succession -- which the router cannot
+   * produce, because navigating to the current location is a no-op -- reads once. That is the intended
+   * reading rather than a limitation: the row the operator asked for is already on the glass, and Enter
+   * is the key that asks for it again.
+   */
+  const requestedRouteUserId = useRef<string | null>(null);
+
   useEffect(
     /**
      * Reads the row named by the route once on mount, and again if the route names a different one.
@@ -915,6 +1129,26 @@ export function UserUpdateScreen(): ReactElement {
         return;
       }
 
+      /*
+       * WHY : Assumptions: the guard is the ONE place a duplicate read is stopped, and it is written
+       *       here rather than inside {@link load}, which every other caller reaches. The Enter arm and
+       *       the save arm both read the same identifier deliberately -- the reference re-reads the row
+       *       inside `UPDATE-USER-INFO` at `app/cbl/COUSR02C.cbl` L215-L217 even when its Enter arm has
+       *       just read it -- so a guard inside `load` would suppress a read the reference performs.
+       *       What is being suppressed is narrower than "a second read of this row": it is a second
+       *       read caused by this EFFECT running again for an unchanged route.
+       */
+      if (requestedRouteUserId.current === routeUserId) {
+        return;
+      }
+
+      /*
+       * WHY : Assumptions: the identifier is recorded BEFORE the request is issued, not when it
+       *       settles. A re-run arriving while the first read is still on the wire is exactly the case
+       *       measured -- the two requests were 2 ms apart -- so a marker written on completion would
+       *       be written too late to stop the duplicate it exists to stop.
+       */
+      requestedRouteUserId.current = routeUserId;
       load(routeUserId);
     },
     [load, routeUserId],
@@ -936,6 +1170,12 @@ export function UserUpdateScreen(): ReactElement {
     setFieldErrors([{ field, state: 'BLANK', message: BLANK_FIELD_MESSAGES[field] }]);
     setMessage(BLANK_FIELD_MESSAGES[field]);
     setSeverity('error');
+    /*
+     * WHY : Assumptions: a save refused before any request left the browser is recorded too. The
+     *       reference reaches `RETURN-TO-PREV-SCREEN` from `F3` whether the cascade at L182-L207 refused
+     *       the turn or a write was issued, so this is one of the outcomes an operator can leave on.
+     */
+    saveTurnBand.current = { message: BLANK_FIELD_MESSAGES[field], severity: 'error' };
     setPendingFocus(field);
   }
 
@@ -971,6 +1211,15 @@ export function UserUpdateScreen(): ReactElement {
     if (busy) {
       return Promise.resolve();
     }
+
+    /*
+     * WHY : Assumptions: the handover record is cleared HERE, past the in-flight guard and ahead of the
+     *       validation cascade, so it is scoped to the turn this call actually opens. Clearing it before
+     *       the guard would discard the outcome of the turn still running -- which is the one the exit
+     *       arm is waiting on -- and clearing it later would leave a refusal raised by the cascade
+     *       carrying whatever the previous turn published.
+     */
+    saveTurnBand.current = null;
 
     const blankField = firstBlankField(values, SAVE_VALIDATION_ORDER);
     const { userType } = values;
@@ -1035,6 +1284,10 @@ export function UserUpdateScreen(): ReactElement {
            */
           setMessage(UPDATE_MESSAGES.PLEASE_MODIFY_TO_UPDATE);
           setSeverity('error');
+          saveTurnBand.current = {
+            message: UPDATE_MESSAGES.PLEASE_MODIFY_TO_UPDATE,
+            severity: 'error',
+          };
           return Promise.resolve();
         }
 
@@ -1115,12 +1368,21 @@ export function UserUpdateScreen(): ReactElement {
              *       so the leading literal and the single space before the ellipsis cannot be lost to a
              *       retyped string. It is a SUCCESS, from `DFHGREEN` at L371.
              */
-            setMessage(
-              formatMessageTemplate(MESSAGE_TEMPLATES.USER_HAS_BEEN_UPDATED, {
-                'SEC-USR-ID': saved.userId,
-              }),
-            );
+            /*
+             * WHY : Refactoring Rationale: the composition is bound to a name and used twice rather than
+             *       being inlined into the setter, because the same sentence is now also what a save
+             *       reached by `F3=Save&&Exit` hands to the screen the operator lands on. Composing it
+             *       twice would let the band and the handover drift apart, and a handover that said
+             *       something slightly different from what the screen itself would have said is the one
+             *       failure mode of carrying a sentence across a route change.
+             */
+            const committed = formatMessageTemplate(MESSAGE_TEMPLATES.USER_HAS_BEEN_UPDATED, {
+              'SEC-USR-ID': saved.userId,
+            });
+
+            setMessage(committed);
             setSeverity('success');
+            saveTurnBand.current = { message: committed, severity: 'success' };
           },
           /**
            * Reduces a refused write to the reference's own update sentences.
@@ -1158,17 +1420,27 @@ export function UserUpdateScreen(): ReactElement {
   }
 
   /**
-   * Leaves the screen for the route it was entered from, which is the reference's PF3 destination.
+   * Reports the route the back arm leaves for, without leaving for it.
    *
-   * ⚠️ Refactoring Rationale: this arm reads a VALIDATED caller origin where it previously transferred to
-   * the administrative menu unconditionally, and the old rationale -- that the router publishes no
-   * equivalent of a named calling program -- was wrong: `ui/src/routes/navigation.ts` publishes exactly
-   * that as `ScreenTransitionState.from`, validated against a closed set of this application's own
-   * routes, and the user browse hands its own route over on the row action it opens this screen with
-   * (`ui/src/screens/userList/index.tsx`). Taking the fallback unconditionally lost real behaviour: an
-   * administrator who opened a row from the list was returned to the administrative menu and had to
-   * re-enter the browse and re-page to reach the next row, which is the behaviour loss
-   * `app/cbl/COUSR00C.cbl` L192-L197 avoids by naming itself in `CDEMO-FROM-PROGRAM` before it transfers.
+   * ⚠️ Refactoring Rationale: this replaced an `exitToOrigin` helper that both computed the destination
+   * and navigated to it, and the split happened because a SECOND caller needs the answer BEFORE the
+   * transfer rather than as a side effect of it: {@link handOverAndExit} decides whether to leave its
+   * sentence behind based on whether the destination is a screen that collects one. Computing it twice
+   * -- once to decide and once to navigate -- would let the two disagree if the router state changed
+   * between them, and the disagreement would present as a sentence retained for a screen that never
+   * mounts. The navigating half is now inside {@link handOverAndExit}, which is the only caller PF3
+   * has, so `exitToOrigin` was left with no call site at all and is gone rather than kept as a second
+   * route out of this screen that nothing takes.
+   *
+   * ⚠️ Refactoring Rationale: the destination is a VALIDATED caller origin where PF3 previously
+   * transferred to the administrative menu unconditionally, and the rationale then recorded -- that the
+   * router publishes no equivalent of a named calling program -- was wrong: `ui/src/routes/navigation.ts`
+   * publishes exactly that as `ScreenTransitionState.from`, and the user browse hands its own route over
+   * on the row action it opens this screen with (`ui/src/screens/userList/index.tsx`). Taking the
+   * fallback unconditionally lost real behaviour: an administrator who opened a row from the list was
+   * returned to the administrative menu and had to re-enter the browse and re-page to reach the next
+   * row, which is the behaviour loss `app/cbl/COUSR00C.cbl` L192-L197 avoids by naming itself in
+   * `CDEMO-FROM-PROGRAM` before it transfers.
    *
    * Assumptions: both arms of the reference's decision are reproduced intact -- `app/cbl/COUSR02C.cbl`
    * L113-L118 prefers `CDEMO-FROM-PROGRAM` and falls back to `'COADM01C'` when it is blank -- so an
@@ -1181,13 +1453,11 @@ export function UserUpdateScreen(): ReactElement {
    * believes goes back one screen. The origin selects a destination and nothing else -- the row this
    * screen reads and writes comes from the path parameter under the signed token -- so a forged origin
    * changes where PF3 goes and reaches no other operator's record.
-   * @returns {void} Completion is the requested route transition.
+   * @returns {string} The caller's route when it is one this application admits, and the administrative
+   *   menu otherwise, which is the reference's own default.
    */
-  function exitToOrigin(): void {
-    navigateSafely(
-      navigate,
-      inApplicationRoute(screenTransitionState(location.state).from) ?? ADMIN_MENU_ROUTE,
-    );
+  function originDestination(): string {
+    return inApplicationRoute(screenTransitionState(location.state).from) ?? ADMIN_MENU_ROUTE;
   }
 
   /**
@@ -1304,9 +1574,97 @@ export function UserUpdateScreen(): ReactElement {
      * WHY : Assumptions: BOTH settlements transfer to the same place, and that place is the validated
      *       caller origin rather than the menu. The reference's L112-L119 has no `ERR-FLG` test between
      *       `UPDATE-USER-INFO` and `RETURN-TO-PREV-SCREEN`, so the destination does not depend on the
-     *       save's outcome; `exitToOrigin` is what encodes which destination that is.
+     *       save's outcome; {@link originDestination} is what encodes which destination that is.
      */
-    attemptSave().then(exitToOrigin, exitToOrigin);
+    attemptSave().then(handOverAndExit, handOverAndExit);
+  }
+
+  /**
+   * Hands the save's own sentence to the destination and then leaves.
+   *
+   * ⚠️ Purpose: close the one gap a browser sweep measured on this key. `PUT /api/v1/auth/users/{id}`
+   * returned `200` and was followed immediately by a client-side route change whose band was EMPTY -- the
+   * write happened and the operator was told nothing, on a key whose own legend promises it saves.
+   *
+   * Assumptions: this is not a divergence from the reference, it is the reference's own behaviour
+   * surviving a platform difference. `UPDATE-USER-SEC-FILE` composes the green sentence and performs
+   * `SEND-USRUPD-SCREEN` at `app/cbl/COUSR02C.cbl` L370-L377, so the program DOES send the operator its
+   * outcome on this path; what discards it there is the `EXEC CICS XCTL` at L258-L261 overwriting the
+   * terminal buffer with the next program's map, which is a consequence of how 3270 screens are
+   * delivered rather than a decision that the operator should not be told. Carrying the composed sentence
+   * to the destination is that sentence reaching its intended reader. Registered as an improvement rather
+   * than a parity break: no value the reference writes changes, and no value it does not write appears.
+   *
+   * Assumptions: the outcome is retained UNCONDITIONALLY when one was published, whatever its tone. Both
+   * arms of the caller reach here for the reason recorded there -- no `ERR-FLG` test sits between L112
+   * and L119 -- so a refused write leaves on this key exactly as a committed one does, and it is the
+   * refusal that an operator most needs carried.
+   *
+   * Alternatives Considered: publishing the band and delaying the transfer until the operator has read
+   * it. Rejected outright: the reference transfers in the same turn as the write, so holding the screen
+   * would invent a turn the program does not have and would strand an operator on a screen whose own
+   * legend says they have left it.
+   * @returns {void} Completion is the retention followed by the requested route transition.
+   */
+  function handOverAndExit(): void {
+    const published = saveTurnBand.current;
+    const destination = originDestination();
+
+    /*
+     * WHY : ⚠️ Assumptions: the outcome is retained only when the destination this key is about to reach
+     *       is one that COLLECTS it. Retention is not a broadcast: `ui/src/api/client.ts` holds a claim
+     *       until somebody takes it, deliberately, so that an outcome landing a few milliseconds after
+     *       its reader mounted is not lost. The same property makes an UNCOLLECTED claim durable -- it
+     *       would sit in the store and be taken by the next screen that does collect, which is the user
+     *       browse, and an operator arriving there later would be shown an acknowledgement of a write
+     *       they were told about on another screen or not at all. A sentence that describes an earlier
+     *       turn is indistinguishable from one describing this turn, so a stale hand-over is worse than
+     *       silence on an administrative record.
+     * WHY : ⚠️ Refactoring Rationale: BOTH of this key's destinations now collect, and this guard admits
+     *       both. It used to admit the browse alone, on the recorded ground that
+     *       `ui/src/screens/admin/index.tsx` "has no collector, so an operator who deep-links to a row,
+     *       saves and exits still reads nothing" and that "that half is reported rather than reached
+     *       for". That statement was true when it was written and is now false: the administrative menu
+     *       carries the collector, and it carries the stronger form of it -- it takes the claim on mount
+     *       AND subscribes, because a write measured landing 7 to 12 ms after the route change is
+     *       already too late for a mount-only check. Leaving the guard at the browse alone would keep
+     *       the whole finding open for exactly the operator it was reported about: the one who reaches
+     *       this route by its address, where `app/cbl/COUSR02C.cbl` L113-L118 falls back to `'COADM01C'`
+     *       because no calling program is named.
+     * WHY : ⚠️ Assumptions: the set is enumerated as the two routes that collect, and it is deliberately
+     *       NOT widened to "every destination". Retention stays conditional for the reason above -- an
+     *       uncollected claim is durable and would be taken later by whichever screen does collect -- so
+     *       the guard has to name collectors rather than approve destinations. These are also exhaustive
+     *       for this key by construction: {@link originDestination} answers a validated in-application
+     *       origin or the administrative menu, and the only origin any screen hands this route is the
+     *       browse's own route.
+     * WHY : Alternatives Considered: retaining unconditionally and letting whichever screen collects
+     *       paint whatever it finds whenever it next mounts. Rejected for the staleness above. Also
+     *       considered: sending every exit to the browse so the sentence always has a reader. Rejected
+     *       as a parity break -- the reference's PF3 arm prefers the calling program and falls back to
+     *       the administrative menu, and rewriting where a key goes to suit a message is the message
+     *       dictating navigation.
+     */
+    if (
+      published !== null &&
+      (destination === USER_LIST_ROUTE || destination === ADMIN_MENU_ROUTE)
+    ) {
+      /*
+       * WHY : Assumptions: the discriminator says the HANDOVER completed, not that the write succeeded.
+       *       The write's outcome is already in `severity` -- `success` for the committed sentence,
+       *       `error` for every refusal -- so mapping a refusal onto `settled: 'FAILED'` would encode the
+       *       same fact twice and give a destination two answers that could disagree. `FAILED` in that
+       *       type carries `failure: unknown`, which is a raised error and not a sentence; this screen
+       *       has already reduced its failures to sentences by the time it reaches here, and re-raising
+       *       one would ask the destination to reduce it a second time.
+       */
+      retainOutcomeAcrossNavigation<UserUpdateSaveHandover>(USER_UPDATE_SAVE_CLAIM, {
+        settled: 'COMPLETED',
+        value: published,
+      });
+    }
+
+    navigateSafely(navigate, destination);
   }
 
   /**
@@ -1353,6 +1711,26 @@ export function UserUpdateScreen(): ReactElement {
    * `app/cpy/CSSETATY.cpy` L20 gates its highlighting on, and the replacement is that the error state is
    * driven purely by what the last turn produced -- so a mark changes when a turn produces a new one,
    * exactly as row 23 and the field attributes only changed on a `SEND MAP`.
+   *
+   * ⚠️ Refactoring Rationale: every control other than the user type is now clamped to its DECLARED
+   * width by {@link clampToDeclaredWidth}, where the value was stored as typed and bounded only by
+   * `maxLength`. The WHY block above that function records the measurement and the reason a UTF-16 bound
+   * is neither of the bounds a fixed-width record has. `maxLength` is KEPT on the control alongside
+   * this, because stopping the keystroke is the affordance a 3270 had and this only corrects the unit.
+   *
+   * ⚠️ Assumptions: the identifier is clamped like the two names, even though it is the KEY the fetch is
+   * issued on. Its declared width is eight in both units (`SEC-USR-ID PIC X(08)`,
+   * `app/cpy/CSUSR01Y.cpy` L18) and the service refuses a wider value, so clamping it can only prevent
+   * a read that would be refused; and a key silently truncated by `maxLength` at eight UTF-16 units
+   * would be a DIFFERENT key from the one the operator typed, which is the worst of the three failures
+   * available here.
+   *
+   * ⚠️ Assumptions: the user type is normalised and NOT additionally clamped, and the order matters.
+   * {@link normaliseUserType} returns `''`, `'A'` or `'U'` -- a domain whose every member is one ASCII
+   * character, so it already satisfies the one-position width in both units and a clamp after it could
+   * only be a no-op. Running the clamp FIRST instead would be worse than redundant: it would truncate a
+   * two-character paste to one character and hand the domain check a value the operator never intended,
+   * where discarding the whole entry is what the reference's own field length did.
    * @param {UserUpdateField} field - Control the operator is editing.
    * @returns {(event: ChangeEvent<HTMLInputElement>) => void} Change handler for that control.
    */
@@ -1373,7 +1751,10 @@ export function UserUpdateScreen(): ReactElement {
          */
         (previous: UserUpdateValues): UserUpdateValues => ({
           ...previous,
-          [field]: field === 'userType' ? normaliseUserType(edited) : edited,
+          [field]:
+            field === 'userType'
+              ? normaliseUserType(edited)
+              : clampToDeclaredWidth(edited, USER_UPDATE_FIELD_WIDTHS[field]),
         }),
       );
     };
@@ -1405,34 +1786,68 @@ export function UserUpdateScreen(): ReactElement {
    *       `DEFAULT_PF_KEY_ACTIONS` entry, which maps it to `back`. The semantic matters beyond
    *       presentation because it is what the bar and any later consumer read to describe the control,
    *       and describing a control that writes as "back" would misreport the one key on this screen that
-   *       does not mean what it means everywhere else. Its button emphasis is unaffected: emphasis is
-   *       keyed by AID through `PRIMARY_ACTION_AIDS`, which lists ENTER and PF5, so PF3 stays a default
-   *       button exactly as the design-system mapping requires.
-   * WHY : Assumptions: the three keys that OPEN a turn -- ENTER, PF3 and PF5 -- additionally carry
-   *       `disabled` while one is in flight, so the legend greys them out instead of leaving a control
-   *       that looks live and does nothing. The guards inside their handlers are kept as well rather than
-   *       replaced: they are what a test can exercise deterministically, and two independent refusals of
-   *       a second concurrent turn are cheaper than one.
-   * WHY : Assumptions: PF4 and PF12 are deliberately left ENABLED throughout. PF4 is the abort of the
-   *       outstanding turn, not a competitor for it, and PF12 leaves the screen -- greying either would
-   *       trap an operator on a screen whose only unresponsive keys were the ones offering a way off it.
-   * WHY : Trade-offs: `disabled` reports through the invalid-key channel, whose sentence
-   *       `Invalid key pressed...` is the reference's answer for a key OUTSIDE its list (L127-L130) and
-   *       would be wrong for one this screen offers. The rejection payload carries its reason, so the
-   *       handler below states the sentence only for an unmapped key; the alternative -- withholding
-   *       `disabled` and relying on the in-handler guards alone -- was what left the keys looking live.
+   *       does not mean what it means everywhere else.
+   * WHY : ⚠️ Refactoring Rationale: every entry now declares its `risk`, and the note that stood here --
+   *       that PF3's "button emphasis is unaffected: emphasis is keyed by AID through
+   *       `PRIMARY_ACTION_AIDS`, which lists ENTER and PF5, so PF3 stays a default button exactly as the
+   *       design-system mapping requires" -- is withdrawn. It described the mechanism accurately and drew
+   *       exactly the wrong conclusion from it. A rendering pass measured the consequence: this bar
+   *       carried TWO primary-blue controls at once, `ENTER=Fetch` and `F5=Save`, while `F3=Save&&Exit`
+   *       -- a key that performs `PUT /api/v1/auth/users/{id}` before it leaves -- was the visually
+   *       WEAKEST of the three. So the emphasis distinguished neither the writing keys nor the reading
+   *       one. No AID-keyed table could have fixed that here, because the same `PFK03` is `F3=Back` on
+   *       nine other mapsets; the input has to be what the key DOES.
+   * WHY : ⚠️ Assumptions: the five classifications are read off this mapset's own legend literal at
+   *       `app/bms/COUSR02.bms` L163-L164, `ENTER=Fetch  F3=Save&&Exit  F4=Clear  F5=Save  F12=Cancel`.
+   *       `ENTER=Fetch` reads one row and writes nothing, so read-only. `F3=Save&&Exit` and `F5=Save`
+   *       both reach `UPDATE-USER-INFO` (L112 and L121), so both mutating -- and `'mutating'` rather
+   *       than `'destructive'` because an operator can come straight back and edit the row again, which
+   *       is the distinction the union draws. `F4=Clear` empties controls on the client and issues no
+   *       request, so read-only. `F12=Cancel` navigates (L124-L125) and writes nothing, so read-only.
+   * WHY : ⚠️ Assumptions: `read-only` is stated EXPLICITLY on ENTER rather than omitted, and that is
+   *       load-bearing. The fallback lists `ENTER`, so omitting it would leave the fetch key primary
+   *       beside the two saves and reproduce the measured "two primary controls" bar with a third added.
+   *       Saying "this key reads" has to be able to LOWER emphasis or it says nothing.
+   * WHY : ⚠️ Refactoring Rationale: the three keys that OPEN a turn -- ENTER, PF3 and PF5 -- report
+   *       `busy` where they reported `disabled`. `disabled` WITHDREW the control: the legend greyed it
+   *       out, so a key whose own legend is on the glass in front of the operator became unavailable for
+   *       the duration of its own turn, and an operator who pressed it got nothing and no explanation
+   *       (this screen already silences the disabled rejection, so not even a sentence). `busy` leaves
+   *       the control present, enabled, focusable and named and declines the press SILENTLY, which is
+   *       the 3270's input-inhibit behaviour and is also what makes the affordance visible where the
+   *       operator's attention already is -- on the control they pressed. The width-neutral slot
+   *       `PfKeyBar` reserves is why the appearing affordance does not move the bar.
+   * WHY : Assumptions: the guards inside the three handlers are kept as well rather than replaced. They
+   *       are what a test can exercise deterministically, and two independent refusals of a second
+   *       concurrent turn are cheaper than one.
+   * WHY : ⚠️ Assumptions: PF4 and PF12 stay OUT of the busy channel entirely rather than reporting
+   *       `busy: false`. PF4 is the abort of the outstanding turn, not a competitor for it, and PF12
+   *       leaves the screen -- so both must stay live while a turn is in flight, and per `PfKeyBinding`
+   *       an absent member reserves no affordance box while `false` reserves one. Omitting them is
+   *       therefore the statement that these two keys never report busy at all.
    */
   const keyHandlers: PfKeyHandlerMap = {
-    ENTER: { onInvoke: handleFetch, label: USER_UPDATE_KEY_LABELS.ENTER, disabled: busy },
+    ENTER: {
+      onInvoke: handleFetch,
+      label: USER_UPDATE_KEY_LABELS.ENTER,
+      risk: 'read-only',
+      busy,
+    },
     PFK03: {
       onInvoke: handleSaveAndExit,
       label: USER_UPDATE_KEY_LABELS.PFK03,
       action: 'save',
-      disabled: busy,
+      risk: 'mutating',
+      busy,
     },
-    PFK04: { onInvoke: clearScreen, label: USER_UPDATE_KEY_LABELS.PFK04 },
-    PFK05: { onInvoke: handleSave, label: USER_UPDATE_KEY_LABELS.PFK05, disabled: busy },
-    PFK12: { onInvoke: exitToAdminMenu, label: USER_UPDATE_KEY_LABELS.PFK12 },
+    PFK04: { onInvoke: clearScreen, label: USER_UPDATE_KEY_LABELS.PFK04, risk: 'read-only' },
+    PFK05: {
+      onInvoke: handleSave,
+      label: USER_UPDATE_KEY_LABELS.PFK05,
+      risk: 'mutating',
+      busy,
+    },
+    PFK12: { onInvoke: exitToAdminMenu, label: USER_UPDATE_KEY_LABELS.PFK12, risk: 'read-only' },
   };
 
   const { bindings, invoke } = usePfKeys(keyHandlers, {
@@ -1597,7 +2012,56 @@ export function UserUpdateScreen(): ReactElement {
       onChange: changeHandler(field),
       disabled: busy,
       autoFocus: presentation.initialCursor === true,
-      ...(presentation.fixedPitch === true ? { style: fixedPitchStyle } : {}),
+      /*
+       * WHY : ⚠️ Refactoring Rationale: every control now carries the CEILING its copybook width
+       *       declares, where only the identifier carried a style at all and that one was the
+       *       fixed-pitch face. A rendering review measured what the absence cost: an eight-character
+       *       input rendered 1172 pixels wide and the blank-field asterisk this screen writes at the
+       *       field's right-hand edge landed at x≈1211, roughly 1150 pixels from the value it
+       *       qualifies -- and the one-position user type rendered at the same full width as a
+       *       twenty-character name, so the control said nothing about how much it would take.
+       *       `ui/src/layout/recordLayout.ts` records the same measurement and states the conclusion
+       *       this adopts: the marker cannot be brought to the value by moving the marker, so the field
+       *       has to stop being many times wider than the data it holds.
+       * WHY : ⚠️ Assumptions: the measure is spread onto the DESIGN-SYSTEM CONTROL and not onto the
+       *       `Form.Item` or a wrapper, which that module records as a measured constraint rather than
+       *       a preference: the theme scopes its custom properties to component class scopes, so
+       *       `--ant-control-padding-horizontal` resolves on an `.ant-input` and returns the empty
+       *       string on an arbitrary element. Spread here, the padding term resolves; spread on a
+       *       wrapper it would not, and the `calc()` would be dropped at computed-value time.
+       * WHY : Assumptions: the width style is merged UNDER the fixed-pitch face rather than replacing
+       *       it, so the identifier keeps both -- the monospaced face that makes two eight-character
+       *       keys render at equal width, and the eight-column ceiling. The two describe different
+       *       properties and neither overwrites a member of the other; the merge order is the idiom
+       *       `ui/src/screens/reports/index.tsx` L2611-L2613 already uses for the same pair.
+       * WHY : Trade-offs: the helper publishes a MAXIMUM alongside `inlineSize: '100%'`, so a field
+       *       declared wider than the viewport still shrinks to fit rather than forcing the page to
+       *       scroll sideways. The declared width is therefore a ceiling and not a fixed size, which
+       *       departs from the terminal -- where every field was exactly its declared width because the
+       *       display was exactly 80 columns. AAP gap G1 already records that departure for POSITION;
+       *       this is the same trade for SIZE, and it is what keeps the narrow viewports the same review
+       *       measured free of horizontal overflow.
+       */
+      /*
+       * WHY : ⚠️ Refactoring Rationale: the marker slot is declared to the measure, and only on the turn
+       *       the marker is rendered. With a suffix present the design system sizes the affix WRAPPER,
+       *       whose space the value and the slot then share, so a maximum computed for the value alone
+       *       leaves the value short by whatever the slot takes -- measured on a sibling screen's
+       *       two-character field as a record key that rendered as one glyph and a sliver. The narrowest
+       *       marker-bearing control here is the one-character user type, where the shortfall is larger
+       *       still.
+       *       Assumptions: the allowance is CONDITIONAL on the very test that renders the suffix below,
+       *       so an accepted field keeps exactly the measure it has always had. Widening every field
+       *       unconditionally would change the whole form to fix a state none of its fields are in.
+       */
+      style: {
+        ...(presentation.fixedPitch === true ? fixedPitchStyle : {}),
+        ...copybookFieldWidthStyle(
+          USER_UPDATE_FIELD_WIDTHS[field],
+          cssVar,
+          refusal?.state === 'BLANK' ? BLANK_FIELD_MARKER_CHARACTERS : 0,
+        ),
+      },
       ...(refusal?.state === 'BLANK'
         ? {
             suffix: (
@@ -1688,6 +2152,21 @@ export function UserUpdateScreen(): ReactElement {
        * shell paints from rows 1 and 2 out of the delegated identity.
        */}
       <ScreenTitle style={captionStyle}>{USER_UPDATE_CAPTION}</ScreenTitle>
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the screen ANNOUNCES its outstanding turn, where it previously
+       *       only showed one. A review found `aria-busy` on no button anywhere and no live region
+       *       naming the wait, so an operator who could not see the in-flight affordance had nothing at
+       *       all: the controls stayed reachable, the request was in flight, and the screen said nothing
+       *       about it. `busyAnnouncement` renders one visually hidden `role="status"` region -- always
+       *       mounted, empty while idle, because a live region has to be in the accessibility tree
+       *       BEFORE its content changes for the first change to be announced.
+       * WHY : Assumptions: the sentence is `REQUEST_IN_PROGRESS` from the message catalogue, which is
+       *       AUTHORED rather than transcribed, and taking an authored sentence here does not weaken
+       *       Rule T8. The reference has no equivalent to carry: a 3270 turn simply locked the keyboard,
+       *       so there is no mapset literal this could be displacing. Every sentence on this screen that
+       *       DOES have a mainframe source is still that source's, verbatim.
+       */}
+      {busyAnnouncement(busy ? REQUEST_IN_PROGRESS : undefined)}
       {/*
        * Refactoring Rationale: the message line that used to sit here is delegated to the shell, which
        * paints it at row 23 -- below the fields, which is where the reference paints it. Composing it

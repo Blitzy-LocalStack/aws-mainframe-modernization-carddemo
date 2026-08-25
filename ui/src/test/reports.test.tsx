@@ -78,7 +78,7 @@
  * satisfy it the same way.
  */
 
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
@@ -112,14 +112,15 @@ import type {
   ReportRequest,
   ReportSubmissionOutcome,
 } from '../api/reporting';
-import { ApiRequestError } from '../api/client';
+import { ApiRequestError, CONFIRMATION_ANSWERS } from '../api/client';
 import type { ApiError, FieldError } from '../api/types';
-import { AppShell } from '../layout/AppShell';
+import { AppShell, SHELL_PINNED_ZONE_TEST_ID } from '../layout/AppShell';
+import { BUSY_ANNOUNCEMENT_TEST_ID } from '../layout/fieldHelp';
 import {
   MESSAGE_BAND_CONTENT_WIDTH,
   MESSAGE_BAND_DEFAULT_DISPLAY_WIDTH,
 } from '../layout/MessageBand';
-import { MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
+import { INFORMATION_BAND_TEST_ID, MESSAGE_BAND_TEST_ID } from '../layout/MessageBand';
 import { PF_KEY_BAR_REGION_LABEL, PRIMARY_ACTION_AIDS } from '../layout/PfKeyBar';
 import type { CicsAid } from '../layout/usePfKeys';
 import {
@@ -131,11 +132,14 @@ import {
   REPORTS_CAPTIONS,
   REPORTS_KEY_LABELS,
   REPORTS_TITLE,
+  REPORT_RUN_MESSAGES,
   REPORT_TYPE_PROMPTS,
+  REQUEST_IN_PROGRESS,
   formatMessageTemplate,
 } from '../messages/messages';
 import { ROUTE_TABLE } from '../router';
 import ReportsScreen, {
+  BOUND_CAPTION_WIDTH,
   CONFIRM_WIDTH,
   DATE_PART_WIDTHS,
   REPORTS_PROGRAM_NAME,
@@ -810,6 +814,110 @@ async function holdsEveryControlToItsDeclaredWidth(): Promise<void> {
 }
 
 /**
+ * Asserts the seven keyable controls are MEASURED from their declared widths, not just capped by them.
+ *
+ * Purpose: the regression guard for all seven rendering a hard 201 pixels at every viewport. `.ant-input`
+ * is `width: 100%` and nothing bounded it, so a two-character month was as wide as a fifty-character
+ * address line; the measured consequences were the bound row needing about 1009 pixels and fragmenting to
+ * four lines at 375 with both slashes orphaned at line ends, and the widget hierarchy inverting -- each
+ * single date part at 201 pixels beside a calendar control capturing a whole date at 171.
+ *
+ * ⚠️ Assumptions: the assertion is on `max-inline-size` and NOT on a pixel width, because the remedy is a
+ * ceiling expressed in `ch` plus the design system's own horizontal control padding -- see
+ * `copybookFieldWidthStyle` in `ui/src/layout/recordLayout.ts`. jsdom computes no layout, so a pixel
+ * assertion here would be asserting nothing; what CAN be asserted is that the declaration is present and
+ * that it carries the width this control's own copybook declares.
+ *
+ * ⚠️ Assumptions: the style is asserted on the CONTROL and not on a wrapper, which is the constraint the
+ * helper records from a browser measurement -- the padding custom property resolves in the control's own
+ * class scope and returns empty on a plain element, so a ceiling spread onto a wrapper would be invalid
+ * at computed-value time and silently dropped.
+ * @returns {Promise<void>} Resolves once every control's ceiling has been asserted.
+ */
+async function measuresEveryControlFromItsDeclaredWidth(): Promise<void> {
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+
+  for (const caption of [REPORTS_CAPTIONS.startDate, REPORTS_CAPTIONS.endDate]) {
+    for (const part of ['month', 'day', 'year'] as const) {
+      expectDeclaredWidthCeiling(datePartControl(caption, part), DATE_PART_WIDTHS[part]);
+    }
+  }
+  expectDeclaredWidthCeiling(confirmationControl(), CONFIRM_WIDTH);
+}
+
+/**
+ * Asserts one control's inline size is ceilinged at its declared character width.
+ *
+ * Assumptions: the `ch` term is matched rather than the whole declaration, because the padding term is a
+ * theme custom property whose serialised form belongs to the design system and not to this file. What
+ * this file is entitled to assert is the character count, which is the copybook's.
+ * @param {HTMLElement} control - The control to inspect.
+ * @param {number} declaredWidth - The width the field's PICTURE clause declares.
+ * @returns {void} Nothing; the expectations throw on a mismatch.
+ */
+function expectDeclaredWidthCeiling(control: HTMLElement, declaredWidth: number): void {
+  const ceiling = control.style.maxInlineSize;
+  expect(ceiling, 'the control must carry a declared-width ceiling').not.toBe('');
+  expect(
+    ceiling,
+    `the ceiling must be measured in ${String(declaredWidth)} character columns`,
+  ).toContain(`${String(declaredWidth)}ch`);
+  // WHY : Assumptions: the full-width base is asserted alongside the ceiling, because the helper keeps
+  //       both -- the ceiling without it would fix the field's size and stop it shrinking inside a phone
+  //       viewport, which is the overflow this screen has already been measured for once.
+  expect(control.style.inlineSize).toBe('100%');
+}
+
+/**
+ * Asserts the two bound captions occupy one cell of the width the mapset declares for both.
+ *
+ * Purpose: the regression guard for the two rows starting at different x positions -- measured six to
+ * seven pixels apart at every width the row fits, the first inputs at x143 against x137, the slashes at
+ * x352/x575 against x346/x569 and the calendar controls at x905 against x898.
+ *
+ * ⚠️ Assumptions: the root cause is asserted rather than the symptom, because jsdom computes no layout. The
+ * cause is that `app/bms/CORPT00.bms` declares both captions `LENGTH=12` at column 15 -- L122-L126 and
+ * L162-L166 -- and right-aligns the end caption into that cell with TWO LEADING SPACES, which a text node
+ * collapses. So the two properties that make the rows align again are the declared cell measure and
+ * `white-space: pre`, and both are asserted here.
+ * @returns {Promise<void>} Resolves once both captions have been asserted.
+ */
+async function measuresBothBoundCaptionsAtTheDeclaredCell(): Promise<void> {
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+
+  // WHY : Assumptions: the two catalog strings are asserted to be the SAME declared length before their
+  //       rendering is asserted, because the whole alignment argument rests on that equality -- if the
+  //       catalogue ever shortened one, a cell measure common to both would be the wrong remedy.
+  expect(REPORTS_CAPTIONS.startDate).toHaveLength(BOUND_CAPTION_WIDTH);
+  expect(REPORTS_CAPTIONS.endDate).toHaveLength(BOUND_CAPTION_WIDTH);
+
+  for (const caption of [REPORTS_CAPTIONS.startDate, REPORTS_CAPTIONS.endDate]) {
+    /*
+     * WHY : ⚠️ Assumptions: the element is located by the TRIMMED caption and the untrimmed one is then
+     *       asserted against its `textContent`, which is a two-step because of how the query works rather
+     *       than a preference. Testing Library normalises the CANDIDATE's text and compares it to the
+     *       matcher string as given, so `getByText('  End Date :')` compares `'End Date :'` against
+     *       `'  End Date :'` and never matches -- measured, it reports "Unable to find an element with
+     *       the text: End Date : (normalized from '  End Date :')". Reading `textContent` afterwards is
+     *       also the stronger assertion: it is the only one that proves the two leading spaces survived
+     *       into the DOM, which is the whole of what `white-space: pre` is there to render.
+     */
+    const cell = screen.getByText(accessibleCaption(caption));
+    expect(cell.textContent, 'the caption must reach the DOM with its declared spaces').toBe(
+      caption,
+    );
+    expect(cell.style.inlineSize, `${caption} must occupy the declared cell`).toBe(
+      `${String(BOUND_CAPTION_WIDTH)}ch`,
+    );
+    expect(cell.style.whiteSpace, `${caption} must keep its declared spaces`).toBe('pre');
+  }
+}
+
+/**
  * Asserts the initial cursor lands on the one field the mapset marks with `IC`, and on nothing else.
  *
  * ⚠️ Assumptions: the assertion is on FOCUS rather than on an `autofocus` attribute, and that is a
@@ -1027,6 +1135,14 @@ function fieldSurfaceCases(): void {
   afterEach(discardObservedServerInstant);
 
   it('holds every control to its declared copybook width', holdsEveryControlToItsDeclaredWidth);
+  it(
+    'measures every control from its declared copybook width',
+    measuresEveryControlFromItsDeclaredWidth,
+  );
+  it(
+    'measures both bound captions at the declared cell',
+    measuresBothBoundCaptionsAtTheDeclaredCell,
+  );
   it('places the initial cursor on the one IC field', placesTheInitialCursorOnTheOneIcField);
   it(
     'reconciles the calendar control with the six split parts',
@@ -1137,27 +1253,170 @@ function paintsTheMapsetCaptionsAndNotTheReportNames(): void {
 }
 
 /**
- * Asserts the date range is present for the custom type and absent for a preset.
+ * Asserts the six date parts are painted for every report type, as the map paints them.
  *
- * Assumptions: the reference reads the six date parts only in the custom arm and derives the period
- * itself for the other two, so a preset has no range to key. The screen mounts and unmounts the block
- * rather than disabling it, which keeps the tab order of the confirmation and the actions below
- * unaffected -- an operator choosing monthly tabs from the selector straight to the confirmation,
- * exactly as they would on a terminal where the date fields sat unused.
- * @returns {Promise<void>} Resolves once both states have been asserted.
+ * ⚠️ Purpose: this REPLACES a case that asserted the opposite -- that the block was mounted only for the
+ * custom type -- and the replacement is the map's own reading rather than a relaxation. `app/bms/
+ * CORPT00.bms` declares all six unconditionally on rows 13 and 14: `SDTMM` L127, `SDTDD` L138,
+ * `SDTYYYY` L149, `EDTMM` L167, `EDTDD` L178, `EDTYYYY` L189, every one
+ * `ATTRB=(FSET,NORM,NUM,UNPROT)`. So the terminal painted them for a monthly report exactly as for a
+ * custom one, and the confirmation sat on row 19 whichever type was marked. The conditional mount was a
+ * target-side addition whose measured cost was the in-content submit control moving about 180 pixels
+ * each time the custom type was selected or cleared.
+ *
+ * ⚠️ Assumptions: the case asserts the parts are OPERABLE under a preset and not merely present, because
+ * present-but-disabled is the state this screen deliberately does not use -- a disabled control owes an
+ * explanation the message catalogue does not hold. Operable-and-ignored is the reference's own state:
+ * the monthly arm at `app/cbl/CORPT00C.cbl` L214-L237 and the yearly arm at L239-L254 derive their own
+ * bounds and never reference the map's date fields.
+ * @returns {Promise<void>} Resolves once both report types have been asserted.
  */
-async function mountsTheDateRangeOnlyForTheCustomType(): Promise<void> {
+async function paintsTheDateRangeForEveryReportType(): Promise<void> {
+  const operator = userEvent.setup();
+  render(reportsTree());
+
+  for (const prompt of [REPORT_TYPE_PROMPTS.monthly, REPORT_TYPE_PROMPTS.custom]) {
+    await chooseReportType(operator, prompt);
+    for (const caption of [REPORTS_CAPTIONS.startDate, REPORTS_CAPTIONS.endDate]) {
+      for (const part of ['month', 'day', 'year'] as const) {
+        const control = datePartControl(caption, part);
+        expect(control, `${caption} ${part} must be painted under "${prompt}"`).toBeInTheDocument();
+        expect(control, `${caption} ${part} must stay operable under "${prompt}"`).toBeEnabled();
+      }
+    }
+  }
+}
+
+/**
+ * Reports the form's keyable structure in document order, as an identity per control.
+ *
+ * Purpose: give {@link keepsTheFormStructureIdenticalAcrossReportTypes} something it can compare without
+ * layout. jsdom performs no layout, so the vertical position of a control cannot be read here at all;
+ * what CAN be read is the sequence of controls above it, and a control's position moves only when that
+ * sequence changes.
+ *
+ * ⚠️ Assumptions: the identity is composed from the tag, the input type and the element's own `id`, and it
+ * deliberately does NOT include any value. The values change when a report type is chosen -- that is the
+ * screen's own behaviour -- while the structure must not, so a signature carrying values would report a
+ * difference on every selection and assert nothing. The `id` is stable within one mounted tree because
+ * React's `useId` prefix is fixed per mount, which is what makes the sequences comparable.
+ *
+ * Assumptions: the form is reached from the submit control rather than by a role query, because
+ * `ui/src/screens/reports/index.tsx` composes the design system's `Form`, which renders a `form` element
+ * carrying no accessible name -- so there is nothing to query it by.
+ * @returns {readonly string[]} One identity per keyable control, in document order.
+ * @throws {Error} If the submit control is not inside a form, which would mean the screen no longer
+ *   composes its inputs through the design system's form primitive at all.
+ */
+function formControlSignature(): readonly string[] {
+  const form = inContentSubmitControl().closest('form');
+  if (!(form instanceof HTMLElement)) {
+    throw new Error('the submit control is not inside a design-system form');
+  }
+  return Array.from(form.querySelectorAll('input, button, select, textarea')).map(
+    /**
+     * Builds one control's structural identity.
+     * @param {Element} control - One keyable control inside the form.
+     * @returns {string} Its tag, input type and identifier, which together locate it in the sequence.
+     */
+    (control: Element): string =>
+      [control.tagName, control.getAttribute('type') ?? '', control.getAttribute('id') ?? ''].join(
+        ':',
+      ),
+  );
+}
+
+/**
+ * Asserts choosing a report type moves no control, which is what keeps the submit control still.
+ *
+ * ⚠️ Purpose: the structural guard for the measured defect that the in-content submit control jumped about
+ * 180 pixels each time the custom type was selected or cleared, because the date-range block was mounted
+ * conditionally. `app/bms/CORPT00.bms` paints that block unconditionally -- `SDTMM` L127, `SDTDD` L138,
+ * `SDTYYYY` L149, `EDTMM` L167, `EDTDD` L178, `EDTYYYY` L189 -- so on the terminal nothing below it moved
+ * when the marked type changed, and nothing may move here.
+ *
+ * ⚠️ Assumptions: this asserts a SEQUENCE and not a pixel, and that is the honest limit of what this
+ * runner can establish: jsdom computes no layout, so `getBoundingClientRect` answers zero for every
+ * element and a position assertion here would pass against the defect it exists to catch. A control's
+ * vertical position is determined by the controls above it, so an identical sequence across all three
+ * types is the property that makes the jump impossible. The pixel confirmation belongs to a browser pass;
+ * the selector for it is `form .ant-btn` -- the in-content submit control -- read as
+ * `getBoundingClientRect().top` under each of the three selections.
+ *
+ * Assumptions: the signature is asserted NON-EMPTY before the three are compared, because three empty
+ * sequences are equal and would satisfy the comparison while proving nothing. The lower bound is the ten
+ * keyable fields the map declares plus the two calendar controls and the two action controls this screen
+ * adds.
+ * @returns {Promise<void>} Resolves once all three selections have been compared.
+ */
+async function keepsTheFormStructureIdenticalAcrossReportTypes(): Promise<void> {
   const operator = userEvent.setup();
   render(reportsTree());
 
   await chooseReportType(operator, REPORT_TYPE_PROMPTS.monthly);
-  expect(
-    screen.queryByLabelText(`${accessibleCaption(REPORTS_CAPTIONS.startDate)} month`),
-  ).not.toBeInTheDocument();
+  const underMonthly = formControlSignature();
+  expect(underMonthly.length, 'the form must render its keyable controls').toBeGreaterThanOrEqual(
+    14,
+  );
+
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.yearly);
+  expect(formControlSignature(), 'choosing the yearly type may move no control').toEqual(
+    underMonthly,
+  );
 
   await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
-  expect(datePartControl(REPORTS_CAPTIONS.startDate, 'month')).toBeInTheDocument();
-  expect(datePartControl(REPORTS_CAPTIONS.endDate, 'year')).toBeInTheDocument();
+  expect(formControlSignature(), 'choosing the custom type may move no control').toEqual(
+    underMonthly,
+  );
+
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.monthly);
+  expect(formControlSignature(), 'clearing the custom type may move no control').toEqual(
+    underMonthly,
+  );
+}
+
+/**
+ * Asserts a range keyed under a preset never reaches the transport.
+ *
+ * ⚠️ Purpose: this is the safety half of the always-painted block, and without it the case above would
+ * license a real defect. The fields being operable under a preset is only faithful because the screen
+ * resolves a preset's period without reading them -- the reference's monthly arm derives the first of
+ * the current month through the last day of it at `app/cbl/CORPT00C.cbl` L217-L237 and never references
+ * `SDTMMI`. So a stale keyed range must be dropped, not transmitted.
+ *
+ * Assumptions: the range keyed is a VALID one, so a refusal cannot be what keeps it off the wire. What is
+ * asserted is that the submission carries no bounds at all, which is the empty range the service resolves
+ * from its own clock.
+ * @returns {Promise<void>} Resolves once the preset submission has been inspected.
+ */
+async function ignoresAKeyedRangeUnderAPreset(): Promise<void> {
+  arrangeStartedRun();
+  const operator = userEvent.setup();
+  render(reportsTree());
+
+  fillCustomRange(VALID_RANGE);
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.monthly);
+  await answerAndSubmit(operator, 'Y');
+
+  await waitFor(
+    /**
+     * Waits for the preset submission to have reached the transport.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(vi.mocked(submitTransactionReport)).toHaveBeenCalledTimes(1);
+    },
+  );
+  /*
+   * WHY : Assumptions: the bounds are asserted ABSENT rather than empty, which is the shape the screen's
+   *       own preset sentinel produces -- a frozen object with neither member -- so the two names are
+   *       omitted from the serialised body entirely and the service resolves the period from its own
+   *       clock. Asserting an empty string would pass a screen that transmitted two blank bounds, which
+   *       is a different request.
+   */
+  const request = submittedRequest();
+  expect(request.startDate, 'a preset must carry no start bound').toBeUndefined();
+  expect(request.endDate, 'a preset must carry no end bound').toBeUndefined();
 }
 
 /** Registers the cases about the report-type choice. */
@@ -1171,7 +1430,12 @@ function reportTypeSelectionCases(): void {
     'paints the mapset captions, not the report names',
     paintsTheMapsetCaptionsAndNotTheReportNames,
   );
-  it('mounts the date range only for the custom type', mountsTheDateRangeOnlyForTheCustomType);
+  it('paints the date range for every report type', paintsTheDateRangeForEveryReportType);
+  it(
+    'keeps the form structure identical across report types',
+    keepsTheFormStructureIdenticalAcrossReportTypes,
+  );
+  it('ignores a keyed range under a preset', ignoresAKeyedRangeUnderAPreset);
 }
 
 describe('the report-type choice is one mutually exclusive group', reportTypeSelectionCases);
@@ -1864,12 +2128,25 @@ function advertisesExactlyTheTwoKeysTheReferenceDispatches(): void {
 }
 
 /**
- * Asserts the two legend controls carry the emphasis the design system maps to their actions.
+ * Asserts each legend control carries the emphasis its DECLARED RISK resolves to.
  *
- * Assumptions: the mapping is published as `PRIMARY_ACTION_AIDS` in `ui/src/layout/PfKeyBar.tsx`, which
- * fixes primary emphasis to Enter and PF5 and the default to every other key. This screen paints Enter
- * and PF3, so exactly one control takes the primary emphasis -- and the expectation is derived from
- * that published list rather than restated, so a change to the mapping reaches this case.
+ * ⚠️ Refactoring Rationale: this asserted the emphasis against `PRIMARY_ACTION_AIDS`, the attention-
+ * identifier table in `ui/src/layout/PfKeyBar.tsx`. The screen now declares a risk per key and
+ * `pfKeyEmphasisFor` resolves the paint from that instead, falling back to the table only for a key
+ * that declares none -- so the table is no longer what governs this bar and asserting against it would
+ * keep passing after the declaration was removed for the wrong reason. The AID table is still read
+ * below, but as the statement that the two agree HERE rather than as the source of the expectation.
+ *
+ * ⚠️ Assumptions: the two resolutions genuinely do agree on this screen -- `mutating` and the table both
+ * put Enter on primary, `read-only` and the table both put PF3 on default -- so no assertion on the
+ * rendered class can distinguish them, and this case does not claim to. What it does pin is the one
+ * direction that IS distinguishable: `'destructive'` resolves to `danger: true`, so the absence of the
+ * dangerous class is the assertion that the screen has classified a report submission as a write and
+ * not as a destruction. Submitting a run spends service capacity and produces a document; it deletes
+ * no record and moves no money, which is the boundary `ui/src/layout/PfKeyBar.tsx` draws for that
+ * level. The busy channel is where the declaration itself becomes observable -- see
+ * {@link theOutstandingKeyReportsBusyAndBackIsWithheld}, which cannot pass unless the entry carries
+ * the members this one describes.
  *
  * Trade-offs: the emphasis is read from the design system's own class names, which is an implementation
  * detail of the component library rather than a public contract. It is accepted because the alternative
@@ -1879,7 +2156,7 @@ function advertisesExactlyTheTwoKeysTheReferenceDispatches(): void {
  * @throws {Error} If the legend rendered fewer than its two controls, for the same reason the
  *   case above throws rather than asserting non-null.
  */
-function givesEnterThePrimaryEmphasisAndBackTheDefault(): void {
+function takesEachKeyEmphasisFromTheRiskItDeclares(): void {
   render(reportsTree());
 
   const controls = within(keyLegend()).getAllByRole('button');
@@ -1894,7 +2171,259 @@ function givesEnterThePrimaryEmphasisAndBackTheDefault(): void {
   expect(PRIMARY_ACTION_AIDS).not.toContain(backAid);
 
   expect(enterControl.className).toContain('ant-btn-primary');
+  // WHY : Assumptions: the DANGEROUS variant is asserted absent, which is the half of this case the
+  //       risk declaration is observable through. `pfKeyEmphasisFor` resolves `'destructive'` to
+  //       `{type:'primary', danger:true}` and `PfKeyBar` additionally wraps such a control in
+  //       `destructiveFocusTheme`, so a screen that over-classified its submit key would render the
+  //       strongest warning in the application on a key whose worst outcome is an unread report.
+  expect(enterControl.className).not.toContain('ant-btn-dangerous');
   expect(backControl.className).toContain('ant-btn-default');
+  expect(backControl.className).not.toContain('ant-btn-dangerous');
+}
+
+/**
+ * Arms the submission with a promise this case settles, so the busy window is observable.
+ *
+ * Purpose: the two cases below assert what the screen does WHILE a submission is outstanding, and a
+ * resolved stub closes that window inside the same task that opened it -- leaving nothing to observe.
+ *
+ * ⚠️ Assumptions: the status read is armed at the same time, for the reason {@link arrangeStartedRun}
+ * records: a started run is immediately followed, and an unstubbed follow-up rejects inside a React
+ * effect and unmounts the tree, so a later assertion in the same case fails on an empty document
+ * instead of on the behaviour under test.
+ * @returns {(outcome: ReportSubmissionOutcome) => void} A function that settles the held submission
+ *   with the outcome the service would have answered.
+ */
+function deferTheSubmission(): (outcome: ReportSubmissionOutcome) => void {
+  let release: (outcome: ReportSubmissionOutcome) => void =
+    /**
+     * Stands in for the resolver until the promise's own executor supplies the real one.
+     *
+     * Assumptions: the placeholder is never the value returned. A promise executor runs synchronously
+     * inside the constructor, so the capture below has replaced this by the time the helper returns.
+     * @returns {void} Nothing; the placeholder discards the settling value.
+     */
+    (): void => undefined;
+  vi.mocked(submitTransactionReport).mockReturnValue(
+    new Promise<ReportSubmissionOutcome>(
+      /**
+       * Captures the resolver so the case can settle the submission when it chooses.
+       * @param {(outcome: ReportSubmissionOutcome) => void} resolve - The promise's own resolver.
+       * @returns {void} Nothing; the captured resolver is the helper's result.
+       */
+      (resolve: (outcome: ReportSubmissionOutcome) => void): void => {
+        release = resolve;
+      },
+    ),
+  );
+  vi.mocked(readReportExecution).mockResolvedValue(succeededRun());
+  return release;
+}
+
+/**
+ * The key whose turn is outstanding reports busy; the key being withheld reports disabled.
+ *
+ * ⚠️ Refactoring Rationale: both legend controls were greyed for the duration of a submission, because
+ * the screen passed `enabled: !busy` to `usePfKeys`. That conflated two different events and cost the
+ * operator the control they had just pressed: a greyed control leaves the tab order at the one moment a
+ * keyboard operator is most likely to be pressing keys, and it says the key does not work when the
+ * truth is that they were early. `ui/src/layout/PfKeyBar.tsx` records the reference behaviour -- a 3270
+ * ANNOUNCED a running task and withdrew nothing -- which is what the busy channel expresses.
+ *
+ * ⚠️ Assumptions: PF3 keeps the DISABLED channel and the split is the point of this case. The busy
+ * channel says "the key you pressed is running"; PF3 is not running, it is unavailable while a
+ * submission it has nothing to do with completes, and greying it is the honest statement of that. The
+ * reference could not have taken PF3 mid-turn in any case: a 3270 accepted no attention identifier
+ * between sending the map and receiving the reply.
+ *
+ * ⚠️ Assumptions: `ui/src/layout/usePfKeys.ts` tests `disabled` BEFORE `busy`, so an entry declaring both
+ * resolves as disabled and the enabled assertion below would fail. That ordering is why the screen
+ * replaced Enter's gate rather than adding to it, and asserting the enabled state here is what stops a
+ * future edit reinstating the pair.
+ *
+ * ⚠️ Assumptions: both channels decline in SILENCE, which is asserted by the band staying empty rather
+ * than reading the shared invalid-key sentence. Withdrawing the hook-level gate exposed the screen's
+ * invalid-key sink to keys pressed inside the busy window for the first time, so the silence is a
+ * property of the sink's own guards now and not a side effect of the gate.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function theOutstandingKeyReportsBusyAndBackIsWithheld(): Promise<void> {
+  const releaseSubmission = deferTheSubmission();
+  const operator = userEvent.setup();
+  render(reportsTree());
+
+  /**
+   * Reads the Enter legend control out of the rendered legend on each call.
+   *
+   * Assumptions: the control is re-queried rather than captured once, because the assertions below span
+   * the busy transition and a captured node would be asserted against after it had been replaced.
+   * @returns {HTMLElement} The legend control the reference labels `ENTER=Continue`.
+   */
+  const enterControl = (): HTMLElement =>
+    within(keyLegend()).getByRole('button', { name: REPORTS_KEY_LABELS.ENTER });
+  /**
+   * Reads the back legend control out of the rendered legend on each call.
+   *
+   * Assumptions: re-queried for the same reason as the Enter control -- the assertions span the busy
+   * transition, and this control is the one whose disabled state changes across it.
+   * @returns {HTMLElement} The legend control the reference labels `F3=Back`.
+   */
+  const backControl = (): HTMLElement =>
+    within(keyLegend()).getByRole('button', { name: REPORTS_KEY_LABELS.PFK03 });
+
+  expect(enterControl()).toHaveAttribute('aria-busy', 'false');
+
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+  fillCustomRange(VALID_RANGE);
+  await answerAndSubmit(operator, 'Y');
+
+  expect(enterControl()).toBeEnabled();
+  expect(enterControl()).toHaveAttribute('aria-busy', 'true');
+  expect(backControl()).toBeDisabled();
+
+  // WHY : Assumptions: the busy control keeps its caption, so its accessible name is unchanged by the
+  //       affordance -- a name that changed mid-turn would leave a screen-reader operator unable to
+  //       find the control they had just pressed. The query above is BY that name, so this holds it.
+  expect(enterControl().textContent).toBe(REPORTS_KEY_LABELS.ENTER);
+
+  // WHY : Assumptions: a second Enter inside the window takes NO further turn, which is what the
+  //       synchronous ref behind the busy predicate is for, and paints no sentence.
+  await pressPfKey(operator, 'ENTER');
+  expect(vi.mocked(submitTransactionReport)).toHaveBeenCalledTimes(1);
+  expect(bandText()).toBe('');
+
+  // WHY : Assumptions: an UNMAPPED key inside the window is silent too. This is the case the screen's
+  //       invalid-key guard was added for: with the hook-level gate withdrawn the sink is reached, and
+  //       without the guard a mid-submission F9 would paint 'Invalid key pressed.' on a screen that
+  //       painted nothing for it before.
+  await operator.keyboard('{F9}');
+  expect(bandText()).toBe('');
+
+  releaseSubmission(startedRun());
+  await waitFor(
+    /**
+     * Waits for the settled submission to release both keys.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(enterControl()).toHaveAttribute('aria-busy', 'false');
+    },
+  );
+  expect(backControl()).toBeEnabled();
+}
+
+/**
+ * The busy window is announced in words, from a region mounted on every turn, and only once.
+ *
+ * ⚠️ Refactoring Rationale: the screen stated its busy window only as a spinner and an `aria-busy`
+ * attribute -- a state with no remedy attached, so an operator hears that a control is working and is
+ * told nothing about what to do. `REQUEST_IN_PROGRESS` is the authored sentence for it.
+ *
+ * ⚠️ Assumptions: the region is asserted PRESENT AND EMPTY before the turn, and that is the load-bearing
+ * half of this case rather than a completeness check. A `role="status"` element inserted at the moment
+ * it acquires text is frequently not announced at all, because the assistive reader has no live region
+ * to observe until the text is already in it; one present from the first render and changed in place is
+ * announced. A future edit that rendered the region conditionally would put the right words in the DOM
+ * and say nothing out loud, and only the empty-then-filled sequence catches that.
+ *
+ * ⚠️ Assumptions: the design system's busy WRAPPER is asserted to carry `aria-live="off"`, and that is
+ * the other half of announcing this window once. `antd/lib/spin/index.js` L131-L133 puts
+ * `aria-live="polite"` on the wrapper's root and spreads a caller's props after it, so a wrapper around
+ * this form would otherwise re-announce every character of a ten-control form on each re-render --
+ * measured elsewhere in this application at 193 characters. `WRAPPED_BUSY_REGION_PROPS` is the
+ * suppression and this is the screen-level proof that it is applied here.
+ *
+ * Assumptions: row 23 is asserted to stay EMPTY through the window rather than to carry the busy
+ * sentence. That band is a rule-T8 parity surface holding this program's own transcribed sentences, and
+ * `CORPT00C` declares none for "working"; the authored sentence belongs to the scoped status region.
+ * @returns {Promise<void>} Resolves once the assertions have run.
+ */
+async function announcesTheBusyWindowWithoutReAnnouncingTheForm(): Promise<void> {
+  const releaseSubmission = deferTheSubmission();
+  const operator = userEvent.setup();
+  render(reportsTree());
+
+  /**
+   * Reads the scoped busy region out of the rendered tree on each call.
+   *
+   * Assumptions: the region is re-queried rather than captured once, because the assertions below span
+   * two state changes and a captured node would be asserted against after it had been replaced.
+   * @returns {HTMLElement} The always-mounted status region the screen announces the busy window in.
+   */
+  const announcement = (): HTMLElement => screen.getByTestId(BUSY_ANNOUNCEMENT_TEST_ID);
+  expect(announcement()).toHaveAttribute('role', 'status');
+  expect(announcement().textContent).toBe('');
+
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+  fillCustomRange(VALID_RANGE);
+  await answerAndSubmit(operator, 'Y');
+
+  expect(announcement().textContent).toBe(REQUEST_IN_PROGRESS);
+  expect(bandText()).toBe('');
+
+  /*
+   * WHY : Assumptions: the wrapper is located by the two ARIA attributes it is the only element to
+   *       carry TOGETHER, rather than by a design-system class name. `antd/lib/spin/index.js` L116-L132
+   *       puts `aria-live` and `aria-busy` on the same root and spreads a caller's props after both, so
+   *       the pair is the wrapper's own signature; the class that root takes changed between major
+   *       versions of the library and the attributes did not. The legend's busy control also carries
+   *       `aria-busy`, which is why the selector requires `aria-live` as well.
+   */
+  const wrappers = window.document.querySelectorAll('[aria-live][aria-busy="true"]');
+  expect(wrappers).toHaveLength(1);
+  const wrapper = wrappers[0];
+  if (!(wrapper instanceof HTMLElement)) {
+    throw new Error('the form is not wrapped by the design system\u2019s busy wrapper');
+  }
+  expect(wrapper).toHaveAttribute('aria-live', 'off');
+  // WHY : Assumptions: the wrapper is proven to be around THE FORM by containment of a form control,
+  //       because a suppression applied to some other subtree would satisfy the attribute assertion
+  //       while the form stayed a polite live region.
+  expect(wrapper).toContainElement(confirmationControl());
+
+  releaseSubmission(startedRun());
+  await waitFor(
+    /**
+     * Waits for the settled submission to clear the announcement.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(announcement().textContent).toBe('');
+    },
+  );
+  // WHY : Assumptions: the region SURVIVES the turn rather than unmounting with the busy state, so the
+  //       next turn changes text in a region the reader is already observing.
+  expect(announcement()).toBeInTheDocument();
+}
+
+/**
+ * This map declares no row 22, so the shell reserves none -- and the screen composes no band itself.
+ *
+ * ⚠️ Assumptions: the absence is MEASURED from the mapset and not assumed. `grep -n "POS=(2[0-4]"
+ * app/bms/CORPT00.bms` returns exactly two fields -- `ERRMSG` at `POS=(23,1) LENGTH=78` and the legend
+ * at `POS=(24,1)` -- and `grep -n INFOMSG app/bms/CORPT00.bms` returns nothing. A screen whose mapset
+ * DOES declare row 22 must publish `information: { text: null }` on every turn so the row cannot appear
+ * and disappear under the operator; this one must omit the member, or it holds open a line the map
+ * never spends and pushes the legend down one row on every turn.
+ *
+ * ⚠️ Assumptions: the row-23 band is additionally asserted to sit OUTSIDE `<main>`, in the shell's own
+ * pinned zone. Two sibling screens were measured composing a band of their own inside the content
+ * region -- one 410 pixels below the fold, one fully occluded by the sticky pinned zone -- so a screen
+ * that publishes through the shell and a screen that paints its own band are indistinguishable by text
+ * alone. The containment is what tells them apart, and it needs no layout to assert.
+ * @returns {void} Nothing; the case asserts.
+ * @throws {Error} If the shell rendered no message band at all, which would make the containment
+ *   assertion below vacuous rather than false.
+ */
+function reservesNoInformationRowAndLeavesTheBandsToTheShell(): void {
+  render(reportsTree());
+
+  expect(screen.queryByTestId(INFORMATION_BAND_TEST_ID)).toBeNull();
+
+  const band = screen.getByTestId(MESSAGE_BAND_TEST_ID);
+  expect(band.closest('main')).toBeNull();
+  const pinnedZone = screen.getByTestId(SHELL_PINNED_ZONE_TEST_ID);
+  expect(pinnedZone).toContainElement(band);
 }
 
 /**
@@ -2045,8 +2574,20 @@ function keyBindingCases(): void {
     advertisesExactlyTheTwoKeysTheReferenceDispatches,
   );
   it(
-    'gives Enter the primary emphasis and back the default',
-    givesEnterThePrimaryEmphasisAndBackTheDefault,
+    'takes each key emphasis from the risk it declares',
+    takesEachKeyEmphasisFromTheRiskItDeclares,
+  );
+  it(
+    'reports busy on the outstanding key and withholds back',
+    theOutstandingKeyReportsBusyAndBackIsWithheld,
+  );
+  it(
+    'announces the busy window without re-announcing the form',
+    announcesTheBusyWindowWithoutReAnnouncingTheForm,
+  );
+  it(
+    'reserves no information row and leaves the bands to the shell',
+    reservesNoInformationRowAndLeavesTheBandsToTheShell,
   );
   it('binds Enter and back to real key events', bindsEnterAndBackToRealKeyEvents);
   it(
@@ -2252,3 +2793,675 @@ function sessionRoutingAndMarkCases(): void {
 }
 
 describe('session, routing and per-field refusals', sessionRoutingAndMarkCases);
+
+/*
+ * WHY : Assumptions: the two constants below MIRROR module-private values in
+ *       `ui/src/screens/reports/index.tsx` -- `STATUS_POLL_INTERVAL_MS` and
+ *       `MAX_AUTOMATIC_STATUS_READS` -- rather than importing them, because the screen exports neither.
+ *       `ui/src/screens/reports/reports.test.tsx` mirrors the same pair at its L145 and L154, so this
+ *       follows the established practice in this tree rather than introducing a second one.
+ * WHY : Trade-offs: a mirrored constant can drift from the value it mirrors. The exposure is bounded
+ *       because drift can only make {@link doesNotBuyAFurtherBudgetWithAManualRead} advance a clock too
+ *       little or too far, and both directions FAIL the case -- too little leaves the budget unspent so
+ *       the notice never appears, too far changes nothing because the chain has already stopped. Neither
+ *       direction can turn the re-arming defect this case exists to catch into a pass, which is the
+ *       property that matters. Widening the screen's export surface to carry a polling interval was the
+ *       alternative; it publishes an implementation detail to every consumer to save one line here.
+ */
+const STATUS_POLL_INTERVAL_MS = 5000;
+const AUTOMATIC_READ_BUDGET = 60;
+
+/**
+ * Builds a status that reports the started run as still going.
+ *
+ * Assumptions: this is the counterpart of {@link succeededRun}, which settles on its first read and so
+ * cannot exercise the automatic chain at all. A RUNNING status is what keeps the chain arming, and it is
+ * therefore the only status under which the budget can be reached.
+ * @returns {ReportExecutionStatus} A run that has not settled and carries no document.
+ */
+function runningRun(): ReportExecutionStatus {
+  return { ...succeededRun(), status: 'RUNNING', stoppedAt: null };
+}
+
+/**
+ * Reads the operator's own status-read control out of the execution panel.
+ *
+ * ⚠️ Assumptions: the control is found by its LABEL and then climbed to, and NOT by role and accessible
+ * name. Measured here: a role-and-name query for `Refresh status` failed against a control that was
+ * present, enabled and correctly labelled, because Ant Design keeps a `Button`'s loading indicator in the
+ * tree through its leave animation and that indicator carries `aria-label="loading"` -- so the computed
+ * name is `loading Refresh status` for as long as the animation lasts. The failure reads as a missing
+ * control and names neither the animation nor the indicator, which is why the reason is recorded rather
+ * than the query merely being changed. `ui/src/screens/reports/reports.test.tsx` reaches the same control
+ * the same way for the same reason.
+ * @returns {HTMLElement} The refresh control.
+ * @throws {Error} If the panel is not mounted or paints no such control, so a missing panel is named
+ *   here rather than surfacing as an unsatisfiable query inside a case.
+ */
+function refreshControl(): HTMLElement {
+  const labelled = screen.getByText(REPORT_RUN_MESSAGES.REFRESH_CONTROL);
+  const control = labelled.closest('button');
+  if (control === null) {
+    throw new Error('the run region offered no refresh control');
+  }
+  return control;
+}
+
+/**
+ * Asserts a refused turn leaves the reference of an already-started run on the screen.
+ *
+ * Purpose: the regression guard for the reported defect that a failed validation unmounted the whole
+ * execution panel and destroyed the run reference of a report that was already submitted. The panel is
+ * gated on the held submission, and both the refusal path and the field-initialisation path used to
+ * clear it, so any subsequent mistyped turn discarded the handle.
+ *
+ * ⚠️ Assumptions: the execution name is the thing asserted, and not merely the panel's heading. The name
+ * is the only key `readReportExecution` accepts and the screen paints it nowhere else, so it is the value
+ * whose loss is unrecoverable -- a panel that survived without it would satisfy a heading-only assertion
+ * while leaving the operator exactly as unable to follow the run.
+ *
+ * ⚠️ Assumptions: the refusal asserted is a real one taken from the reference -- the `WHEN OTHER` arm at
+ * `app/cbl/CORPT00C.cbl` L437-L442 refusing a turn with no report type marked -- because the started run
+ * clears the type behind it. That is the reference's own `INITIALIZE-ALL-FIELDS` at L447 running before
+ * the acknowledgement at L449-L452, so pressing Enter again on the emptied form is the exact sequence an
+ * operator reaches this state by, rather than a state contrived for the case.
+ * @returns {Promise<void>} Resolves once the surviving reference has been asserted.
+ */
+async function keepsTheRunReferenceThroughARefusedTurn(): Promise<void> {
+  arrangeStartedRun();
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+  fillCustomRange(VALID_RANGE);
+  await answerAndSubmit(operator, 'Y');
+
+  await screen.findByText(STARTED_RUN_NAME);
+
+  await pressPfKey(operator, 'ENTER');
+  await waitFor(
+    /**
+     * Waits for the second, refused turn to reach the row-23 band.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(bandText()).toBe(REPORT_MESSAGES.SELECT_A_REPORT_TYPE_TO_PRINT_REPORT);
+    },
+  );
+
+  expect(
+    screen.getByText(STARTED_RUN_NAME),
+    'a refused turn must not destroy the reference of a run the service already accepted',
+  ).toBeInTheDocument();
+  // WHY : Assumptions: the panel's own heading is asserted too, so the case fails distinguishably on a
+  //       name that survived inside an otherwise unmounted region.
+  expect(screen.getByText(REPORT_RUN_MESSAGES.HEADING)).toBeInTheDocument();
+  // WHY : Assumptions: the refused turn submitted nothing, so the surviving reference is the FIRST run's
+  //       and not a second run this case accidentally started.
+  expect(vi.mocked(submitTransactionReport)).toHaveBeenCalledTimes(1);
+}
+
+/**
+ * Asserts the operator's own read does not buy the screen a further automatic budget.
+ *
+ * Purpose: the regression guard for the reported defect of an unbounded status chain -- an observed 71
+ * automatic reads against a documented bound of sixty, because the refresh control reset the count to
+ * zero and bought another sixty on every press. The bound and its announcement were already present; the
+ * defect was that a single press made both untrue.
+ *
+ * ⚠️ Assumptions: the case asserts BOTH halves, and one without the other is not the contract. The read
+ * must still happen -- an operator who can no longer ask what became of a run has been given a worse
+ * screen, not a bounded one -- and the automatic chain must stay stopped afterwards. So the count is
+ * asserted immediately after the press and again after a further span of the clock.
+ *
+ * ⚠️ Assumptions: the notice is asserted as still present AFTER the manual read, which is the subtle half.
+ * Every successful read clears the notice before the chain is consulted again, so a screen that re-armed
+ * would clear it and not repaint it -- leaving the operator looking at a screen that had silently resumed
+ * reading. Repainting it is what keeps the sentence true of the state it describes.
+ * @returns {Promise<void>} Resolves once both halves have been asserted.
+ */
+async function doesNotBuyAFurtherBudgetWithAManualRead(): Promise<void> {
+  vi.mocked(submitTransactionReport).mockResolvedValue(startedRun());
+  vi.mocked(readReportExecution).mockResolvedValue(runningRun());
+  /*
+   * WHY : ⚠️ Assumptions: the clock is installed BEFORE the turn is keyed, and the two orders are not
+   *       interchangeable. Installing it afterwards leaves the first read's follow-up timer armed on the
+   *       REAL clock -- `vi.useFakeTimers()` replaces the timer functions but does not adopt what is
+   *       already scheduled -- so `advanceTimersByTimeAsync` finds nothing pending and the chain sits at
+   *       one read however far the fake clock is moved. Measured: the case reported one read where
+   *       sixty-one were expected, and the cause was the install point rather than the advance.
+   * WHY : ⚠️ Assumptions: the turn is therefore keyed with `fireEvent` alone and not with the `userEvent`
+   *       helpers the rest of this file uses, which is the practice the sibling lifecycle suite follows
+   *       for the same reason at its own `submitMonthlyReport`. `user-event` awaits an internal delay
+   *       between every step, so under an installed fake clock it either throws (no `advanceTimers`) or
+   *       waits on a clock only the case advances (with one) -- and both were measured here as a sixty
+   *       second timeout rather than as an assertion. `fireEvent` dispatches synchronously and consults
+   *       no timer, so the whole turn lands before the first `act` scope opens.
+   * WHY : Alternatives Considered: awaiting `findByText` for the run reference, as the real-clock cases
+   *       above do. Rejected on the same measurement -- its `waitFor` polls on a timer this case owns, so
+   *       the wait cannot progress until the case advances the clock and the case cannot advance past a
+   *       wait it is blocked on. Flushing at zero inside `act` and then querying synchronously reaches
+   *       the same state without that circularity.
+   */
+  vi.useFakeTimers();
+  try {
+    render(reportsTree());
+    fireEvent.click(screen.getByRole('radio', { name: REPORT_TYPE_PROMPTS.custom }));
+    fillCustomRange(VALID_RANGE);
+    fireEvent.change(confirmationControl(), { target: { value: 'Y' } });
+    fireEvent.keyDown(window.document, { key: 'Enter' });
+
+    /*
+     * WHY : Assumptions: the clock is flushed at zero before the span is advanced, for the reason the
+     *       sibling lifecycle suite records at its own bound case: the first read is issued with no timer
+     *       at all, and the timer arming the second is armed by that read's settlement -- so a single
+     *       combined advance moves the clock past the second read's due time while nothing is yet
+     *       scheduled, and the whole chain sits unrun.
+     */
+    await act(advanceFakeClock(0));
+    expect(
+      screen.getByText(STARTED_RUN_NAME),
+      'the run must have started before its reading can be counted',
+    ).toBeInTheDocument();
+    await act(advanceFakeClock(STATUS_POLL_INTERVAL_MS * (AUTOMATIC_READ_BUDGET + 2)));
+
+    const spentBudget = AUTOMATIC_READ_BUDGET + 1;
+    expect(
+      vi.mocked(readReportExecution),
+      'the immediate read plus the budget is the whole of the automatic chain',
+    ).toHaveBeenCalledTimes(spentBudget);
+    expect(screen.getByText(REPORT_RUN_MESSAGES.AUTOMATIC_UPDATES_STOPPED)).toBeInTheDocument();
+
+    fireEvent.click(refreshControl());
+    await act(advanceFakeClock(0));
+    expect(
+      vi.mocked(readReportExecution),
+      'the operator must still be answered once per press with the budget spent',
+    ).toHaveBeenCalledTimes(spentBudget + 1);
+
+    await act(advanceFakeClock(STATUS_POLL_INTERVAL_MS * 4));
+    expect(
+      vi.mocked(readReportExecution),
+      'a manual read must not re-arm the automatic chain',
+    ).toHaveBeenCalledTimes(spentBudget + 1);
+    expect(
+      screen.getByText(REPORT_RUN_MESSAGES.AUTOMATIC_UPDATES_STOPPED),
+      'the notice must still describe the state the screen is actually in',
+    ).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+/**
+ * Builds a step that advances the fake clock inside an `act` scope.
+ *
+ * Assumptions: a builder rather than a bare call, because `act` takes a callback and every rationale
+ * comment in this file has to attach to a named function -- `ui/eslint.config.js` configures
+ * `jsdoc/require-jsdoc` with the `* > ArrowFunctionExpression` selector, so an inline arrow argument owes
+ * its own block.
+ * @param {number} span - Milliseconds to advance.
+ * @returns {() => Promise<void>} A step that advances the clock and lets the settlements run.
+ */
+function advanceFakeClock(span: number): () => Promise<void> {
+  /**
+   * Advances the clock and yields so the reads it releases can settle.
+   * @returns {Promise<void>} Resolves once the released settlements have run.
+   */
+  return async function advanceAndSettle(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(span);
+  };
+}
+
+/** Registers the cases about a submitted run outliving the form that produced it. */
+function runReferencePersistenceCases(): void {
+  beforeEach(anchorObservedServerInstant);
+  afterEach(discardObservedServerInstant);
+
+  it('keeps the run reference through a refused turn', keepsTheRunReferenceThroughARefusedTurn);
+  it(
+    'does not buy a further automatic budget with a manual read',
+    doesNotBuyAFurtherBudgetWithAManualRead,
+  );
+}
+
+describe('a submitted run outlives the form that produced it', runReferencePersistenceCases);
+
+/**
+ * Returns the in-content submit control, the one the consent balloon is anchored to.
+ *
+ * ⚠️ Assumptions: the shell renders the SAME label on the row-24 legend control, so a query by name alone
+ * matches two elements and throws. The legend is a `navigation` landmark, so the two are told apart by
+ * landmark membership rather than by document order -- order would silently follow a layout change,
+ * whereas the landmark is the thing that actually distinguishes them.
+ * @returns {HTMLElement} The in-content submit control.
+ * @throws {Error} If no such control sits outside the legend, so its absence is named here.
+ */
+function inContentSubmitControl(): HTMLElement {
+  const legend = keyLegend();
+  const outside = screen.getAllByRole('button', { name: REPORTS_KEY_LABELS.ENTER }).find(
+    /**
+     * Selects the control the legend does not contain.
+     * @param {HTMLElement} candidate - One control carrying the shared label.
+     * @returns {boolean} `true` when the legend does not contain it.
+     */
+    (candidate: HTMLElement): boolean => !legend.contains(candidate),
+  );
+  if (outside === undefined) {
+    throw new Error('the screen rendered no in-content submit control outside the legend');
+  }
+  return outside;
+}
+
+/**
+ * The label the consent balloon's accepting control carries, which is the reference's own answer.
+ *
+ * ⚠️ Refactoring Rationale: this was the design system's stock `'OK'`, which pinned the component
+ * library's vocabulary into a screen that asks its question in the mapset's. The balloon's title is the
+ * 59-character prompt at `app/bms/CORPT00.bms` L200-L205 and its description is that map's `'(Y/N)'`
+ * hint at L213-L217, so the accepting control now carries the character the affirmative arm accepts --
+ * `WHEN CONFIRMI OF CORPT0AI = 'Y' OR 'y'` at `app/cbl/CORPT00C.cbl` L478 -- and which the screen writes
+ * into the one-position field before submitting.
+ *
+ * Assumptions: read from the shared `CONFIRMATION_ANSWERS` constant rather than retyped, so this file
+ * cannot drift from the answer the application sends. The screen labels its control from its own local
+ * copy of the same character for a reason it records; both hold `'Y'`, and the constant read here is the
+ * one published for a caller to check against.
+ *
+ * ⚠️ Assumptions: the DISMISSING control keeps the stock `'Cancel'`, asserted as a literal at the one case
+ * that clicks it. That is a decision and not an omission: keying `N` performs `INITIALIZE-ALL-FIELDS` at
+ * `app/cbl/CORPT00C.cbl` L480-L483 and clears all ten inputs, whereas dismissing the balloon leaves every
+ * keyed value in place -- which {@link leavesTheKeyedRangeIntactWhenTheBalloonIsDismissed} asserts -- so
+ * a caption of `N` would promise the reference's clearing action and not perform it.
+ */
+const CONSENT_ACCEPT_LABEL: string = CONFIRMATION_ANSWERS.CONFIRM;
+
+/**
+ * Asserts the consent balloon is withheld while the edit chain is still refusing.
+ *
+ * Purpose: the regression guard for the reported defect that the balloon opened on the press of its
+ * control, so a dialogue asking the operator to consent stood over a form whose required dates were
+ * blank -- measured as covering the `End Date :` caption and its first two inputs -- with no validation
+ * shown.
+ *
+ * ⚠️ Assumptions: the oracle is that asking is the LAST thing a turn does, not the first. All three arms
+ * of the outer `EVALUATE` in `app/cbl/CORPT00C.cbl` run their edits and only then `PERFORM
+ * SUBMIT-JOB-TO-INTRDR` -- L238 monthly, L255 yearly, L435 custom -- and the blank-answer test at
+ * L464-L472 is that paragraph's first statement. So a state in which the confirmation is being asked
+ * while the range is still unedited does not exist in the reference and must not exist here.
+ *
+ * Assumptions: the case asserts the refusal DID reach the band, so it fails distinguishably. A screen
+ * that neither refused nor asked would satisfy an absence-only assertion while doing nothing at all.
+ * @returns {Promise<void>} Resolves once the withheld balloon has been asserted.
+ */
+async function withholdsTheConsentBalloonUntilTheEditsPass(): Promise<void> {
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+
+  // WHY : Assumptions: the range is left blank, which is the state the tester reached -- the balloon was
+  //       measured standing over the very inputs it had not been given.
+  await operator.click(inContentSubmitControl());
+
+  await waitFor(
+    /**
+     * Waits for the blank-part refusal to reach the row-23 band.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(bandText()).not.toBe('');
+    },
+  );
+  expect(
+    screen.queryByText(CONSENT_ACCEPT_LABEL),
+    'consent must not be offered over a form the screen has just refused',
+  ).toBeNull();
+  expect(vi.mocked(submitTransactionReport)).not.toHaveBeenCalled();
+}
+
+/**
+ * Asserts the balloon is offered once the edits pass and the confirmation is unanswered.
+ *
+ * Purpose: the other direction of the same gate. A gate that never opened would pass the case above while
+ * removing the pointer operator's only consent affordance, so both directions are held.
+ *
+ * ⚠️ Assumptions: the state reached is the reference's own asking state -- the range is complete and the
+ * confirmation character is blank, which is exactly the condition `SUBMIT-JOB-TO-INTRDR` paints
+ * `Please confirm ...` for at L464-L472. The band is asserted to carry that sentence as well as the
+ * balloon being present, because the two are the same question on two channels and the reference paints
+ * the band one.
+ * @returns {Promise<void>} Resolves once the offered balloon has been asserted.
+ */
+async function offersTheConsentBalloonOnceTheEditsPass(): Promise<void> {
+  arrangeStartedRun();
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+  fillCustomRange(VALID_RANGE);
+
+  await operator.click(inContentSubmitControl());
+
+  const acceptControl = await screen.findByText(CONSENT_ACCEPT_LABEL);
+  expect(acceptControl).toBeInTheDocument();
+  expect(bandText()).toBe(
+    formatMessageTemplate(MESSAGE_TEMPLATES.PLEASE_CONFIRM_TO_PRINT_REPORT, {
+      'WS-REPORT-NAME': REPORT_TYPE_NAMES.custom,
+    }),
+  );
+  expect(vi.mocked(submitTransactionReport)).not.toHaveBeenCalled();
+
+  /*
+   * WHY : ⚠️ Assumptions: the cursor is on the CONFIRMATION FIELD once the question is open, and nothing
+   *       inside the balloon has taken it. That is the reference's own placement -- `SUBMIT-JOB-TO-INTRDR`
+   *       moves `-1` into `CONFIRML` at `app/cbl/CORPT00C.cbl` L470 before re-sending the map -- and it is
+   *       what makes a bare Enter on a freshly opened balloon an answer to the field rather than an
+   *       activation of the accepting control. A measured trap on a sibling screen was a focus call placed
+   *       AFTER the prompt opened, which stole focus from the safe choice and left it on the committing
+   *       one; the assertion below is the structural form of that guard for this screen.
+   * WHY : Assumptions: the accepting control is asserted NOT to hold focus rather than the field alone
+   *       being asserted to hold it, because the two are separate failures: a library upgrade that
+   *       autofocused its own confirm button would move focus without unfocusing anything else the case
+   *       names.
+   */
+  expect(window.document.activeElement).toBe(confirmationControl());
+  expect(window.document.activeElement).not.toBe(acceptControl);
+}
+
+/**
+ * Asserts dismissing the balloon leaves every keyed value exactly as it was.
+ *
+ * ⚠️ Assumptions: dismissal is asserted to be distinct from the reference's DECLINING answer, which is
+ * the distinction the screen's own dismissal handler records. Keying `N` performs `INITIALIZE-ALL-FIELDS`
+ * at L480-L483 and empties the form; withdrawing the question must not, or the operator loses six keyed
+ * date parts to a control labelled `Cancel`. So the case reads a keyed part back after the dismissal.
+ * @returns {Promise<void>} Resolves once the preserved range has been asserted.
+ */
+async function leavesTheKeyedRangeIntactWhenTheBalloonIsDismissed(): Promise<void> {
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+  fillCustomRange(VALID_RANGE);
+  await operator.click(inContentSubmitControl());
+  await screen.findByText(CONSENT_ACCEPT_LABEL);
+
+  await operator.click(screen.getByText('Cancel'));
+
+  await waitFor(
+    /**
+     * Waits for the balloon to have been withdrawn.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(screen.queryByText(CONSENT_ACCEPT_LABEL)).toBeNull();
+    },
+  );
+  expect(datePartControl(REPORTS_CAPTIONS.startDate, 'year')).toHaveValue(VALID_RANGE.startYear);
+  expect(datePartControl(REPORTS_CAPTIONS.endDate, 'day')).toHaveValue(VALID_RANGE.endDay);
+  expect(vi.mocked(submitTransactionReport)).not.toHaveBeenCalled();
+}
+
+/**
+ * Asserts the in-content control and the legend control run one operation, not two.
+ *
+ * Purpose: the regression guard for the reported defect of two visually identical primary controls with
+ * divergent behaviour -- measured 312 pixels apart at 1600 and pixel-identical -- where only the
+ * in-content one opened the confirmation and the legend one submitted the raw field.
+ *
+ * ⚠️ Assumptions: equivalence is demonstrated on a turn whose confirmation is ALREADY answered, because
+ * that is the state in which the two used to differ observably and in which they must now agree exactly.
+ * With `Y` keyed, the reference submits without asking -- L474-L476 takes the consenting arm straight to
+ * the queue write -- so neither control may raise a question, and both must issue the submission. The
+ * case drives each control in its own render and compares what the transport received.
+ * @returns {Promise<void>} Resolves once both controls have been driven and compared.
+ */
+async function runsOneOperationFromBothSubmitControls(): Promise<void> {
+  const requests: ReportRequest[] = [];
+  for (const usePointer of [false, true]) {
+    vi.mocked(submitTransactionReport).mockClear();
+    arrangeStartedRun();
+    const operator = userEvent.setup();
+    const mounted = render(reportsTree());
+    await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+    fillCustomRange(VALID_RANGE);
+    fireEvent.change(confirmationControl(), { target: { value: 'Y' } });
+
+    if (usePointer) {
+      await operator.click(inContentSubmitControl());
+    } else {
+      await pressPfKey(operator, 'ENTER');
+    }
+
+    await waitFor(
+      /**
+       * Waits for this control's turn to have reached the transport.
+       * @returns {void} Nothing; the expectation throws until it holds.
+       */
+      (): void => {
+        expect(vi.mocked(submitTransactionReport)).toHaveBeenCalledTimes(1);
+      },
+    );
+    // WHY : Assumptions: neither control may have raised a question on an answered turn, which is the
+    //       half that distinguishes one operation from two that merely reach the same endpoint.
+    expect(screen.queryByText(CONSENT_ACCEPT_LABEL)).toBeNull();
+    requests.push(submittedRequest());
+    mounted.unmount();
+  }
+
+  const [keyed, pointed] = requests;
+  expect(keyed).toBeDefined();
+  expect(pointed).toEqual(keyed);
+}
+
+/** Registers the cases about when consent is asked for and by which control. */
+function confirmationSurfaceCases(): void {
+  beforeEach(anchorObservedServerInstant);
+  afterEach(discardObservedServerInstant);
+
+  it(
+    'withholds the consent balloon until the edits pass',
+    withholdsTheConsentBalloonUntilTheEditsPass,
+  );
+  it('offers the consent balloon once the edits pass', offersTheConsentBalloonOnceTheEditsPass);
+  it(
+    'leaves the keyed range intact when the balloon is dismissed',
+    leavesTheKeyedRangeIntactWhenTheBalloonIsDismissed,
+  );
+  it('runs one operation from both submit controls', runsOneOperationFromBothSubmitControls);
+}
+
+describe('consent is asked for only once the edits have passed', confirmationSurfaceCases);
+
+/**
+ * Asserts a year of zero is refused with the reference's delegated whole-date sentence.
+ *
+ * Purpose: the regression guard for a keyed `0000` passing every edit on this screen and being composed
+ * into a submitted request, where the reference refuses it.
+ *
+ * ⚠️ Assumptions: the oracle is the feedback-code table and not a view about calendars.
+ * `app/cbl/CSUTLDTC.cbl` L70 declares `FC-YEAR-IN-ERA-ZERO` as `X'000309D959C3C5C5'` -- severity 3,
+ * message number `0x09D9` = 2521, rendered `'YearInEra is 0 '` at L145-L146. `CORPT00C` forgives exactly
+ * one non-zero outcome, `IF CSUTLDTC-RESULT-MSG-NUM NOT = '2513'` at L397 and L419, and 2513 is
+ * `FC-UNSUPP-RANGE` at L66. 2521 is therefore refused, taking the `Start Date - Not a valid date...` arm
+ * at L398.
+ *
+ * ⚠️ Assumptions: the year edits BEFORE that call demonstrably cannot catch it, which is why the refusal
+ * has to arrive as the whole-date sentence rather than as a year sentence. `'0000'` is not spaces so the
+ * blank test at L273 passes, and it is numeric so the `IS NOT NUMERIC` test at L347 passes. Asserting the
+ * whole-date sentence specifically is what proves the refusal took the reference's own path rather than a
+ * new year rule invented here.
+ * @returns {Promise<void>} Resolves once the refusal has been asserted.
+ */
+async function refusesAYearOfZeroAsTheReferenceDoes(): Promise<void> {
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+
+  fillCustomRange({ ...VALID_RANGE, startYear: '0000' });
+  await answerAndSubmit(operator, 'Y');
+
+  await waitFor(
+    /**
+     * Waits for the whole-date refusal to reach the row-23 band.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(bandText()).toBe(REPORT_MESSAGES.START_DATE_NOT_A_VALID_DATE);
+    },
+  );
+  expect(
+    vi.mocked(submitTransactionReport),
+    'a year outside every era must not reach the transport',
+  ).not.toHaveBeenCalled();
+}
+
+/**
+ * Asserts a well-formed year the calendar control cannot draw is still ACCEPTED.
+ *
+ * Purpose: the other side of the year floor, and the reason it is a floor at one rather than a range. The
+ * reference forgives `FC-UNSUPP-RANGE` (2513) explicitly, so a well-formed year outside the validator's
+ * supported span passes -- and a fix that refused every year the browser's date library cannot represent
+ * would delete the one non-zero outcome the reference goes out of its way to tolerate.
+ *
+ * Assumptions: `0007` is the value chosen because it is measurably in that window -- the screen's own
+ * calendar affordance withholds its value below year one hundred for exactly this reason -- so accepting
+ * it demonstrates the floor did not become a hundred-year exclusion by accident.
+ * @returns {Promise<void>} Resolves once the accepted year has reached the transport.
+ */
+async function acceptsAWellFormedYearOutsideTheSupportedSpan(): Promise<void> {
+  arrangeStartedRun();
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+
+  fillCustomRange({ ...VALID_RANGE, startYear: '0007' });
+  await answerAndSubmit(operator, 'Y');
+
+  await waitFor(
+    /**
+     * Waits for the submission carrying the out-of-span year.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(vi.mocked(submitTransactionReport)).toHaveBeenCalledTimes(1);
+    },
+  );
+  expect(submittedRequest().startDate).toBe(
+    `0007-${VALID_RANGE.startMonth}-${VALID_RANGE.startDay}`,
+  );
+}
+
+/**
+ * Asserts an inverted range is ACCEPTED, which is the reference's own behaviour.
+ *
+ * ⚠️ Purpose: this is a refutation held as a test, not a defect guard. A start date after an end date was
+ * reported as an adversarial-input finding, and the reference does not refuse it: `CORPT00C`'s whole edit
+ * chain at L256-L436 validates each bound INDEPENDENTLY -- blank parts, then part ranges, then one
+ * `CALL 'CSUTLDTC'` per bound at L392 and L412 -- and nowhere compares the two composed dates with each
+ * other. Adding an ordering rule would invent an edit the baseline has never had and would refuse a
+ * request the service accepts, so the behaviour is pinned rather than changed.
+ *
+ * Assumptions: the case asserts both bounds reached the transport unaltered, so a later "helpful" fix that
+ * silently SWAPPED them would fail here rather than passing a submission-count assertion.
+ * @returns {Promise<void>} Resolves once the inverted range has reached the transport intact.
+ */
+async function acceptsAnInvertedRangeAsTheReferenceDoes(): Promise<void> {
+  arrangeStartedRun();
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+
+  const inverted: CustomRangeEntry = {
+    startMonth: '12',
+    startDay: '31',
+    startYear: '2023',
+    endMonth: '01',
+    endDay: '01',
+    endYear: '2020',
+  };
+  fillCustomRange(inverted);
+  await answerAndSubmit(operator, 'Y');
+
+  await waitFor(
+    /**
+     * Waits for the inverted range to have been submitted.
+     * @returns {void} Nothing; the expectation throws until it holds.
+     */
+    (): void => {
+      expect(vi.mocked(submitTransactionReport)).toHaveBeenCalledTimes(1);
+    },
+  );
+  const request = submittedRequest();
+  expect(request.startDate).toBe('2023-12-31');
+  expect(request.endDate).toBe('2020-01-01');
+}
+
+/**
+ * Asserts a pasted payload cannot be salvaged into a value the field could not hold.
+ *
+ * Purpose: the regression guard for the reported defect that the date segments silently extracted digits
+ * from expressions delivered in one change -- `{{7*7}}` putting `7777` into a two-character month, `1e5`
+ * becoming `15`, `0x10` becoming `010`.
+ *
+ * ⚠️ Assumptions: the payloads are delivered as a single change event and NOT typed, and that is the whole
+ * point of the case rather than a shortcut. `maxLength` bounds what a person can type; it does not bound a
+ * value that arrives complete from a paste, an autofill or a password manager, which is the path the
+ * tester used and the only path on which the defect exists.
+ *
+ * ⚠️ Assumptions: each payload is checked against the part's OWN declared width from `DATE_PART_WIDTHS`
+ * rather than against a literal, so the case cannot drift from the widths `app/cpy-bms/CORPT00.CPY`
+ * declares. The value is also asserted to be the truncation of the filtered digits, which distinguishes a
+ * bound from a rejection -- the 3270 field accepts its width and drops the rest, and a fix that cleared
+ * the field instead would erase a correct date pasted into the wrong box.
+ * @returns {Promise<void>} Resolves once every payload has been checked against every part.
+ */
+async function boundsAPastedPayloadToTheDeclaredWidth(): Promise<void> {
+  const operator = userEvent.setup();
+  render(reportsTree());
+  await chooseReportType(operator, REPORT_TYPE_PROMPTS.custom);
+
+  const payloads = ['{{7*7}}', '1e5', '0x10', '99999999999'] as const;
+  for (const caption of [REPORTS_CAPTIONS.startDate, REPORTS_CAPTIONS.endDate]) {
+    for (const part of ['month', 'day', 'year'] as const) {
+      const width = DATE_PART_WIDTHS[part];
+      for (const payload of payloads) {
+        fillDatePart(caption, part, payload);
+        /*
+         * WHY : Assumptions: the character class mirrors the screen's own filter, so the expectation is
+         *       the TRUNCATION of what the filter keeps rather than a second opinion about which
+         *       characters a date part accepts. The bound is what this case is about; re-deriving the
+         *       filter would make it fail for a reason it was not written to catch.
+         */
+        const expected = payload.replace(/[^0-9.-]/gu, '').slice(0, width);
+        expect(
+          expected.length,
+          `the expectation itself must be within the declared width of ${width}`,
+        ).toBeLessThanOrEqual(width);
+        // WHY : Assumptions: the retained value is asserted, not just its length. A fix that kept the
+        //       TRAILING digits would satisfy a length bound while silently changing which date was
+        //       keyed, and a fix that cleared the field would erase a correct date pasted into the
+        //       wrong box -- both are excluded by naming the value.
+        expect(
+          datePartControl(caption, part),
+          `${caption} ${part} must hold at most ${width} characters of "${payload}"`,
+        ).toHaveValue(expected);
+      }
+    }
+  }
+
+  expect(vi.mocked(submitTransactionReport)).not.toHaveBeenCalled();
+}
+
+/** Registers the cases about what the six date parts and the confirmation field will hold. */
+function inputDomainCases(): void {
+  beforeEach(anchorObservedServerInstant);
+  afterEach(discardObservedServerInstant);
+
+  it('refuses a year of zero as the reference does', refusesAYearOfZeroAsTheReferenceDoes);
+  it(
+    'accepts a well-formed year outside the supported span',
+    acceptsAWellFormedYearOutsideTheSupportedSpan,
+  );
+  it('accepts an inverted range as the reference does', acceptsAnInvertedRangeAsTheReferenceDoes);
+  it('bounds a pasted payload to the declared width', boundsAPastedPayloadToTheDeclaredWidth);
+}
+
+describe('the keyable domain is the reference\u2019s own', inputDomainCases);

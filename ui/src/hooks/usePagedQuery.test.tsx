@@ -3,6 +3,15 @@
  * failure arriving from the real transport is surfaced with the service's own problem document, and
  * that a change of QUERY drops the previous query's page instead of leaving it on display.
  *
+ * Refactoring Rationale: a THIRD property joined the two below -- that one mount issues exactly ONE
+ * opening read, and that a re-render which changes nothing this hook depends on issues none. A review
+ * measured duplicate requests on three screens and asked whether the shared browse was the source; it
+ * is not, because the reader is held in a ref refreshed by a dependency-free effect and the opening
+ * effect depends only on the switch and the restart value. Nothing pinned that, though, and the risk is
+ * specific: every browse screen composes its reader INLINE, so a reader in the opening effect's
+ * dependency list would re-read on every render and turn this hook into the duplicate source it was
+ * suspected of being. The case below fails on exactly that change.
+ *
  * Refactoring Rationale: this file did not exist, and both properties were broken while every other
  * gate stayed green. `problemDocumentOf` examined the rejected value itself and a nested
  * `response.data`, on the belief that `ui/src/api/client.ts` re-throws whatever axios rejected with;
@@ -235,6 +244,34 @@ function renderKeyedBrowse(props: { readonly resetKey: string }): UsePagedQueryR
   });
 }
 
+/** How many reads the counting reader has been asked for, so a duplicate is visible as a number. */
+let readsIssued = 0;
+
+/**
+ * Renders the browse over a reader composed INLINE, as every browse screen composes it.
+ *
+ * Assumptions: the closure is written at the call site deliberately, and recreating it on every render
+ * is the whole point -- a memoised reader would pass this file's case while every real screen's inline
+ * one still re-read, which is the disagreement the case exists to prevent.
+ * @param {object} props - The render's props.
+ * @param {string} props.resetKey - The query identity this render is browsing.
+ * @returns {UsePagedQueryResult<Row>} The browse's result for this render.
+ */
+function renderInlineReaderBrowse(props: { readonly resetKey: string }): UsePagedQueryResult<Row> {
+  return usePagedQuery<Row>({
+    pageSize: ROWS_PER_PAGE,
+    resetKey: props.resetKey,
+    /**
+     * Reads one page and counts the read.
+     * @returns {Promise<PageResponse<Row>>} The single-row page every satisfied read delivers.
+     */
+    fetchPage: (): Promise<PageResponse<Row>> => {
+      readsIssued += 1;
+      return Promise.resolve(onePage());
+    },
+  });
+}
+
 /** Configures the build-time values the client validates, and discards any earlier client. */
 function stubBuildConfiguration(): void {
   refusing = false;
@@ -380,13 +417,18 @@ async function retainsThePageAcrossASameQueryRefresh(): Promise<void> {
   );
 
   refusing = true;
-  act(
+  await act(
     /**
-     * Asks the browse to refresh the query it is already on.
-     * @returns {void} Nothing; the read is issued as a side effect.
+     * Asks the browse to refresh the query it is already on, and waits for that turn.
+     *
+     * Refactoring Rationale: the refresh is AWAITED, where this call used to be made and left. The step
+     * now resolves when its turn has settled, so awaiting it is what sequences this case -- and it is
+     * the only discard `ui/eslint.config.js` admits, since `no-floating-promises` is configured with
+     * `ignoreVoid: false`.
+     * @returns {Promise<void>} Resolves once the refused refresh has settled.
      */
-    () => {
-      result.current.reset();
+    async () => {
+      await result.current.reset();
     },
   );
 
@@ -404,6 +446,173 @@ async function retainsThePageAcrossASameQueryRefresh(): Promise<void> {
   expect(result.current.items[0]?.key).toBe(ONLY_ROW_KEY);
   expect(result.current.hasNext).toBe(true);
   expect(result.current.pageNumber).toBe(FIRST_PAGE);
+}
+
+/**
+ * One mount issues one opening read, an unrelated re-render issues none, and a new query issues one.
+ *
+ * Assumptions: the count is asserted at three points rather than once at the end, because the three
+ * numbers say three different things and only together do they describe the contract: that the browse
+ * opens, that it does not re-open for a render, and that it DOES re-open for a genuine change of
+ * criteria. A single final count would pass for a hook that read twice on mount and never again.
+ *
+ * Assumptions: two consecutive re-renders are performed with the same restart value, not one, because
+ * a single re-render cannot distinguish "does not re-read on a render" from "re-reads on alternate
+ * renders" -- and a stale-closure refresh that dispatched a read would be visible on the second.
+ * @returns {Promise<void>} Resolves once the browse has settled every read this case causes.
+ */
+async function issuesOneReadPerQueryAndNoneForARender(): Promise<void> {
+  readsIssued = 0;
+
+  const { result, rerender } = renderHook(renderInlineReaderBrowse, {
+    initialProps: { resetKey: 'accountId=' },
+  });
+
+  await waitFor(
+    /**
+     * Waits for the opening read to have delivered its page.
+     * @returns {void} Nothing; throws until the row is on display.
+     */
+    () => {
+      expect(result.current.items).toHaveLength(1);
+    },
+  );
+  expect(readsIssued, 'the mount issued exactly one opening read').toBe(1);
+
+  rerender({ resetKey: 'accountId=' });
+  rerender({ resetKey: 'accountId=' });
+
+  await waitFor(
+    /**
+     * Waits for both re-renders to have been committed with the page still on display.
+     * @returns {void} Nothing; throws until the row is on display.
+     */
+    () => {
+      expect(result.current.items).toHaveLength(1);
+    },
+  );
+  expect(readsIssued, 'a render that changed nothing issued no read').toBe(1);
+
+  rerender({ resetKey: 'accountId=00000000011' });
+
+  await waitFor(
+    /**
+     * Waits for the changed query to have issued its own opening read.
+     * @returns {void} Nothing; throws until the second read has been asked for.
+     */
+    () => {
+      expect(readsIssued).toBe(2);
+    },
+  );
+  expect(readsIssued, 'a changed query issued exactly one further read').toBe(2);
+}
+
+/**
+ * The classification the REAL interceptor made survives the trip through the browse.
+ *
+ * Purpose: the sibling case next to this one proves the problem document survives; this proves the
+ * judgement about it does. The two reviews that measured the defect found the consequence on the
+ * production route -- a timeout, a dropped connection and a 500 indistinguishable on every screen -- so
+ * the case that closes it has to run on the production route too, through the real client's own response
+ * interceptor rather than a failure this file constructed.
+ *
+ * Assumptions: `kind` is `PROBLEM` and `transient` is false because the adapter answers 400 with a
+ * problem document, which is a refusal the operator must act on rather than a condition that clears.
+ * Asserting the remedy members and not only the kind is deliberate: a screen chooses between "not
+ * available at the moment" and "that did not work" on `transient` alone.
+ * @returns {Promise<void>} Resolves once the browse has settled its opening read.
+ */
+async function surfacesTheClassificationTheInterceptorMade(): Promise<void> {
+  await produceNormalisedFailure();
+
+  const { result } = renderHook(renderRefusedBrowse);
+
+  await waitFor(
+    /**
+     * Waits for the opening read to have been refused.
+     * @returns {void} Nothing; throws until the browse reports failure.
+     */
+    () => {
+      expect(result.current.isFailed).toBe(true);
+    },
+  );
+
+  expect(
+    result.current.failure,
+    'the interceptor classified this and the browse kept it',
+  ).not.toBeNull();
+  expect(result.current.failure?.kind).toBe('PROBLEM');
+  expect(result.current.failure?.status).toBe(REFUSAL_STATUS);
+  expect(result.current.failure?.transient).toBe(false);
+  expect(result.current.failure?.repeatable).toBe(false);
+  expect(result.current.failure?.correlationId).toBe(CORRELATION_ID);
+  // Assumptions: the document is asserted alongside, so a fix that replaced `error` with the classified
+  //   failure rather than adding it beside would fail here rather than in five screens later.
+  expect(result.current.error?.message).toBe(REFUSAL_MESSAGE);
+}
+
+/**
+ * A turn that FAILS still resolves, so a caller that discards its promise leaves nothing unhandled.
+ *
+ * Purpose: this is the backward-compatibility property of making the three steps awaitable, stated as a
+ * case rather than as prose. Seven browse screens call these steps as bare statements today and only
+ * some will adopt the promise; if a failed turn rejected, every screen that had not adopted it would
+ * report an unhandled rejection for a failure this hook has already recorded and displayed -- a
+ * regression introduced by the fix rather than by the defect.
+ *
+ * Assumptions: the failure is produced through the REAL client, as every case in this file is, so what
+ * is proved is that a genuine transport rejection does not escape the settlement. A hand-built rejection
+ * would prove only that this file can build one.
+ *
+ * Assumptions: the outcome is recorded through BOTH handlers into a list rather than asserted with
+ * `resolves`/`rejects`, because the property is which of the two ran -- and a list that names it makes
+ * the failure message say `[ 'rejected' ]` instead of a bare boolean.
+ * @returns {Promise<void>} Resolves once the failed turn has settled.
+ */
+async function resolvesAFailedTurnRatherThanRejectingIt(): Promise<void> {
+  await produceNormalisedFailure();
+
+  const { result } = renderHook(renderRefusedBrowse);
+
+  await waitFor(
+    /**
+     * Waits for the opening read to have been refused, so a further turn has a browse to run in.
+     * @returns {void} Nothing; throws until the browse reports failure.
+     */
+    () => {
+      expect(result.current.isFailed).toBe(true);
+    },
+  );
+
+  const howItSettled: string[] = [];
+  await act(
+    /**
+     * Refreshes the browse over the always-refusing reader and records which handler ran.
+     * @returns {Promise<void>} Resolves once the refused turn has settled either way.
+     */
+    async () => {
+      await result.current.reset().then(
+        /**
+         * Records that the turn resolved.
+         * @returns {void} Nothing; the outcome is appended.
+         */
+        () => {
+          howItSettled.push('resolved');
+        },
+        /**
+         * Records that the turn rejected, which is the outcome this case rules out.
+         * @returns {void} Nothing; the outcome is appended.
+         */
+        () => {
+          howItSettled.push('rejected');
+        },
+      );
+    },
+  );
+
+  expect(howItSettled).toEqual(['resolved']);
+  expect(result.current.isFailed).toBe(true);
+  expect(result.current.error?.correlationId).toBe(CORRELATION_ID);
 }
 
 /**
@@ -426,6 +635,12 @@ function browseFailureAndResetContract(): void {
     clearsThePreviousQueryOnAnIdentityChange,
   );
   it('retains the page across a refresh of the same query', retainsThePageAcrossASameQueryRefresh);
+  it('issues one read per query and none for a re-render', issuesOneReadPerQueryAndNoneForARender);
+  it(
+    'surfaces the classification the interceptor made',
+    surfacesTheClassificationTheInterceptorMade,
+  );
+  it('resolves a failed turn rather than rejecting it', resolvesAFailedTurnRatherThanRejectingIt);
 }
 
 describe('shared keyset browse failure and reset contract', browseFailureAndResetContract);

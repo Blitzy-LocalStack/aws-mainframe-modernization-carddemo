@@ -18,12 +18,13 @@
  */
 
 import { ConfigProvider } from 'antd';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { ApiRequestError } from '../../api/client';
 import type * as CardsModule from '../../api/cards';
 import type { CardDetail } from '../../api/types';
 import type { ApiError } from '../../api/types';
@@ -34,6 +35,7 @@ import {
   CARD_DETAIL_INVALID_LINK_GUIDANCE,
   SHARED_MESSAGES,
   STATUS_MESSAGES,
+  TRANSIENT_FAILURE_TRY_AGAIN,
 } from '../../messages/messages';
 import { CARD_SELECTOR_LENGTH } from '../../routes/cards';
 import { cardDemoTheme } from '../../theme/antdTheme';
@@ -390,11 +392,50 @@ function reportsTheAuthorityRefusalForA403(): void {
 }
 
 /**
- * Asserts that the failure mapping reports the card-file read error for a service fault and for a write window.
+ * Builds the rejection the transport itself raises, so the failure carries its own classification.
+ *
+ * Assumptions: a real `ApiRequestError` and not the duck-typed shape {@link refusal} produces, because
+ * the classification predicates in `ui/src/api/client.ts` narrow on the CLASS -- a structurally similar
+ * object is deliberately not accepted by them, so a case arranged from one cannot reach a branch that
+ * consults them.
+ * @param {number} status - The HTTP status the failure carries.
+ * @param {string | null} message - The service's own sentence, or `null` when it sent none.
+ * @returns {ApiRequestError} The rejection value the client raises for that status.
+ */
+function transportRefusal(status: number, message: string | null): ApiRequestError {
+  return new ApiRequestError(
+    'PROBLEM',
+    status,
+    refusal(status, message).problem,
+    `PROBLEM ${String(status)}`,
+  );
+}
+
+/**
+ * Asserts that a service fault and a momentary outage are reported as the different things they are.
+ *
+ * ⚠️ Refactoring Rationale: the 503 leg expected the card-file read error and now expects the outage
+ * sentence. `Error reading Card Data File` is a claim about the FILE -- the program composes it from a
+ * CICS file response (`app/cbl/COCRDSLC.cbl` L762-L771) -- and a gateway that timed out or a service
+ * that answered 503 never reached a file, so the sentence described an event that had not happened. The
+ * two also call for different operator actions: a file error is reported, an outage is retried.
+ *
+ * ⚠️ Assumptions: the 500 leg keeps the program's own transcribed sentence, which is the T8 half of the
+ * same decision -- a refused read IS the outcome the program writes that sentence for, so the authored
+ * persistent sentence would displace a transcribed one for no gain.
+ *
+ * ⚠️ Assumptions: the transient legs are arranged from a REAL transport rejection and the duck-typed
+ * shape is asserted to fall back, because `isTransientFailure` narrows on the class. That fallback is
+ * the honest outcome for a value whose provenance cannot be established: an unclassifiable 503 is
+ * reported as a read failure rather than as a retryable one, which errs toward not inviting a retry
+ * that may not be safe.
  * @returns {void} Completion of the case; the assertions are its effect.
  */
 function reportsTheCardFileReadErrorForAServiceFaultAndForAWriteWindow(): void {
   expect(describeRetrievalFailure(refusal(500, null))).toBe(MESSAGES.XREF_READ_ERROR.text);
+  expect(describeRetrievalFailure(transportRefusal(500, null))).toBe(MESSAGES.XREF_READ_ERROR.text);
+  expect(describeRetrievalFailure(transportRefusal(503, null))).toBe(TRANSIENT_FAILURE_TRY_AGAIN);
+  expect(describeRetrievalFailure(transportRefusal(504, null))).toBe(TRANSIENT_FAILURE_TRY_AGAIN);
   expect(describeRetrievalFailure(refusal(503, null))).toBe(MESSAGES.XREF_READ_ERROR.text);
 }
 
@@ -446,13 +487,27 @@ async function paintsBothSearchFieldsProtectedBesideARecordTheAddressNamed(): Pr
   const cardNumber = screen.getByLabelText(/Card Number/u);
 
   /*
-   * WHY : Assumptions: both controls are DISABLED on this arrival, which is
-   *       `1300-SETUP-SCREEN-ATTRS` moving `DFHBMPRF` into both fields when the caller was the browse
-   *       program (`app/cbl/COCRDSLC.cbl` L505-L509). Rendering them editable here would offer a
-   *       second way to change the record on display that the reference refuses.
+   * WHY : ⚠️ Refactoring Rationale: both controls are asserted READ-ONLY AND ENABLED on this arrival,
+   *       where they were asserted disabled. The disabled expectation was false against the mapset:
+   *       `1300-SETUP-SCREEN-ATTRS` moves `DFHBMPRF` into both fields when the caller was the browse
+   *       program (`app/cbl/COCRDSLC.cbl` L507-L508), and `DFHBMPRF` is PROTECT with the modified-data
+   *       tag set rather than `DFHBMASK`, the autoskip constant this mapset uses for its display
+   *       fields. A protected 3270 field is readable and cursor-addressable and refuses only TYPING --
+   *       the program's own cursor rule moves -1 into `ACCTSIDL` on this arrival (L520-L523) -- and the
+   *       "SETUP COLOR" block moves `DFHDFCOL` into both fields under the same condition (L526-L531),
+   *       so it is painted at full intensity. `disabled` removes a control from the focus order and
+   *       from the accessibility tree, which is a stronger claim than protection makes and left the two
+   *       identifiers an operator arrives to read unreachable by keyboard.
+   * WHY : Assumptions: both halves are asserted together, because either alone would pass against a
+   *       regression -- enabled alone against a control the operator can overtype, and the attribute
+   *       alone against a disabled control, since `readonly` and `disabled` may both be present.
+   *       Rendering them editable here would still offer a second way to change the record on display
+   *       that the reference refuses, which is what the attribute rules out.
    */
-  expect(account).toBeDisabled();
-  expect(cardNumber).toBeDisabled();
+  expect(account).toHaveAttribute('readonly');
+  expect(account).toBeEnabled();
+  expect(cardNumber).toHaveAttribute('readonly');
+  expect(cardNumber).toBeEnabled();
   expect(account).toHaveValue(AN_ACCOUNT_NUMBER);
   expect(cardNumber).toHaveValue('************1111');
   expect(account).toHaveAttribute('maxlength', '11');
@@ -615,6 +670,15 @@ const A_LATER_SELECTOR = 'B'.repeat(CARD_SELECTOR_LENGTH);
  * that early return, which is what makes a second turn reachable at all, and it is the same path the
  * reference's own coerced invalid-key arm takes at `app/cbl/COCRDSLC.cbl` L291-L299.
  *
+ * ⚠️ Refactoring Rationale: the two presses are raised as RAW keydown events inside ONE `act` scope, and
+ * they were two `userEvent.keyboard` calls. The screen now declares its Enter binding BUSY while a read
+ * is outstanding, and `usePfKeys` declines a busy key silently -- so two presses with a flush between
+ * them produce exactly one lookup, which is the correct behaviour and leaves this case with nothing to
+ * order. The window in which two turns can still overlap is a single synchronous task: the busy flag is
+ * this screen's render state, so both handlers observe it as `false` before React has re-rendered. That
+ * window is the one the guard under test exists for, and raising both events without a flush is the only
+ * way to open it. `userEvent` awaits its own act scope per call and therefore cannot.
+ *
  * Assumptions: the two answers name DIFFERENT records although both turns carry the same typed number.
  * That is a property of the stub rather than of the service, and it is what makes the two settlements
  * distinguishable: with one selector for both, a superseded navigation would land on the same address as
@@ -637,8 +701,17 @@ async function ignoresAResolutionASecondTurnHasSuperseded(): Promise<void> {
 
   await userEvent.type(account, AN_ACCOUNT_NUMBER);
   await userEvent.type(screen.getByLabelText(/Card Number/u), A_CARD_NUMBER);
-  await userEvent.keyboard('{Enter}');
-  await userEvent.keyboard('{Enter}');
+
+  act(
+    /**
+     * Raises two Enter presses within one synchronous task, before React can re-render.
+     * @returns {void} Nothing; both dispatches are raised as a side effect.
+     */
+    (): void => {
+      fireEvent.keyDown(document, { key: 'Enter' });
+      fireEvent.keyDown(document, { key: 'Enter' });
+    },
+  );
 
   expect(
     lookupCardMock.mock.calls.length,

@@ -53,19 +53,20 @@
 
 import {
   Button,
+  ConfigProvider,
   Descriptions,
   Divider,
   Flex,
   Form,
   Input,
-  Popconfirm,
+  Modal,
   Spin,
   Typography,
   theme,
 } from 'antd';
-import type { InputRef } from 'antd';
+import type { DescriptionsProps, InputRef } from 'antd';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import type { ChangeEvent, CSSProperties, ReactElement } from 'react';
+import type { ChangeEvent, CSSProperties, FC, ReactElement, ReactNode } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router';
 
 import { USER_ID_MAX_LENGTH, deleteUser, getUser } from '../../api/auth';
@@ -73,23 +74,36 @@ import { isApiRequestError } from '../../api/client';
 import type { ApiError, FieldValidationState, UserResponse, UserType } from '../../api/types';
 import { useServerInstant } from '../../hooks/useServerInstant';
 import { useShellSlot } from '../../layout/AppShell';
-import { fieldAriaProps, fieldErrorHelp } from '../../layout/fieldHelp';
+import {
+  BLANK_FIELD_MARKER_CHARACTERS,
+  busyAnnouncement,
+  fieldAriaProps,
+  fieldErrorHelp,
+} from '../../layout/fieldHelp';
 import type { MessageBandSeverity } from '../../layout/MessageBand';
-import { UNIFORM_PF_KEY_LABELS, decodeBmsLegendText } from '../../layout/PfKeyBar';
-import { RECORD_VIEW_COLUMNS } from '../../layout/recordLayout';
+import {
+  UNIFORM_PF_KEY_LABELS,
+  decodeBmsLegendText,
+  pfKeyEmphasisFor,
+} from '../../layout/PfKeyBar';
+import type { PfKeyEmphasis } from '../../layout/PfKeyBar';
+import { RECORD_VIEW_COLUMNS, copybookFieldWidthStyle } from '../../layout/recordLayout';
 import { ScreenTitle } from '../../layout/ScreenTitle';
 import { usePfKeys } from '../../layout/usePfKeys';
-import type { PfKeyHandlerMap, PfKeyRejection } from '../../layout/usePfKeys';
+import type { PfKeyHandlerMap, PfKeyRejection, PfKeyRisk } from '../../layout/usePfKeys';
 import {
   INVALID_KEY_PRESSED,
   MESSAGE_TEMPLATES,
   PROGRAM_MESSAGES,
+  REQUEST_IN_PROGRESS,
   SHARED_MESSAGES,
   USER_DELETE_CAPTION,
   USER_DELETE_FIELD_LABELS,
   USER_DELETE_KEY_LABELS as CATALOGUED_USER_DELETE_KEY_LABELS,
   USER_DELETE_USER_TYPE_HINT,
+  fitsDeclaredWidth,
   formatMessageTemplate,
+  normaliseForWire,
 } from '../../messages/messages';
 import type { MapsetName } from '../../messages/messages';
 import {
@@ -104,6 +118,7 @@ import {
   FIELD_ERROR_TOKENS,
   TYPOGRAPHY_TOKENS,
 } from '../../theme/tokens';
+import { destructiveFocusTheme } from '../../theme/antdTheme';
 
 /** The one sentence this screen's own program owns, from the catalog that owns every string it paints. */
 const DELETE_MESSAGES = PROGRAM_MESSAGES.COUSR03C;
@@ -173,6 +188,67 @@ export const USER_DELETE_FIELD_WIDTHS = {
 } as const satisfies Readonly<Record<UserDeleteField, number>>;
 
 /*
+ * WHY : ⚠️ Refactoring Rationale: the one enterable control's entry is now measured against its DECLARED
+ *       width in the two units the RECORD is stated in, where `maxLength` was the only bound.
+ *       `maxLength` stops the keystroke, which is the right interaction, but it counts UTF-16 CODE
+ *       UNITS -- a unit neither `PIC X(08)` nor a `CHAR(8)` column is declared in, and one that costs
+ *       two of its eight positions for every character outside the Basic Multilingual Plane.
+ * WHY : ⚠️ Assumptions: the field this guards is the DELETE KEY, which is what makes the correction
+ *       matter more here than on the two screens that share it. A key silently truncated at eight
+ *       UTF-16 units is a DIFFERENT key from the one the operator typed, and the turn it opens is a
+ *       read that names a record they did not ask for -- on the one screen in this application whose
+ *       next key destroys what that read returned. Clamping on the record's own units means the value
+ *       on the glass and the value in the request are the same eight characters.
+ * WHY : ⚠️ Trade-offs: an over-long entry is CLAMPED rather than refused with a sentence, and the reason
+ *       is that no sentence exists to say it in. `app/cbl/COUSR03C.cbl` declares this screen's one field
+ *       refusal at L147 and again at L179, and both are the same BLANK test -- `User ID can NOT be
+ *       empty...` -- with no length arm anywhere in the program,
+ *       because a 3270 field of length n physically cannot hold n+1 characters, so the condition never
+ *       arose for the program to report. The catalog is transcribed from the program, so stating one
+ *       here would mean authoring operator prose the reference never wrote. Clamping is the terminal's
+ *       own behaviour: the keyboard simply stopped accepting into a full field.
+ * WHY : Alternatives Considered: importing the identically-reasoned clamp from a sibling screen.
+ *       Rejected because every screen is mounted through `lazy()` in `ui/src/router.tsx`, so a value
+ *       import from another screen folds that screen's chunk into this one; the rule is restated and the
+ *       shared PREDICATES it consults -- `normaliseForWire` and `fitsDeclaredWidth` -- are imported, so
+ *       the screens agree by construction on the part that could actually diverge.
+ */
+
+/**
+ * Clamps one entry to a declared field width, measured as the record measures it.
+ *
+ * Purpose: keep the value the operator can see identical to the value the request will carry, so no key
+ * can be read or destroyed that differs from the one on the glass.
+ *
+ * Assumptions: the entry is normalised to Normalization Form C FIRST and the clamp then walks whole
+ * CODE POINTS rather than UTF-16 units, so a surrogate pair is kept or dropped as one character and can
+ * never be cut in half into a lone surrogate -- a value no byte measure could make sense of.
+ *
+ * Trade-offs: the fit is re-tested per candidate length rather than computed from a byte count in one
+ * step. That is a loop over at most the entry's own length on a keystroke, and it buys the property that
+ * this function and any validator agree BY CONSTRUCTION because both consult one predicate, where byte
+ * arithmetic of its own here would be a second implementation of the same rule.
+ * @param {string} entry - The value the control reported, exactly as it arrived.
+ * @param {number} declaredWidth - The field's `PIC X(n)` width; a positive integer.
+ * @returns {string} The normalised entry, shortened by whole code points until it fits the width.
+ * @throws {RangeError} If `declaredWidth` is negative or not an integer, raised by the predicate.
+ */
+export function clampToDeclaredWidth(entry: string, declaredWidth: number): string {
+  const normalised = normaliseForWire(entry);
+  if (fitsDeclaredWidth(normalised, declaredWidth)) {
+    return normalised;
+  }
+
+  const codePoints = Array.from(normalised);
+  let kept = codePoints.length - 1;
+  while (kept > 0 && !fitsDeclaredWidth(codePoints.slice(0, kept).join(''), declaredWidth)) {
+    kept -= 1;
+  }
+
+  return codePoints.slice(0, kept).join('');
+}
+
+/*
  * WHY : ⚠️ Refactoring Rationale: the three mapset-specific labels were LITERALS in this block and are
  *       now the catalog's `USER_DELETE_KEY_LABELS`, for the reason the caption and field labels moved:
  *       one owner per operator-visible string. `F3=Back` alone is painted by TEN of the twenty-one
@@ -207,8 +283,80 @@ const USER_DELETE_KEY_LABELS = {
   PFK05: decodeBmsLegendText(CATALOGUED_USER_DELETE_KEY_LABELS.PFK05),
 } as const;
 
+/**
+ * What this screen's PF5 arm does to stored state, declared once for both controls that offer it.
+ *
+ * ⚠️ Purpose: the deletion is reachable two ways -- the mapset's own `F5=Delete` on the legend and a
+ * pointer trigger beside the record -- and a rendering pass measured the two painted DIFFERENTLY in a
+ * single frame: the legend copy primary BLUE and byte-identical in all four states to the benign
+ * `ENTER=Fetch`, the in-content copy danger-OUTLINED. One action cannot have two risks, so the risk is
+ * stated once here and both controls resolve their paint from it.
+ *
+ * ⚠️ Assumptions: `'destructive'` and not `'mutating'`, because the distinction the union draws is
+ * whether the operator can come back and undo it from the screen that offered it. `DELETE-USER-INFO`
+ * at `app/cbl/COUSR03C.cbl` L188-L192 removes the row; there is no arm anywhere in that program that
+ * puts it back.
+ * @see {@link USER_DELETE_ACTION_EMPHASIS} for the paint this resolves to.
+ */
+const USER_DELETE_ACTION_RISK: PfKeyRisk = 'destructive';
+
+/**
+ * The emphasis both copies of the deletion paint with, resolved by the legend's own rule.
+ *
+ * ⚠️ Refactoring Rationale: this calls `pfKeyEmphasisFor` -- the very function
+ * `ui/src/layout/PfKeyBar.tsx` paints the legend control with -- rather than restating
+ * `type="primary" danger` at the in-content trigger. Restating it is what allowed the two copies to
+ * drift into the measured contradiction in the first place: two literals in two files, either of which
+ * could be edited alone. Calling the shared resolver makes the two paints identical BY CONSTRUCTION,
+ * so a future change to what `'destructive'` looks like reaches both at once.
+ *
+ * Assumptions: `action`, `label` and `enabled` are supplied because `PfKeyBinding` declares them and
+ * none of the three participates in the result -- `pfKeyEmphasisFor` reads `risk` and, only when
+ * `risk` is absent, `aid`. They are given their real values rather than placeholders so a reader
+ * comparing this with the handler entry below sees the same descriptor twice.
+ */
+const USER_DELETE_ACTION_EMPHASIS: PfKeyEmphasis = pfKeyEmphasisFor({
+  aid: 'PFK05',
+  action: 'save',
+  label: USER_DELETE_KEY_LABELS.PFK05,
+  enabled: true,
+  risk: USER_DELETE_ACTION_RISK,
+});
+
 /** HTTP status the service answers when no user row carries the identifier. */
 const NOT_FOUND_STATUS = 404;
+
+/**
+ * Columns the confirmation dialog states the record in.
+ *
+ * Assumptions: ONE, where the record view on the screen behind it uses the shared two-up constant. A
+ * dialog is narrower than the content region by design, and a label-and-value pair per line is what
+ * makes four short rows scannable at a glance -- which is the whole job of a surface an operator reads
+ * before destroying something. It is named rather than written inline so the difference from
+ * `RECORD_VIEW_COLUMNS` reads as a decision rather than as an oversight.
+ */
+const CONFIRMATION_RECORD_COLUMNS = 1;
+
+/**
+ * Identifier of the element naming the record inside the delete confirmation.
+ *
+ * ⚠️ Purpose: both of the confirmation's actions point at this element with `aria-describedby`, so the
+ * record being destroyed is announced with whichever action the operator lands on, rather than only if
+ * they happen to read the surface as a whole. That distinction is not theoretical here: browser
+ * measurement found focus placed on the DECLINING control the moment this dialogue opens, so the record
+ * naming has to travel with the control or it is never heard.
+ *
+ * ⚠️ Assumptions: the identifier is put on the record block rather than on the dialogue, and the
+ * dialogue keeps `aria-labelledby` pointing at its own question. A description and a label are different
+ * things -- the label says what is being asked and the description says which record it is being asked
+ * about -- so collapsing them onto one element would lose one of the two.
+ *
+ * ⚠️ Refactoring Rationale: this screen was the outlier rather than the pattern.
+ * `ui/src/screens/cardUpdate/index.tsx` and `ui/src/screens/authDetail/index.tsx` already wire their own
+ * confirmations exactly this way, and cardUpdate's own note claimed this file did too -- a claim that was
+ * false when written and is made true here rather than deleted.
+ */
+const DELETE_CONFIRMATION_RECORD_ID = 'user-delete-confirmation-record';
 
 /** The four values the screen holds, with the user type narrowed to the domain the contract admits. */
 interface UserDeleteValues {
@@ -326,6 +474,15 @@ export function resolveUserDeleteFieldErrors(problem: ApiError): readonly UserDe
  * PROTECTED field an operator cannot type into. The target renders that field as a record value with no
  * focusable control at all, so there is nothing to focus and leaving the cursor where it is the closest
  * faithful outcome.
+ *
+ * ⚠️ Alternatives Considered: the message catalogue now publishes two AUTHORED failure sentences --
+ * `TRANSIENT_FAILURE_TRY_AGAIN` for a condition that may clear and `PERSISTENT_FAILURE_REPORT_IT` for
+ * one that will not -- selected on the classification `ui/src/api/client.ts` already computes. Neither
+ * is taken here, and the reason is Rule T8 rather than inertia: every failure sentence this function
+ * can reach HAS a mainframe source, so substituting an authored one would replace a verbatim
+ * operator-facing string with a better-worded invention. The authored pair is for screens and states
+ * the reference never had a sentence for -- which is why the busy announcement this screen renders does
+ * take one.
  * @param {unknown} failure - Whatever the request rejected with, normally the normalised
  *   `ApiRequestError` that `ui/src/api/client.ts` mints.
  * @param {UserDeleteStage} stage - Which file operation the failure came out of, selecting the reference
@@ -738,9 +895,24 @@ export function UserDeleteScreen(): ReactElement {
            *       the message field's colour, where every refusal on this screen moves the red one.
            *       Rendering it as an error would tell an operator a successful read had failed, turning the
            *       normal path of this screen into an apparent fault.
+           * WHY : ⚠️ Assumptions: the severity is `'neutral'` and NOT `'info'`, which is the distinction
+           *       `DFHNEUTR` actually makes. `ui/src/theme/tokens.ts` resolves the mapset's NEUTRAL role to
+           *       `colorTextSecondary` and its TURQUOISE role to `colorInfo`, and the band module's own
+           *       note records that keeping those two apart is exactly what the token bridge's G3 decision
+           *       exists to enforce -- so publishing this line as `'info'` painted a de-emphasised sentence
+           *       in the informational HUE, which is the substitution a rendering review recorded as
+           *       "informational content in the error channel" on this route. The screen has one channel to
+           *       put it on: `app/bms/COUSR03.bms` L140-L143 declares `ERRMSG` at `POS=(23,1)` and declares
+           *       no `INFOMSG` at all, so row 22 does not exist here and the sentence stays on row 23 at
+           *       the colour the program recolours it to.
+           *       Alternatives Considered: publishing it on the band's `information` channel, which is
+           *       where standing guidance belongs. Rejected on two counts: this mapset has no row-22 field
+           *       to stand in for, and the sentence fails the channel contract's own TENSE test -- it is
+           *       not true until a read has succeeded, so it reports the outcome of the turn just taken
+           *       rather than what the operator may do on arrival.
            */
           setMessage(DELETE_MESSAGES.PRESS_PF5_KEY_TO_DELETE_THIS_USER);
-          setSeverity('info');
+          setSeverity('neutral');
           /*
            * WHY : Assumptions: the cursor returns to the fetch key after a successful read, because L152
            *       moves `-1` into `USRIDINL` on the arm that proceeds to read and the map is then sent
@@ -851,6 +1023,35 @@ export function UserDeleteScreen(): ReactElement {
     }
 
     setConfirmOpen(true);
+  }
+
+  /**
+   * Closes the confirmation without destroying anything, which is the safe half of the dialog.
+   *
+   * ⚠️ Purpose: make cancellation genuinely safe rather than merely inactive. It issues no request, and it
+   * touches NOTHING else: the four values stay as the read left them, the field marks stay, and the band
+   * keeps the reference's own awaiting sentence `'Press PF5 key to delete this user ...'` (L283) -- which
+   * is exactly the state the operator was in before they opened the dialog, so cancelling returns them to
+   * a screen that still invites the deletion rather than to one that has quietly changed.
+   *
+   * Assumptions: no cancellation SENTENCE is published, and that is a deliberate omission rather than a
+   * gap. `app/cbl/COUSR03C.cbl` contains no such message -- the confirmation it asks for is a keystroke,
+   * and declining to press a key produces no output at all -- and the message catalog holds the verbatim
+   * monopoly for this tree, so writing one here would author operator-visible text the baseline does not
+   * contain. Reported rather than invented.
+   *
+   * Assumptions: focus is NOT restored here, because the dialog primitive already does it. It records the
+   * element that was active before it opened and focuses it again on close
+   * (`ui/node_modules/@rc-component/dialog/es/Dialog/index.js` `doClose`), so the operator's caret returns
+   * to the trigger they came from. A second `focus()` from this screen would race that one.
+   *
+   * Assumptions: this one function serves every dismissal the dialog offers -- the cancel button, the
+   * Escape key and a click on the mask all route through `onCancel` -- so all three are equally safe by
+   * construction rather than by three separate handlers agreeing.
+   * @returns {void} Completion is the closed confirmation; the record and the band stay as they are.
+   */
+  function cancelDelete(): void {
+    setConfirmOpen(false);
   }
 
   /**
@@ -1031,7 +1232,19 @@ export function UserDeleteScreen(): ReactElement {
        * @param {UserDeleteValues} previous - Values as they stand.
        * @returns {UserDeleteValues} The same values carrying the typed key.
        */
-      (previous: UserDeleteValues): UserDeleteValues => ({ ...previous, userId: typed }),
+      (previous: UserDeleteValues): UserDeleteValues => ({
+        ...previous,
+        /*
+         * WHY : ⚠️ Refactoring Rationale: the typed key is CLAMPED to its declared width here, where it
+         *       was stored exactly as the control reported it and bounded only by `maxLength`. The WHY
+         *       block above {@link clampToDeclaredWidth} records the measurement and why a UTF-16 bound
+         *       is neither of the bounds an eight-byte key has -- and on this screen in particular, why
+         *       a key that differs from the one on the glass is the failure worth spending a loop to
+         *       prevent. `maxLength` stays on the control, because stopping the keystroke is the
+         *       affordance a 3270 had and this only corrects the unit it is counted in.
+         */
+        userId: clampToDeclaredWidth(typed, USER_DELETE_FIELD_WIDTHS.userId),
+      }),
     );
     setFieldErrors([]);
   }
@@ -1056,18 +1269,58 @@ export function UserDeleteScreen(): ReactElement {
    *       overridden to something delete-shaped. The action is presentation and analytics metadata, and on
    *       this mapset PF5 is the screen's committing key exactly as it is on its update sibling; the label
    *       is what tells an operator what it commits, and that label is the mapset's own `F5=Delete`.
-   * WHY : Trade-offs: ENTER and PF5 are DISABLED while a turn is in flight and PF4 and PF12 are not. The
-   *       first two would start a competing turn -- and PF5 in particular would open a confirmation over a
-   *       record still being read -- while PF4 aborts the outstanding turn and PF12 leaves the screen, so
-   *       greying either would trap an operator on a screen whose only unresponsive keys were the ones
-   *       offering a way off it. PF3 is left enabled for the same reason as PF12.
+   * WHY : ⚠️ Refactoring Rationale: ENTER and PF5 report `busy` where they used to report `disabled`, and
+   *       the change is not cosmetic. `disabled` routes a press into `usePfKeys`' rejection channel with
+   *       reason `'disabled'`, and this screen wires that channel to its band -- so pressing the screen's
+   *       own fetch key while its own fetch was still running painted `Invalid key pressed...`, which
+   *       tells an operator the key does not work. It does work; it arrived early. `busy` declines the
+   *       press SILENTLY and leaves the control present, enabled, focusable and named, which is the
+   *       3270's input-inhibit behaviour: the terminal swallowed the attention key without telling the
+   *       operator their key was invalid. The guard inside {@link requestDelete} and {@link handleFetch}
+   *       is unchanged and still refuses the competing turn, so nothing about what the keys DO moves.
+   * WHY : ⚠️ Assumptions: `busy` is stated only on the two keys that START a turn, and PF3, PF4 and PF12
+   *       are deliberately left out of the channel entirely. PF4 ABORTS the outstanding turn and PF3 and
+   *       PF12 leave the screen, so a screen must stay escapable while a read is in flight -- announcing
+   *       those three as busy would be announcing the operator's own way off the screen as unavailable.
+   *       An absent member is carried through as absent rather than as `false`, which is why they are
+   *       omitted rather than given `busy: false`: per `PfKeyBinding`, `false` reserves the busy
+   *       affordance's box on the control and absence reserves nothing.
+   * WHY : ⚠️ Refactoring Rationale: every entry declares its `risk`, which is what the legend's emphasis
+   *       is now painted from. A rendering pass measured this bar carrying `F5=Delete` in primary BLUE,
+   *       byte-identical in all four states to the benign `ENTER=Fetch` three positions to its left,
+   *       while the SAME action rendered danger-outlined in the screen's own body -- one action, two
+   *       contradictory paints, in a single frame. The old emphasis came from an AID list that could not
+   *       have been right here: `PFK05` is `F5=Delete` on `app/bms/COUSR03.bms` L148 and `F5=Save` on
+   *       `app/bms/COACTUP.bms`, so the key never tells you the risk. Each classification below is read
+   *       off this mapset's own legend literal.
+   * WHY : ⚠️ Assumptions: the four classifications are `ENTER=Fetch` read-only (it reads one row and
+   *       writes nothing), `F3=Back` read-only (it navigates), `F4=Clear` read-only (it empties controls
+   *       on the client and issues no request), and `F5=Delete` DESTRUCTIVE -- `app/bms/COUSR03.bms` L148
+   *       paints `ENTER=Fetch  F3=Back  F4=Clear  F5=Delete` and L148's `F5` arm is the only one of the
+   *       four that removes a record. `PFK12` is classified read-only on the same ground as PF3 even
+   *       though it carries no label, because the classification travels with the binding and not with
+   *       the legend text.
+   * WHY : Assumptions: stating `read-only` explicitly on ENTER is load-bearing rather than redundant.
+   *       The fallback it replaces put `ENTER` in its primary set, so leaving ENTER unclassified would
+   *       have left the bar with a primary-blue fetch beside the solid-danger delete, and the operator
+   *       would still be reading two emphasised controls where exactly one action is dangerous.
    */
   const keyHandlers: PfKeyHandlerMap = {
-    ENTER: { onInvoke: handleFetch, label: USER_DELETE_KEY_LABELS.ENTER, disabled: busy },
-    PFK03: { onInvoke: exitToOrigin, label: USER_DELETE_KEY_LABELS.PFK03 },
-    PFK04: { onInvoke: clearScreen, label: USER_DELETE_KEY_LABELS.PFK04 },
-    PFK05: { onInvoke: requestDelete, label: USER_DELETE_KEY_LABELS.PFK05, disabled: busy },
-    PFK12: { onInvoke: exitToAdminMenu },
+    ENTER: {
+      onInvoke: handleFetch,
+      label: USER_DELETE_KEY_LABELS.ENTER,
+      risk: 'read-only',
+      busy,
+    },
+    PFK03: { onInvoke: exitToOrigin, label: USER_DELETE_KEY_LABELS.PFK03, risk: 'read-only' },
+    PFK04: { onInvoke: clearScreen, label: USER_DELETE_KEY_LABELS.PFK04, risk: 'read-only' },
+    PFK05: {
+      onInvoke: requestDelete,
+      label: USER_DELETE_KEY_LABELS.PFK05,
+      risk: USER_DELETE_ACTION_RISK,
+      busy,
+    },
+    PFK12: { onInvoke: exitToAdminMenu, risk: 'read-only' },
   };
 
   const { bindings, invoke } = usePfKeys(keyHandlers, {
@@ -1183,6 +1436,48 @@ export function UserDeleteScreen(): ReactElement {
   const fetchKeyId = `${idPrefix}userId`;
   const refusal = fieldErrors[0];
 
+  /**
+   * The record the confirmation dialog names, as label-and-value rows.
+   *
+   * ⚠️ Purpose: make the dialog state WHICH user it is about to destroy. A sweep of every confirmation in
+   * this delivery found that not one of them named its record, and three of them merely echoed the
+   * button's own label or the message band back at the operator -- which on the one screen that deletes a
+   * person's access is the difference between a confirmation and a formality.
+   *
+   * ⚠️ Assumptions: the three record rows are withheld until a row has been READ, and the identifier row
+   * is always present. The PF5 key deliberately reaches the delete arm with a typed but unfetched key,
+   * because `app/cbl/COUSR03C.cbl` L188-L192 performs its read and its delete unconditionally and answers
+   * `User ID NOT found...` from either -- so that path stays open. On it, this screen holds no names and
+   * no user type, and rendering three empty rows would have the dialog assert a record it has not got.
+   * Naming only the key is the honest statement of what the operator has actually addressed.
+   *
+   * Assumptions: every label is verbatim mapset text from the catalog -- `app/bms/COUSR03.bms` L84, L102,
+   * L115 and L129 -- and the identifier and the user type are rendered in the fixed-pitch face for the
+   * reason {@link fixedPitchStyle} records, while the two free-text names are left in the body face.
+   */
+  const confirmationRecordItems: DescriptionsProps['items'] = [
+    {
+      key: 'userId',
+      label: USER_DELETE_FIELD_LABELS.userId,
+      children: <Typography.Text style={fixedPitchStyle}>{values.userId}</Typography.Text>,
+    },
+    ...(loaded
+      ? [
+          {
+            key: 'firstName',
+            label: USER_DELETE_FIELD_LABELS.firstName,
+            children: values.firstName,
+          },
+          { key: 'lastName', label: USER_DELETE_FIELD_LABELS.lastName, children: values.lastName },
+          {
+            key: 'userType',
+            label: USER_DELETE_FIELD_LABELS.userType,
+            children: <Typography.Text style={fixedPitchStyle}>{values.userType}</Typography.Text>,
+          },
+        ]
+      : []),
+  ];
+
   /*
    * WHY : Trade-offs: the mapset's absolute geometry is NOT reproduced, and this is AAP gap G1 taken
    *       deliberately. `DFHMDI SIZE=(24,80)` fixes a 24-row by 80-column character grid and all 26 field
@@ -1201,6 +1496,21 @@ export function UserDeleteScreen(): ReactElement {
        * screen while the caller owns the COLOUR, because the colour is a per-mapset attribute.
        */}
       <ScreenTitle style={captionStyle}>{USER_DELETE_CAPTION}</ScreenTitle>
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: the screen ANNOUNCES its outstanding turn, where it previously
+       *       only showed one. A review found `aria-busy` on no button anywhere and no live region
+       *       naming the wait, so an operator who could not see the spinner had nothing at all: the
+       *       controls stayed reachable, the request was in flight, and the screen said nothing about
+       *       it. `busyAnnouncement` renders one visually hidden `role="status"` region -- always
+       *       mounted, empty while idle, because a live region has to be in the accessibility tree
+       *       BEFORE its content changes for the first change to be announced.
+       * WHY : Assumptions: the sentence is `REQUEST_IN_PROGRESS` from the message catalogue, which is
+       *       AUTHORED rather than transcribed, and taking an authored sentence here does not weaken
+       *       Rule T8. The reference has no equivalent to carry: a 3270 turn simply locked the keyboard,
+       *       so there is no mapset literal this could be displacing. Every sentence on this screen that
+       *       DOES have a mainframe source is still that source's, verbatim.
+       */}
+      {busyAnnouncement(busy ? REQUEST_IN_PROGRESS : undefined)}
       <Form layout="vertical">
         {/*
          * WHY : Assumptions: this is the mapset's ONLY control. `USRIDIN` at L85 is its single
@@ -1235,7 +1545,44 @@ export function UserDeleteScreen(): ReactElement {
             onChange={handleFetchKeyChange}
             disabled={busy}
             autoFocus
-            style={fixedPitchStyle}
+            /*
+             * WHY : ⚠️ Refactoring Rationale: the control now carries the CEILING its copybook width
+             *       declares alongside the fixed-pitch face it already had. A rendering review measured
+             *       what the absence cost: an eight-character input rendered 1172 pixels wide and the
+             *       blank-field asterisk this control paints at its right-hand edge landed at x≈1211,
+             *       roughly 1150 pixels from the value it qualifies.
+             *       `ui/src/layout/recordLayout.ts` records the same measurement and states the
+             *       conclusion this adopts -- the marker cannot be brought to the value by moving the
+             *       marker, so the field has to stop being eight times wider than the data it holds.
+             * WHY : ⚠️ Assumptions: the measure is spread onto the DESIGN-SYSTEM CONTROL and not onto the
+             *       `Form.Item` or a wrapper, which that module records as a measured constraint rather
+             *       than a preference: the theme scopes its custom properties to component class scopes,
+             *       so `--ant-control-padding-horizontal` resolves on an `.ant-input` and returns the
+             *       empty string on an arbitrary element. Spread here the padding term resolves; spread
+             *       on a wrapper it would not, and the `calc()` would be dropped at computed-value time.
+             * WHY : Assumptions: the two styles are MERGED rather than one replacing the other, so the
+             *       key keeps both properties it needs -- the monospaced face that renders two
+             *       eight-character identifiers at equal width, and the eight-column ceiling. Neither
+             *       object holds a member of the other, so the merge order changes nothing; it follows
+             *       the idiom `ui/src/screens/reports/index.tsx` L2611-L2613 uses for the same pair.
+             */
+            /*
+             * WHY : ⚠️ Refactoring Rationale: the marker slot is declared to the measure, and only on the
+             *       turn the marker is rendered. With a suffix present the design system sizes the affix
+             *       WRAPPER, whose space the value and the slot then share, so a maximum computed for the
+             *       value alone leaves the value short by whatever the slot takes -- measured on a sibling
+             *       screen's two-character field as a record key that rendered as one glyph and a sliver.
+             *       Assumptions: the allowance is CONDITIONAL on the very test that renders the suffix
+             *       below, so an accepted key keeps exactly the eight-column ceiling it has always had.
+             */
+            style={{
+              ...fixedPitchStyle,
+              ...copybookFieldWidthStyle(
+                USER_DELETE_FIELD_WIDTHS.userId,
+                cssVar,
+                refusal?.state === 'BLANK' ? BLANK_FIELD_MARKER_CHARACTERS : 0,
+              ),
+            }}
             {...(refusal?.state === 'BLANK'
               ? {
                   /*
@@ -1331,15 +1678,113 @@ export function UserDeleteScreen(): ReactElement {
         </Descriptions>
       </Spin>
       {/*
-       * WHY : Assumptions: the confirmation is CONTROLLED by this screen's own state so the PF5 key and a
-       *       click on the trigger open the same modal, and accepting it is the only path to
-       *       {@link confirmDelete}. `okType="danger"` is the design system's destructive emphasis, which
-       *       is what tells an operator which of the two buttons destroys the row.
-       * WHY : Assumptions: the prompt is the reference's OWN awaiting-confirmation sentence rather than a
-       *       newly written question. `'Press PF5 key to delete this user ...'` at L283 is precisely the
-       *       text the reference shows to invite the confirming keystroke, so it is the faithful prompt for
-       *       the modal that replaces that keystroke -- and it comes from the message catalog, which holds
-       *       the verbatim monopoly for this tree, so no user-visible string is invented here.
+       * WHY : Assumptions: the trigger sits in its OWN `Flex` row rather than directly under the vertical
+       *       one, so it takes its content's width instead of the column's. A vertical `Flex` stretches its
+       *       children across the cross axis, which measured this control at 1173 px -- a full-bleed red
+       *       band that is the widest and loudest thing on a screen whose reference paints no delete button
+       *       at all, only a row-24 legend. Sizing it to its label keeps the escalation in the right order:
+       *       a modest control opens a confirmation, and the confirmation's own accept is what destroys.
+       * WHY : Assumptions: the wrapper is a design-system primitive and not a styled `div`, per the AAP's
+       *       requirement that all spacing and alignment go through `Flex`, `Space` or `Row`/`Col`.
+       */}
+      <Flex>
+        {/*
+         * WHY : Assumptions: the trigger is wrapped in a NESTED provider carrying `destructiveFocusTheme`
+         *       so its focus ring sits in the error ramp at 10.718:1 rather than the primary ramp. The
+         *       design system derives ONE outline for every button variant from a single token, so a
+         *       destructive control focused through the keyboard otherwise asserts no danger at all while
+         *       its resting and hovered states both do. A nested provider MERGES per component name, so
+         *       nothing else about this button changes.
+         */}
+        <ConfigProvider theme={destructiveFocusTheme}>
+          {/*
+           * WHY : ⚠️ Refactoring Rationale: the emphasis comes from {@link USER_DELETE_ACTION_EMPHASIS}
+           *       where it was a bare `danger` with no `type`. That bare form resolves to the OUTLINED
+           *       dangerous variant -- `ui/node_modules/antd/lib/button/Button.js` L96-L107 replaces only
+           *       the colour, so `['default','outlined']` becomes `['danger','outlined']` -- which is how
+           *       the most destructive control on the screen came to carry less visual weight than the
+           *       benign primary controls around it, and why it did not match its own legend copy. The
+           *       shared resolver yields the solid dangerous pair instead, so the two copies of this one
+           *       action are identical.
+           */}
+          <Button
+            type={USER_DELETE_ACTION_EMPHASIS.type}
+            danger={USER_DELETE_ACTION_EMPHASIS.danger}
+            disabled={busy || !loaded}
+            onClick={
+              /**
+               * Opens the confirmation through the same guarded path the PF5 key uses.
+               * @returns {void} Completion is either the opened confirmation or a banded refusal.
+               */
+              (): void => {
+                requestDelete();
+              }
+            }
+          >
+            {USER_DELETE_KEY_LABELS.PFK05}
+          </Button>
+        </ConfigProvider>
+      </Flex>
+      {/*
+       * WHY : ⚠️ Refactoring Rationale: this surface was a `Popconfirm` and is now a `Modal`, and the
+       *       reason is mechanical rather than stylistic. A `Popconfirm` renders through the tooltip
+       *       primitive, whose overlay hardcodes `role: "tooltip"` at
+       *       `ui/node_modules/@rc-component/tooltip/es/Popup.js` with no prop path to override it, and it
+       *       traps no focus and carries no `aria-modal`. Deleting a user is the most destructive act in
+       *       this delivery, and a browser sweep measured the consequences in one frame: the prompt was
+       *       announced as a tooltip, initial focus stayed on the trigger so a bare Enter re-fired the
+       *       screen's own key instead of confirming, and the balloon was anchored over the very record it
+       *       was asking about. `Modal` renders through the dialog primitive, which sets `role="dialog"`,
+       *       `aria-modal="true"` and `aria-labelledby` from the title
+       *       (`ui/node_modules/@rc-component/dialog/es/Dialog/Content/Panel.js` L113-L115), locks focus
+       *       inside itself while it is open, and restores focus to the trigger when it closes.
+       *       Alternatives Considered: keeping the `Popconfirm` and adding `role="dialog"` through a
+       *       pass-through prop -- there is none, and a hand-set attribute on the trigger cannot give the
+       *       overlay a focus trap. Also considered: the imperative `Modal.confirm` API -- rejected
+       *       because its content would be composed outside the render tree and would not re-read this
+       *       screen's values, so a dialog opened before a value changed would name a stale record.
+       * WHY : Assumptions: the dialog is CONTROLLED by this screen's own state, so the PF5 key and a click
+       *       on the trigger open the same surface and accepting it is the only path to
+       *       {@link confirmDelete}.
+       * WHY : ⚠️ Assumptions: the dialog NAMES the record it will destroy, and it does so by restating the
+       *       four values with their own mapset labels rather than by echoing the band. The awaiting
+       *       sentence `'Press PF5 key to delete this user ...'` (L283) is already on row 23 for as long
+       *       as the dialog is open, so repeating it here printed one question twice and named nobody --
+       *       which is what the sweep recorded. Every string in the dialog is verbatim catalog text: the
+       *       title is the mapset's own caption at `app/bms/COUSR03.bms` L79 and the four labels are its
+       *       field labels at L84, L102, L115 and L129. Nothing is authored.
+       *       Trade-offs: the identifier's label reads `Enter User ID:`, which is the label of an INPUT
+       *       being reused beside a static value. It is kept because it is the label the mapset paints for
+       *       that datum and the verbatim rule admits no substitute; writing `User ID:` would author an
+       *       operator-visible string this baseline does not contain.
+       * WHY : ⚠️ Assumptions: initial focus is placed on the SAFE choice through `cancelButtonProps`, and
+       *       the dialog primitive will not take it back: it focuses its own panel only when focus is not
+       *       already inside the wrapper (`Dialog/index.js` `focusDialogContent`). So a bare Enter on
+       *       arrival dismisses the dialog and destroys nothing, and confirming is a deliberate second act
+       *       -- a Tab or a click. Alternatives Considered: focusing the accept, which is what the bill-pay
+       *       confirmation does. Rejected outright for this screen: one keystroke would then delete a user.
+       * WHY : Assumptions: the accept carries `danger` on TOP of the default primary type, rather than the
+       *       legacy `okType="danger"` this surface used before. `convertLegacyProps('danger')` yields
+       *       `danger: true` with the DEFAULT variant, so the destructive control rendered as the quieter
+       *       and smaller of the two buttons -- emphasis inverted against risk, measured at 34 px beside a
+       *       59 px benign primary. Passing both props makes it the solid, full-height, red one, and the
+       *       theme's own `controlHeight` of 32 clears the 24-pixel AA target-size floor this tree adopts.
+       * WHY : Assumptions: only the ACCEPT is wrapped in the destructive-focus provider, not the whole
+       *       dialog. Wrapping the dialog would put the error-ramp ring around the cancel button as well,
+       *       which is the one control on this surface that is safe, and a focus ring is a risk signal.
+       *       That is why the footer is composed through the render-prop form: it is the only way to reach
+       *       one of the two stock buttons without also reaching the other.
+       * WHY : ⚠️ Assumptions: the dialog carries NO in-flight indicator, and its absence is measured rather
+       *       than overlooked. `confirmLoading` was passed here and never rendered: {@link confirmDelete}
+       *       closes the dialog in the same state batch that raises the in-flight flag, so the spinner had
+       *       nothing to appear on. Leaving the prop in place would have advertised a behaviour this screen
+       *       does not have. Alternatives Considered: holding the dialog OPEN for the duration of the
+       *       request so the spinner could be seen. Rejected because the success arm empties all four
+       *       values (L315 `INITIALIZE-ALL-FIELDS`), so a dialog still open at that moment would be naming
+       *       a record whose fields had just been blanked -- a confirmation contradicting the screen behind
+       *       it, which is precisely the failure this group exists to remove. The in-flight state is
+       *       reported where the operator is actually left: the screen's own busy region and its disabled
+       *       controls.
        * WHY : Trade-offs: the trigger is disabled until a row has been displayed. The reference reaches its
        *       delete arm from any state and answers `User ID NOT found...` for a key naming nothing, so the
        *       keyboard path is left able to do exactly that -- PF5 with a typed but unfetched key still
@@ -1347,37 +1792,94 @@ export function UserDeleteScreen(): ReactElement {
        *       the POINTER affordance, which the reference had no equivalent of at all, and withholding it
        *       keeps a click from destroying a record the operator has not seen.
        */}
-      <Popconfirm
+      <Modal
         open={confirmOpen}
-        title={DELETE_MESSAGES.PRESS_PF5_KEY_TO_DELETE_THIS_USER}
-        okType="danger"
-        onConfirm={confirmDelete}
-        onCancel={
+        title={USER_DELETE_CAPTION}
+        okText={USER_DELETE_KEY_LABELS.PFK05}
+        okButtonProps={{ danger: true, 'aria-describedby': DELETE_CONFIRMATION_RECORD_ID }}
+        cancelButtonProps={{ autoFocus: true, 'aria-describedby': DELETE_CONFIRMATION_RECORD_ID }}
+        /*
+         * WHY : ⚠️ Refactoring Rationale: a withdrawn confirmation is DESTROYED rather than kept
+         *       hidden, so the `autoFocus` on the line above survives past the FIRST opening.
+         *       `autoFocus` is applied by the platform when a control enters the document; the design
+         *       system keeps a closed dialogue mounted at `display:none`, so a second opening re-shows
+         *       controls that never left and nothing re-applies the attribute. A browser pass measured
+         *       this dialogue opening focused on `Cancel` -- but it opened it only once, and the same
+         *       pass on the sibling authorization screen measured a RE-opening settling on the
+         *       dialogue's container element instead. This screen is reached once per user and its
+         *       operator may well decline and reconsider, so the second opening is a real case, and on
+         *       a delete the declining choice is the answer that must be under the next keystroke.
+         *       Trade-offs: one extra mount per confirmation. The withdrawal still fades --
+         *       `@rc-component/dialog/lib/Dialog/Content/index.js` passes the flag as the leave
+         *       motion's `removeOnLeave`, so removal waits for the animation to complete.
+         */
+        destroyOnHidden
+        onOk={confirmDelete}
+        onCancel={cancelDelete}
+        footer={
           /**
-           * Closes the confirmation without issuing the deletion.
-           * @returns {void} Completion is the closed confirmation; the record stays as it is.
+           * Composes the footer so the accept alone carries the destructive focus ring.
+           * Assumptions: the second parameter is annotated explicitly rather than inferred, because the
+           * JSDoc has to NAME its type and `jsdoc/no-undefined-types` rejects a name this module does
+           * not have in scope. The shape is the design system's own, declared at
+           * `ui/node_modules/antd/es/modal/interface.d.ts` L35-L38 as `{ OkBtn: React.FC; CancelBtn:
+           * React.FC }`, so annotating restates the package's contract rather than inventing one.
+           * @param {ReactNode} _stockFooter - The stock pair, unused; the two members are placed by hand.
+           * @param {{ OkBtn: FC; CancelBtn: FC }} controls - The stock buttons, each of which reads this
+           *   dialog's own `okButtonProps`, `cancelButtonProps` and handlers.
+           * @param {FC} controls.OkBtn - The accept, carrying `okButtonProps` and `onOk`.
+           * @param {FC} controls.CancelBtn - The decline, carrying `cancelButtonProps` and `onCancel`.
+           * @returns {ReactElement} The cancel control followed by the destructive accept.
            */
-          (): void => {
-            setConfirmOpen(false);
-          }
+          (
+            _stockFooter: ReactNode,
+            controls: { readonly OkBtn: FC; readonly CancelBtn: FC },
+          ): ReactElement => (
+            <>
+              {/*
+               * WHY : Assumptions: cancel is rendered FIRST, which is both the stock order and the safe
+               *       one -- the first control a keyboard reaches on this surface is the one that changes
+               *       nothing.
+               */}
+              <controls.CancelBtn />
+              <ConfigProvider theme={destructiveFocusTheme}>
+                <controls.OkBtn />
+              </ConfigProvider>
+            </>
+          )
         }
       >
-        <Button
-          danger
-          disabled={busy || !loaded}
-          onClick={
-            /**
-             * Opens the confirmation through the same guarded path the PF5 key uses.
-             * @returns {void} Completion is either the opened confirmation or a banded refusal.
-             */
-            (): void => {
-              requestDelete();
-            }
-          }
-        >
-          {USER_DELETE_KEY_LABELS.PFK05}
-        </Button>
-      </Popconfirm>
+        {/*
+         * WHY : Assumptions: the rows are passed as `items` rather than as `Descriptions.Item` children,
+         *       which is both the non-deprecated form at this package version and the form that lets the
+         *       list be built conditionally -- see {@link confirmationRecordItems} for why one of the four
+         *       rows is withheld until a row has actually been read.
+         */}
+        {/*
+         * WHY : ⚠️ Refactoring Rationale: `colon={false}` where the prop was absent, because the dialog
+         *       rendered DOUBLED colons -- a measured pass read `Enter User ID: :  USER0001` and
+         *       `First Name: :  Ulric`. Both colons are real and only one is ours: the labels are
+         *       verbatim mapset text and `app/bms/COUSR03.bms` L84, L102, L115 and L129 END them with a
+         *       colon, while this component adds a second through a `::after` whose content is `":"`
+         *       (`ui/node_modules/antd/lib/descriptions/style/index.js` L122-L128).
+         * WHY : ⚠️ Alternatives Considered: trimming the colon off the label instead. Rejected under Rule
+         *       T8 -- the label is an operator-visible string with a mainframe source, so it is carried
+         *       character for character, and trimming it here would also make the dialog's labels differ
+         *       from the same four labels rendered on the glass behind it. Suppressing the component's
+         *       own decoration changes nothing the reference states.
+         * WHY : Assumptions: the record view further up needs no such prop and deliberately does not
+         *       carry one. It is `bordered`, and the bordered rules set the same `::after` to
+         *       `display: none` (same file, L42-L47), so there is no second colon there to suppress --
+         *       which is why the measured defect appeared in the dialog alone.
+         */}
+        <Descriptions
+          size="small"
+          colon={false}
+          column={CONFIRMATION_RECORD_COLUMNS}
+          id={DELETE_CONFIRMATION_RECORD_ID}
+          items={confirmationRecordItems}
+        />
+      </Modal>
     </Flex>
   );
 }

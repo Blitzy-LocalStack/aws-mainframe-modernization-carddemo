@@ -31,7 +31,7 @@ import {
   signOut,
   updateUser,
 } from './auth';
-import { setAccessToken } from './client';
+import { getApiClient, setAccessToken } from './client';
 import {
   HARNESS_CORRELATION_HEADER,
   HTTP_CREATED,
@@ -334,6 +334,79 @@ async function createsAUserAtTheCollectionTarget(): Promise<void> {
 }
 
 /**
+ * Asserts a value wider than the field it is stored in is refused locally and never dispatched.
+ *
+ * Purpose: this is the measured defect. `POST /auth/users` answered `201` in 7 ms for a body whose
+ * `firstName` held 10,000 characters against a copybook width of 20 -- 10,061 bytes dispatched for a
+ * name that cannot be stored -- because the create screen's `maxLength` attribute bounds TYPING and
+ * this request path bounded nothing. A value set programmatically, pasted, or restored from a draft
+ * reaches the body without passing the input that was supposed to have stopped it.
+ *
+ * Assumptions: THREE properties are asserted, and each fails a different way of getting this wrong.
+ * That the call rejects -- a client that dispatched and let the service answer 400 would pass on that
+ * alone. That NOTHING reached the transport -- which is the whole point of refusing before dispatch.
+ * And that the message names the member and the two lengths and NOT the value, because this guard also
+ * runs on credentials, primary account numbers and national identifiers, and an exception message is
+ * copied verbatim into consoles and bug reports.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function refusesANameWiderThanTheFieldItIsStoredIn(): Promise<void> {
+  const overLong = 'A'.repeat(10_000);
+
+  const raised: unknown = await createUser({
+    userId: 'ADMIN001',
+    firstName: overLong,
+    lastName: 'LOVELACE',
+    userType: 'A',
+  }).catch(
+    /**
+     * Yields the refusal as a value, so the case can assert on what it was.
+     * @param {unknown} error - Whatever the request rejected with.
+     * @returns {unknown} That same refusal.
+     */
+    function yieldTheRefusal(error: unknown): unknown {
+      return error;
+    },
+  );
+
+  expect(raised).toBeInstanceOf(RangeError);
+  const reported = raised instanceof Error ? raised.message : '';
+  expect(reported).toContain('CreateUserRequest.firstName');
+  expect(reported).toContain('10000');
+  expect(reported).toContain('20');
+  expect(reported, 'a refusal must not reproduce the value it refused').not.toContain(overLong);
+  expect(dispatchedRequests(), 'nothing may be dispatched for a refused body').toHaveLength(0);
+}
+
+/**
+ * Asserts a value AT its published width is admitted, so the guard bounds rather than narrows.
+ *
+ * Assumptions: this case is what stops the refusal above from being satisfied by a guard that is one
+ * character too strict. Twenty characters is exactly `SEC-USR-FNAME PIC X(20)`, so a client refusing it
+ * would reject the longest name the field can hold -- a defect no operator could work around, and one
+ * that an over-length case alone would never detect.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function admitsANameFillingTheFieldExactly(): Promise<void> {
+  const exactly20 = 'A'.repeat(20);
+  answerWith({ ...USER_ROW, cognitoSub: 'sub', credentialSecretName: 'secret' }, HTTP_CREATED);
+
+  await createUser({
+    userId: 'ADMIN001',
+    firstName: exactly20,
+    lastName: 'LOVELACE',
+    userType: 'A',
+  });
+
+  expect(onlyRequest().body).toEqual({
+    userId: 'ADMIN001',
+    firstName: exactly20,
+    lastName: 'LOVELACE',
+    userType: 'A',
+  });
+}
+
+/**
  * Asserts a member read addresses the identifier as a path segment and percent-encodes it.
  *
  * Assumptions: the encoded case is asserted alongside the ordinary one, because an identifier is
@@ -364,6 +437,112 @@ async function updatesOneUserAtItsMemberTarget(): Promise<void> {
   // Assumptions: the identifier is asserted ABSENT from the body, because the contract takes it from the
   //   path and admitting it in both would allow a request whose two halves named different users.
   expect(request.body).not.toHaveProperty('userId');
+}
+
+/**
+ * Asserts two concurrent deletions of the SAME row issue one request and both settle.
+ *
+ * Purpose: ⚠️ duplicate protection was present on the safe verb and absent on the dangerous one -- the
+ * report submission carries an `Idempotency-Key` header while this deletion carried nothing at all. The
+ * header cannot be the remedy here: it is declared in exactly one of the seven published contracts, on
+ * `submitTransactionReport` alone, so sending it on a deletion would be a header no service reads, and a
+ * key the server ignores is worse than none because the request then looks protected. What a client can
+ * close on its own is the CONCURRENT duplicate -- a double-click, a repeated key, a second confirmation
+ * -- which is what this asserts.
+ *
+ * Assumptions: BOTH properties are asserted. One request reached the transport, and both callers
+ * received the outcome: a guard that refused the second caller instead of answering it would leave a
+ * screen holding a rejection for a deletion that in fact succeeded.
+ *
+ * Assumptions: exactly ONE answer is queued, so a second dispatch could not have been answered at all --
+ * which is a second, independent way for this case to fail if the guard stops working.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function collapsesTwoConcurrentDeletesOfOneRow(): Promise<void> {
+  answerWith(undefined, HTTP_NO_CONTENT);
+
+  const [first, second] = await Promise.all([
+    deleteUser('ADMIN001', true),
+    deleteUser('ADMIN001', true),
+  ]);
+
+  expect(dispatchedRequests(), 'one row, one deletion').toHaveLength(1);
+  expect(first).toBeUndefined();
+  expect(second).toBeUndefined();
+}
+
+/**
+ * Asserts two concurrent deletions of DIFFERENT rows both go out.
+ *
+ * Assumptions: this is what stops the guard from being a global mutex on the verb. The row is part of
+ * the key, so deleting two users at once is two deletions -- and a guard keyed on the method alone would
+ * silently drop the second, leaving a row the operator was told had gone.
+ * @returns {Promise<void>} Nothing; the assertion is the outcome.
+ */
+async function keepsTwoDeletesOfDifferentRowsApart(): Promise<void> {
+  answerWith(undefined, HTTP_NO_CONTENT);
+  answerWith(undefined, HTTP_NO_CONTENT);
+
+  await Promise.all([deleteUser('ADMIN001', true), deleteUser('ADMIN002', true)]);
+
+  expect(dispatchedRequests()).toHaveLength(2);
+  expect(
+    dispatchedRequests().map(
+      /**
+       * Reads one recorded request's target.
+       * @param {(ReturnType<typeof dispatchedRequests>)[number]} request - One recorded request.
+       * @returns {string} The target that request was dispatched to.
+       */
+      function targetOf(request: ReturnType<typeof dispatchedRequests>[number]): string {
+        return request.url;
+      },
+    ),
+  ).toEqual(['/auth/users/ADMIN001', '/auth/users/ADMIN002']);
+}
+
+/**
+ * Asserts a deletion that failed can be retried at once.
+ *
+ * Assumptions: the guard releases on SETTLEMENT and not on success, which matters because the opposite
+ * would leave a row undeletable until a reload -- a worse outcome than allowing a deliberate retry, and
+ * one an operator could not work around. The retry is asserted as a second dispatch rather than as a
+ * resolved promise, since a guard still holding the failed attempt would answer from it without sending
+ * anything.
+ * @returns {Promise<void>} Nothing; the assertions are the outcome.
+ */
+async function allowsARetryAfterAFailedDelete(): Promise<void> {
+  const client = getApiClient();
+  const harnessAdapter = client.defaults.adapter;
+  // Assumptions: asserted rather than defaulted, because this case depends on RESTORING the harness
+  //   adapter after the rejecting one -- a harness that installed none would leave the second attempt
+  //   reaching real transport, and the count below would then be asserting nothing about a retry.
+  if (harnessAdapter === undefined) {
+    throw new Error(
+      'the api harness installs an adapter; this case restores it after failing once',
+    );
+  }
+  let attempts = 0;
+  // Assumptions: the first attempt is made to REJECT by an adapter installed here, because the shared
+  //   harness always resolves -- it answers a queued status without running Axios's own status check --
+  //   so a queued 500 would resolve and this case would assert nothing about a failed deletion. The
+  //   harness adapter is restored immediately afterwards so the count below is still its recording.
+  /**
+   * Fails every dispatch, standing for a transport that cannot reach the service.
+   * @returns {Promise<never>} A rejection, always.
+   */
+  client.defaults.adapter = async function failEveryDispatch(): Promise<never> {
+    attempts += 1;
+    return Promise.reject(new Error('the deletion failed'));
+  };
+
+  await expect(deleteUser('ADMIN001', true)).rejects.toThrow(Error);
+
+  client.defaults.adapter = harnessAdapter;
+  answerWith(undefined, HTTP_NO_CONTENT);
+  await deleteUser('ADMIN001', true);
+
+  expect(attempts, 'the failed attempt reached the transport').toBe(1);
+  expect(dispatchedRequests(), 'the retry reached the transport too').toHaveLength(1);
 }
 
 /**
@@ -437,9 +616,17 @@ function authClientBehaviour(): void {
   );
   it('refuses an opening position with a cursor', refusesAnOpeningPositionWithACursor);
   it('creates a user at the collection target', createsAUserAtTheCollectionTarget);
+  it(
+    'refuses a name wider than the field it is stored in',
+    refusesANameWiderThanTheFieldItIsStoredIn,
+  );
+  it('admits a name filling the field exactly', admitsANameFillingTheFieldExactly);
   it('addresses one user by path segment', addressesOneUserByPathSegment);
   it('updates one user at its member target', updatesOneUserAtItsMemberTarget);
   it('confirms a delete explicitly', confirmsADeleteExplicitly);
+  it('collapses two concurrent deletes of one row', collapsesTwoConcurrentDeletesOfOneRow);
+  it('keeps two deletes of different rows apart', keepsTwoDeletesOfDifferentRowsApart);
+  it('allows a retry after a failed delete', allowsARetryAfterAFailedDelete);
   it(
     'carries a correlation identifier on every request',
     carriesACorrelationIdentifierOnEveryRequest,

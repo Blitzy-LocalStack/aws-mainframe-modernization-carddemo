@@ -235,6 +235,43 @@ function isComponentLevelConditional(line: string): boolean {
 }
 
 /**
+ * Reports whether the conditional opening at one index actually leaves the component.
+ *
+ * ⚠️ Refactoring Rationale: this predicate exists because indentation alone was standing in for
+ * "early return", and the substitution is not sound. A component-level `if (` that ASSIGNS and falls
+ * through constrains nothing about hook order, yet it was being read as the point past which no hook
+ * may be called: `cardUpdate` selects one of three chrome descriptions with
+ * `if (selector === null) { shellSlot = … }` and then calls `useShellSlot(shellSlot)` once,
+ * unconditionally, below it — legal code, which failed with
+ * `cardUpdate must call useShellSlot above its first early return: expected 662 to be less than 632`.
+ * The rule being pinned is the rules of hooks, and only a conditional that RETURNS can violate it.
+ *
+ * Assumptions: the block is read from its opening line to the first line that closes a two-space
+ * block (`  }`, including the `  } else` and `  } else if (` continuations, which are part of the same
+ * chain and are therefore searched too). A `return` at any depth inside that span leaves the
+ * component, because a nested function's own `return` sits inside a brace opened deeper than two
+ * spaces and so is passed over before this scan reaches a two-space close.
+ * @param {readonly string[]} lines - The module's source lines.
+ * @param {number} start - Index of the line opening the component-level conditional.
+ * @returns {boolean} `true` when the conditional chain contains a `return`.
+ */
+function conditionalLeavesTheComponent(lines: readonly string[], start: number): boolean {
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (/^ {2}\}(?: else(?: if \()?)?/u.test(line)) {
+      if (!/^ {2}\} else/u.test(line)) {
+        return false;
+      }
+      continue;
+    }
+    if (/^\s+return\b/u.test(line)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Locates a screen's first early return, searching only inside the component.
  *
  * Refactoring Rationale: the search is bounded by the component declaration, where it used to run over
@@ -242,9 +279,11 @@ function isComponentLevelConditional(line: string): boolean {
  * module-level helper, which is neither component-level nor an early return — so a screen with a
  * helper above its component failed a rules-of-hooks assertion naming a hook that helper never calls.
  * Three modules carry comments recording that they avoided guard clauses purely to keep this search
- * honest; bounding it removes the constraint instead of asking authors to work around it.
+ * honest; bounding it removes the constraint instead of asking authors to work around it. A second
+ * correction narrows it from any component-level conditional to one that actually returns — see
+ * {@link conditionalLeavesTheComponent}.
  * @param {readonly string[]} lines - The module's source lines.
- * @returns {number} Index of the first component-level conditional, or `-1` when the component has
+ * @returns {number} Index of the first component-level early return, or `-1` when the component has
  *   none or the component declaration cannot be found.
  */
 function firstEarlyReturnIndex(lines: readonly string[]): number {
@@ -252,8 +291,15 @@ function firstEarlyReturnIndex(lines: readonly string[]): number {
   if (componentLine === -1) {
     return -1;
   }
-  const offset = lines.slice(componentLine).findIndex(isComponentLevelConditional);
-  return offset === -1 ? -1 : componentLine + offset;
+  for (let index = componentLine; index < lines.length; index += 1) {
+    if (
+      isComponentLevelConditional(lines[index] ?? '') &&
+      conditionalLeavesTheComponent(lines, index)
+    ) {
+      return index;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -428,15 +474,21 @@ function everyScreenCallsTheHookUnconditionally(): void {
     //   be less than 411`, where 411 is an `if` inside a helper and 913 is the component's own hook call.
     //   Anchoring the search at the component makes the two indices comparable, which is what the
     //   assertion assumed all along.
-    const componentLine = lines.findIndex(isScreenComponentDeclaration);
-    expect(componentLine, `${screen} must declare a screen component`).toBeGreaterThan(-1);
-    const withinComponent = lines.slice(componentLine);
-    const earlyReturnOffset = withinComponent.findIndex(isComponentLevelConditional);
-    if (earlyReturnOffset !== -1) {
+    //   ⚠️ Refactoring Rationale: this now routes through the shared
+    //   {@link firstEarlyReturnIndex} rather than searching for a bare conditional of its own, so the
+    //   two ordering cases in this file agree on what an early return IS. Its own inline search shared
+    //   the defect corrected there — a conditional that assigns and falls through is not a return, and
+    //   reading one as a return fails correct code.
+    expect(
+      lines.findIndex(isScreenComponentDeclaration),
+      `${screen} must declare a screen component`,
+    ).toBeGreaterThan(-1);
+    const clockEarlyReturn = firstEarlyReturnIndex(lines);
+    if (clockEarlyReturn !== -1) {
       expect(
         hookLine,
         `${screen} must call useServerInstant above its first early return`,
-      ).toBeLessThan(componentLine + earlyReturnOffset);
+      ).toBeLessThan(clockEarlyReturn);
     }
   }
 }

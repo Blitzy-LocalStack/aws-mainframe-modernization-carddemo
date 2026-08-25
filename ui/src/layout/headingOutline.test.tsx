@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { APP_TITLE_DISPLAY } from '../messages/messages';
-import { TYPOGRAPHY_TOKENS } from '../theme/tokens';
+import { BMS_TEXT_COLOR_TOKENS, TYPOGRAPHY_TOKENS } from '../theme/tokens';
 import { ScreenHeader } from './ScreenHeader';
 import {
   APP_TITLE_HEADING_LEVEL,
@@ -184,12 +184,82 @@ function theBandOutranksTheCaptionWhenBothAreRendered(): void {
     'the rendered band must outrank the rendered caption',
   ).toBeLessThan(Number(caption.tagName.slice(1)));
 
-  for (const heading of [band, caption]) {
-    expect(
-      heading.getAttribute('style'),
-      'a heading must carry the size the bridge maps, independently of its rank',
-    ).toContain(customPropertyFragment(TYPOGRAPHY_TOKENS.screenTitleSize));
-  }
+  expect(
+    caption.getAttribute('style'),
+    'a route caption must carry the size the bridge maps, independently of its rank',
+  ).toContain(customPropertyFragment(TYPOGRAPHY_TOKENS.screenTitleSize));
+
+  /*
+   * ⚠️ Refactoring Rationale: the band is now asserted to carry a DIFFERENT size from the caption,
+   * where this case used to require both to carry the same one -- the bridge's screen-title entry.
+   * Requiring one size was a defect the case was enforcing: a rendering review measured both headings
+   * at `20px/600` on all nine screens that paint two, so rank conveyed nothing a reader could see and
+   * the only visible difference was a colour that itself varied by screen. The bridge entry belongs to
+   * the CAPTION -- `ui/src/theme/tokens.ts` names it `screenTitleSize` and argues it from the row-4
+   * field -- so the band taking it too was the mistake, not the mapping.
+   *
+   * Assumptions: the two are compared to EACH OTHER rather than to a second token name, because what
+   * matters is that they differ; which step the band takes is argued at `appTitleSizeStyle` and pinning
+   * the name here would duplicate that decision in a place with no standing to make it.
+   */
+  const bandSize = band.style.fontSize;
+  const captionSize = caption.style.fontSize;
+
+  expect(bandSize, 'the band must state a size of its own').not.toBe('');
+  expect(captionSize, 'the caption must state a size of its own').not.toBe('');
+  expect(bandSize, 'rank must be visible as well as semantic: the two sizes must differ').not.toBe(
+    captionSize,
+  );
+}
+
+/**
+ * The band is the document's own heading, so the outline has a rank-one element.
+ *
+ * Purpose: a rendering review scanned every heading on all fifteen rendered screens and found no `h1`
+ * anywhere - the highest rank was `h3`, so every document asserted two ancestors that do not exist.
+ * The band is the element that should carry rank one: it names the enclosing region and `ui/index.html`
+ * renders the same constant as the document `<title>`.
+ *
+ * Assumptions: the count is asserted as well as the rank, because two rank-one headings would be a
+ * different defect with the same passing rank - and the band is rendered by the shell on eighteen
+ * routes and by the screen itself on three, so a duplicate is a real failure mode rather than a
+ * theoretical one.
+ * @returns {void} Nothing; assertions raise on failure.
+ */
+function givesTheDocumentARankOneHeading(): void {
+  render(<ScreenHeader transactionId="CAVW" programName="COACTVWC" />);
+
+  const band = screen.getByRole('heading', { name: APP_TITLE_DISPLAY });
+
+  expect(band.tagName, 'the application title must be the document-level heading').toBe('H1');
+  expect(
+    document.querySelectorAll('h1').length,
+    'exactly one element may claim the document-level rank',
+  ).toBe(1);
+}
+
+/**
+ * Every route caption resolves one colour, the one its mapset declares.
+ *
+ * Purpose: a rendering review measured the caption in three values across the routes -
+ * `rgba(0,0,0,0.88)` on four and `rgba(0,0,0,0.65)` on five - because the colour was whatever the
+ * calling screen passed. Every mapset that declares a row-4 caption declares it `COLOR=NEUTRAL`, all
+ * eighteen of them, so the variation expressed a distinction the source does not draw.
+ *
+ * Assumptions: the case renders a caption that PASSES A COLOUR of its own and asserts the mapped token
+ * wins, because the population that measured wrong is exactly the screens that passed one - a case that
+ * rendered the bare component would pass without exercising the precedence that fixes them.
+ * @returns {void} Nothing; assertions raise on failure.
+ */
+function resolvesOneColourForEveryCaption(): void {
+  render(<ScreenTitle style={{ color: 'var(--ant-color-error)' }}>{CAPTION_TEXT}</ScreenTitle>);
+
+  const caption = screen.getByRole('heading', { name: CAPTION_TEXT });
+
+  expect(
+    caption.getAttribute('style'),
+    'a caption must resolve the NEUTRAL role its mapset declares, whatever its screen passes',
+  ).toContain(customPropertyFragment(BMS_TEXT_COLOR_TOKENS.NEUTRAL));
 }
 
 /**
@@ -224,6 +294,8 @@ function noScreenWritesAHeadingRankOfItsOwn(): void {
 function headingOutlineCases(): void {
   it('ranks descend from the band to a section heading', theRanksDescendFromTheBandToTheSection);
   it('renders the band above the caption', theBandOutranksTheCaptionWhenBothAreRendered);
+  it('gives the document a rank-one heading', givesTheDocumentARankOneHeading);
+  it('resolves one colour for every caption', resolvesOneColourForEveryCaption);
   it('lets no screen write a heading rank of its own', noScreenWritesAHeadingRankOfItsOwn);
 }
 
