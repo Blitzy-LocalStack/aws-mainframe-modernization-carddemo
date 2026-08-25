@@ -11,13 +11,31 @@ No live environment is claimed here. The configuration is authored and
 statically validated; a backend-enabled plan or apply requires an operator's
 short-lived federated AWS session and the production approval control.
 
-**How this root fails.** Six failure modes are reachable from the commands below,
-and every one of them is a stop rather than a partial deployment: the bootstrap
-backend is absent, the state lock is held, a saved plan proposes a destroy nobody
-asked for, a destroy is refused while deletion protection is active, a module
-rejects a value against its own invariant, or the generated reference has drifted
-from the HCL. Each is paired with its response in
-[Failure handling](#failure-handling) at the end of this document.
+**Source of truth.** This document describes the six Terraform files beside it
+and nothing else: [`versions.tf`](versions.tf), [`backend.tf`](backend.tf),
+[`variables.tf`](variables.tf), [`main.tf`](main.tf),
+[`outputs.tf`](outputs.tf) and [`terraform.tfvars`](terraform.tfvars). It
+encodes the specification's environment-root topology, its per-environment
+parameterization contract, its no-secrets-in-source constraint and its
+outward-only configuration rule -- sections 0.4.1.6, 0.2.1.3, 0.9.1 and 0.5.3.5
+respectively. Where this file and a package authority disagree, the authority
+wins: [`../../README.md`](../../README.md) owns package-wide procedure,
+[deploy.md](../../../docs/runbooks/deploy.md) owns the deployment sequence, and
+[teardown.md](../../../docs/runbooks/teardown.md) owns decommissioning.
+
+Assumptions: naming an authority rather than restating it is the discipline
+`tests/README.md` L3-L6 already states for its own runners -- "if a script and
+this README ever disagree, the script is authoritative". One procedure written
+down twice is how the two copies come to disagree, and a reader who follows the
+stale copy has no way to tell which one it was.
+
+**How this root fails.** The failure modes reachable from the commands below are
+each a stop rather than a partial deployment: the bootstrap backend is absent, the
+state lock is held, a saved plan proposes a destroy nobody asked for, a destroy is
+refused while deletion protection is active, a module rejects a value against its
+own invariant, or the generated reference has drifted from the HCL. Each is paired
+with its response in [Failure handling](#failure-handling) at the end of this
+document, together with the ones an operator meets before reaching a plan at all.
 
 Assumptions: the failure surface belongs in the opening rather than only at the
 end, because an operator reads a header before running anything and the table
@@ -73,11 +91,186 @@ records the same withdrawal in its own description. An output summary is the fir
 thing a reader consults to learn what an apply hands back, so naming artifacts that
 were never there sends them hunting the Outputs table for rows that do not exist.
 
+## What this root provisions
+
+This root is a composition, not a resource library. The sixteen modules under
+[`../../modules`](../../modules) declare the stack; `main.tf` wires them together
+and supplies the values `terraform.tfvars` and the twelve non-defaulted inputs
+carry. The generated [Modules](#modules) and [Resources](#resources) tables below
+are the authoritative inventory. The counts recorded here are the ones a reader
+would otherwise re-derive by opening sixteen directories, and each is a
+measurement of the module that owns it rather than a restatement of it:
+
+- **Foundation.** [`network`](../../modules/network/README.md) -- one VPC across
+  **three** availability zones, `az_count` being fixed at exactly 3 by the
+  module's own validation, with **three** subnet tiers per zone (public,
+  private-application and isolated-data), **ten** interface endpoints, **one** S3
+  gateway endpoint and **four** security groups. The data tier holds no route to
+  the internet. [`kms`](../../modules/kms/README.md) -- **four** customer-managed
+  keys, one per datastore boundary: database, object storage and logs, Secrets
+  Manager and queues.
+- **Artifacts and identity.** [`ecr`](../../modules/ecr/README.md) -- **ten**
+  deployable repositories, one per image this repository builds, and an
+  **eleventh** holding the pinned telemetry-collector mirror it does not.
+  [`../../README.md`](../../README.md) section 4.1 owns that distinction and is
+  worth reading before quoting either number: `services/` holds nine Maven
+  modules but only eight service images, because `common-lib` is a library with
+  no Dockerfile, and counting modules would invent a repository nothing pushes
+  to. [`cognito`](../../modules/cognito/README.md) -- one user pool, one browser
+  app client and exactly **two** groups, `carddemo-admin` and `carddemo-user`.
+  [`secrets`](../../modules/secrets/README.md) -- the per-service database
+  credentials, generated at apply time.
+- **Runtime.** [`aurora-postgresql`](../../modules/aurora-postgresql/README.md),
+  [`ecs-cluster`](../../modules/ecs-cluster/README.md) and
+  [`ecs-service`](../../modules/ecs-service/README.md) -- the cluster and the
+  **eight** online service workloads, plus the batch and data-migration task
+  definitions. [`alb`](../../modules/alb/README.md) and
+  [`api-gateway-http`](../../modules/api-gateway-http/README.md) -- the internal
+  load balancer and the edge that reaches it through a VPC link.
+  [`cloudfront-spa`](../../modules/cloudfront-spa/README.md) -- the browser
+  bundle's origin and distribution.
+- **Asynchronous work.** [`sqs`](../../modules/sqs/README.md) -- **five** primary
+  queues, **two** of them FIFO and **three** standard, each with its own
+  dead-letter queue at a receive count of **five**: ten queues in total.
+  [`step-functions-batch`](../../modules/step-functions-batch/README.md) -- the
+  **eleven** work states of the nightly chain, in one of **four** state machines.
+  [`eventbridge-scheduler`](../../modules/eventbridge-scheduler/README.md) -- the
+  schedule that starts it. [`s3-datasets`](../../modules/s3-datasets/README.md)
+  -- **ten** generation-dataset families, each retaining five noncurrent
+  versions. [`observability`](../../modules/observability/README.md) -- log
+  groups, dashboards, alarms and the notification topic.
+
+Assumptions: the dataset count is ten rather than the six one file suggests, and
+the module asserts it rather than trusting this sentence --
+[`../../modules/s3-datasets/variables.tf`](../../modules/s3-datasets/variables.tf)
+requires exactly ten keys and says why in its own error message. The baseline
+defines six generation bases at `LIMIT(5)` in `app/jcl/DEFGDGB.jcl`, three more in
+`app/jcl/DEFGDGD.jcl` and a tenth in `app/jcl/DALYREJS.jcl`; provisioning six
+would silently drop four retention policies, and every base is `LIMIT(5)`, which
+is where the five-noncurrent-version rule comes from.
+
+What this root owns **because no module owns it** is the part a reader cannot find
+by opening a module: the Parameter Store discovery inventory
+(`aws_ssm_parameter.runtime`, `aws_ssm_parameter.platform` and
+`aws_ssm_parameter.online_writes_enabled`), the four operational Lambda functions
+-- quiesce, resume, dataset-generation retention and database admin -- with their
+shared execution role, the online-write bracket lease, the private service zone
+and record, the five purpose secrets enumerated under
+[No secrets by construction](#no-secrets-by-construction), the ECS
+execute-command log group, the dataset-generation bucket notification, the SPA
+publication role, and three cross-module assertions that fail a plan rather than
+an apply when two modules' values contradict each other.
+
+Assumptions: each of those publishes or joins something whose parts cross module
+boundaries -- a database endpoint beside a queue URL beside a bucket name -- so no
+single module holds the whole of any of them. A module publishing its own fragment
+would leave every service reading several parameters and reassembling the
+composition itself, putting the assembly rule in as many places as there are
+readers. The API Gateway VPC-link security-group edge named at the top of this
+document is the one item that is not a resource declared here at all: it is the
+result of this root passing the network module's load-balancer security group into
+the API Gateway module, and grepping either module for the other's name finds
+nothing.
+
+`outputs.tf` and those root-owned `aws_ssm_parameter` resources are the **only**
+source of runtime endpoints and identifiers any service may use, and they carry
+endpoints and identifiers only -- never a credential. No service hard-codes a
+deployed endpoint. [`../../README.md`](../../README.md) section 9.1 states the
+same rule package-wide.
+
+Not provisioned by this root or by `dev`, and named here because an operator may
+look for them: multi-region topology and disaster-recovery failover; blue-green
+and canary deployment, since the ECS services are rolled instead; stream
+platforms; an application cache tier; and database read replicas. All five are out
+of scope for this migration, and reporting reads instead go to the writer through
+read-only cross-schema views.
+
+## Prerequisites
+
+| Tool or artifact | Constraint | Why this value |
+|:---|:---|:---|
+| Terraform CLI | `required_version >= 1.15.0`, validated on 1.15.8 | The floor `versions.tf` declares; 1.15.8 is the release the static gates are run against |
+| `hashicorp/aws` | `~> 6.56` | The constraint `versions.tf` pins for both roots. Topology may not differ between environments, so the provider range cannot either, and `~> 6.56` clears every capacity and protection argument this root sets |
+| `hashicorp/random` | `~> 3.9` | Generates the values the `secrets` and `cognito` modules write into Secrets Manager during apply, which is the mechanism that keeps credentials out of source |
+| `terraform-docs`, `tflint`, `checkov` | Versions pinned by CI | Only needed to reproduce the static gates locally; `.github/workflows/infra-ci.yml` owns them |
+| `infra/lambda/dist/*.zip` | Built, not committed | Three archives, read by five `filebase64sha256` call sites in `main.tf`, so a plan or a validate resolves them before it resolves anything else |
+
+```bash
+# WHAT: build the three Lambda archives this root's function resources hash.
+# WHY : Assumptions: this runs BEFORE any validate or plan, not as part of one.
+#       `filebase64sha256` is evaluated during expression resolution, so an absent
+#       archive fails the whole run with a path error rather than with a missing
+#       resource -- and the archives are deliberately not committed, because a
+#       committed zip hides reviewed source behind an opaque binary.
+python3 infra/lambda/build_packages.py
+```
+
+**Note**: `infra/bootstrap` must be applied **once per AWS account, out of band**,
+before this root can initialize against remote state at all.
+
+Assumptions: `backend.tf` names the S3 bucket and the DynamoDB lock table that
+bootstrap creates, so an `init` attempted before they exist has nothing to reach
+and fails outright -- there is no fallback to local state and none should be
+introduced. [`../../bootstrap/README.md`](../../bootstrap/README.md) owns that
+root, and
+[deploy.md Step 1](../../../docs/runbooks/deploy.md#step-1---bootstrap-the-remote-state-backend)
+owns the sequence.
+
+Assumptions: `.github/workflows/deploy.yml` **never** applies bootstrap, and the
+omission is structural rather than an oversight. That workflow stores its own
+state in the backend bootstrap creates, so a job that created the backend would
+have to exist before its own state did. The same circularity is why bootstrap is
+an out-of-band operator action in every environment rather than a first stage of
+the pipeline.
+
+Credentials are obtained by short-lived federated role assumption -- `<role-arn>`
+in every documented invocation. No long-lived credential exists anywhere in this
+repository and none may be created; the deployment path authenticates by OIDC and
+holds no stored key.
+
+## Files in this root
+
+Seven files are authored here. There are no subdirectories.
+
+| File | Owns |
+|:---|:---|
+| [`versions.tf`](versions.tf) | The Terraform and provider constraints, and this root's single `provider "aws"` with its `default_tags` |
+| [`backend.tf`](backend.tf) | The partial S3 backend: the committed state key and encryption flag, and the record of the four values supplied at init |
+| [`variables.tf`](variables.tf) | Every input, its type, its validation and its description -- the source the generated [Inputs](#inputs) table is rendered from |
+| [`main.tf`](main.tf) | The sixteen module calls and the root-owned resources listed above |
+| [`outputs.tf`](outputs.tf) | The eighteen outputs, rendered below as [Outputs](#outputs) |
+| [`terraform.tfvars`](terraform.tfvars) | The production values on the five parameterization axes; tracked, and non-secret by construction |
+| `README.md` | This document: the operator procedure, and the prose half of the HCL documentation analogue |
+
+`.terraform.lock.hcl` is also tracked, and is the one file here that is **not
+authored**. Assumptions: `terraform init` generates it from real registry
+checksums, so it is only ever regenerated and never edited -- an invented checksum
+fails every subsequent `init -lockfile=readonly`, and it is tracked precisely so
+that provider resolution is reproducible rather than resolved afresh per machine.
+
 ## Bootstrap and initialization
 
 `infra/bootstrap` must exist before backend-enabled initialization. The backend
 is partial because its bucket and key contain account-resolved identifiers and
 Terraform evaluates backends before input variables.
+
+`backend.tf` commits exactly two arguments -- the state `key`, which names a path
+inside the bucket and identifies no account, and `encrypt`. Everything else is
+deferred to initialization, and this table is the only place the deferred set is
+written down:
+
+| `-backend-config` key | Value comes from |
+|:---|:---|
+| `bucket` | `infra/bootstrap` output `state_bucket_name` |
+| `region` | `infra/bootstrap` output `aws_region` |
+| `dynamodb_table` | `infra/bootstrap` output `state_lock_table_name` |
+| `kms_key_id` | `infra/bootstrap` output `state_kms_key_arn` |
+
+Assumptions: none of the four is marked `sensitive` in
+[`../../bootstrap/outputs.tf`](../../bootstrap/outputs.tf), and that is a
+deliberate choice recorded there rather than an oversight -- they are identifiers
+instead of credentials, and marking them sensitive would block the normal
+initialization below while protecting nothing.
 
 ```bash
 # WHAT: print the bootstrap root's outputs, which carry the four literal values
@@ -106,7 +299,13 @@ terraform -chdir=infra/envs/prod init \
 
 Alternatives Considered: committing a literal backend configuration or a
 tfbackend file would store account-identifying values in source, while a
-variable cannot be used because backend evaluation happens first.
+variable cannot be used because backend evaluation happens first. The bucket name
+is the clearest case: bootstrap composes it as
+`<name_prefix>-tfstate-<aws-account-id>-<region>`, so a committed literal would
+put a production account identifier in a tracked file, and the lock table and the
+key ARN carry the same exposure. Parameterizing them from `variables.tf` is not
+available either -- a `backend` block cannot interpolate a variable, which is why
+the values arrive as initialization arguments rather than as inputs.
 
 ## Plan and apply
 
@@ -159,6 +358,129 @@ rm -f infra/envs/prod/prod.tfplan
 `apply -auto-approve` is not the normal path because it replans instead of
 executing the artifact that was reviewed.
 
+Refactoring Rationale: the deployment step this root replaces was an imperative
+deck, and what a hand-maintained deck accumulates is legible in the baseline
+itself. `app/jcl/CBADMCDJ.jcl` installs the CICS resource definitions by running a
+utility that takes the shared definition store read-write for the duration of the
+job [L27-L28, L30]. Read as a record of what an edited-in-place deploy becomes, it
+carries three things at once: a byte-identical duplicate definition, `DEFINE
+MAPSET(COSGN00M)` with its description repeated verbatim [L50-L51, L53-L54], and
+four further mapset names doubled the same way; ten program definitions naming
+programs with no source in `app/cbl` at all, a shape `app/csd/CARDDEMO.CSD`
+repeats with its own `PROGRAM(COCRDSEC)` [L211, L390]; and an instruction telling
+the operator to uncomment a delete before running it a second time [L38, L42],
+because the deck as written does not converge on a re-run.
+
+None of that is a criticism of the mainframe path, which remains available and
+unchanged -- this package adds a deployment path and removes none. It is the
+reason this root's procedure has the shape it does. A declarative plan converges
+on a re-run rather than duplicating, so no file is edited to make a second apply
+work, and the saved artifact is a thing a reviewer can read before anything
+executes. `-auto-approve` computes a second plan at apply time and leaves the
+review nothing to compare against, which is the property the deck was missing.
+
+## Teardown
+
+[`docs/runbooks/teardown.md`](../../../docs/runbooks/teardown.md) is the authority
+for decommissioning and carries the verification checks, the recovery procedures
+and the residual inventory. This section is the environment-specific view: what an
+operator runs against **this** root, and the two things a run cannot recover from
+getting wrong.
+
+**Note**: a `terraform destroy` against this root **will fail** while
+`deletion_protection` is set, and that failure is the flag doing its job rather
+than an error to route around.
+[`../../modules/aurora-postgresql`](../../modules/aurora-postgresql/README.md)
+states the consequence in its own words at `main.tf` L139-L141 -- RDS refuses the
+deletion, which is the intended behaviour in production and the reason `dev` sets
+the flag to false. Do not reach for a force flag; clear the protection as its own
+reviewed change, in the two steps below.
+
+Assumptions: one variable governs more than the cluster, which is the part worth
+knowing before flipping it. `deletion_protection` is read through the same
+expression by **six** independent destroy blockers -- the Aurora cluster, the SPA
+origin bucket and its log bucket, the versioned dataset bucket, the shared
+access-log bucket, the ECR repositories and the internal load balancer's log
+destination.
+[teardown.md Step 2](../../../docs/runbooks/teardown.md#step-2---clear-the-production-protection-flags-prod-only)
+tabulates all six with their locations. The practical consequence is that the plan
+below is larger than two flags suggest: read it as the removal of this
+environment's data protection in full, because that is what it is.
+
+```bash
+# WHAT: plan the removal of production protection as a change in its own right,
+#       leaving every other resource untouched.
+# WHY : Alternatives Considered: editing the two flags in terraform.tfvars and
+#       committing that edit. Rejected, and teardown.md Step 2 owns the reasoning:
+#       the tracked file is the description of a PROTECTED production environment,
+#       so leaving it holding `false` after a teardown means the next apply
+#       silently rebuilds production unprotected. A `-var` override is scoped to
+#       the one invocation and leaves no residue in the repository.
+terraform -chdir=infra/envs/prod plan -out="<planfile>" -var 'deletion_protection=false'
+```
+
+```bash
+# WHAT: apply the reviewed protection change, and nothing else.
+# WHY : Trade-offs: protection is chosen over convenience, and this extra reviewed
+#       apply is the whole price of that choice. What it buys is exact: no single
+#       mistyped command can destroy production, because the command that would
+#       destroy it cannot succeed until a different, separately reviewed change has
+#       been applied first. Clearing the flags and destroying in one motion was
+#       rejected for removing precisely that property.
+terraform -chdir=infra/envs/prod apply "<planfile>"
+```
+
+```bash
+# WHAT: produce the saved destroy plan, then execute exactly that plan.
+# WHY : Assumptions: the same `-var` override is passed again, because Terraform
+#       re-evaluates variables on every invocation -- a destroy plan produced
+#       without it describes a still-protected environment and refuses the cluster
+#       again at apply time. A destroy also resolves root variables exactly as a
+#       create does, so the twelve non-defaulted inputs in the Parameters table
+#       must be exported first; without them the plan prompts instead of planning,
+#       which an unattended run stalls on and an attended one answers from memory.
+terraform -chdir=infra/envs/prod plan -destroy -out="<planfile>" -var 'deletion_protection=false'
+terraform -chdir=infra/envs/prod apply "<planfile>"
+```
+
+Leaving `skip_final_snapshot` at its tracked `false` takes a final snapshot before
+the cluster is deleted, and that snapshot **survives the destroy** as a roll-back
+asset. Surviving is not the same as being restorable: it is encrypted under this
+environment's own Aurora customer-managed key, which the same destroy removes, so
+[teardown.md Step 2b](../../../docs/runbooks/teardown.md#step-2b---preserve-a-decryptable-recovery-point)
+is not optional if you intend to rely on it. Overriding the flag to skip the
+snapshot is a deliberate choice with no second chance, and
+[teardown.md Step 2](../../../docs/runbooks/teardown.md#step-2---clear-the-production-protection-flags-prod-only)
+owns that decision.
+
+A clean run prints a `Destroy complete!` summary and exits 0. That says the run
+finished, not that the root manages nothing --
+[teardown.md Step 3](../../../docs/runbooks/teardown.md#step-3---destroy-the-environment-root)
+carries the two checks that establish the latter.
+
+**Destroy this environment root first; destroy `infra/bootstrap` last, and only on
+account decommission.**
+
+Assumptions: a destroy reads the existing state to discover what there is to
+destroy. Bootstrap owns the bucket that state lives in and the table that locks
+it, so destroying bootstrap first removes the record every other destroy depends
+on -- and the resources this root created then keep running in AWS with nothing
+left that knows they exist. The order is mechanical rather than conventional, and
+the reverse leaves no route back.
+[teardown.md Step 5](../../../docs/runbooks/teardown.md#step-5---destroy-the-bootstrap-last-and-only-on-account-decommission)
+also establishes that bootstrap outlives an ordinary teardown entirely, because
+both environment roots share it.
+
+**Note**: `force-unlock` and the inventory of what a destroy leaves behind are
+owned by [teardown.md](../../../docs/runbooks/teardown.md) --
+[Concurrency, interrupted operations and the state lock](../../../docs/runbooks/teardown.md#concurrency-interrupted-operations-and-the-state-lock)
+and
+[What destroy does not remove](../../../docs/runbooks/teardown.md#what-destroy-does-not-remove).
+Trade-offs: pointing costs a reader one hop, and restating would cost every later
+reader the risk of following whichever copy drifted. One recovery procedure
+written down twice is how the two copies come to disagree, and a wrong
+`force-unlock` corrupts state -- in this environment, production state.
+
 ## Production posture
 
 The database minimum remains above zero, two tasks preserve a target during
@@ -170,7 +492,84 @@ required.
 That is the intended control. Clearing protection is a separate reviewed apply,
 followed by a saved destroy plan; the final snapshot remains as a rollback
 asset. The remote-state bootstrap is removed only after the environment because
-destroy needs the state it stores.
+destroy needs the state it stores. [Teardown](#teardown) above carries the
+commands.
+
+The two roots may differ on **five** axes and no others, and the values they pass
+on them are:
+
+| Axis | Input | `dev` | `prod` |
+|:---|:---|:---|:---|
+| Aurora capacity and auto-pause | `aurora_min_capacity`, `aurora_max_capacity`, `aurora_seconds_until_auto_pause` | `0`, `4`, `300` | `2`, `32`, `300` |
+| ECS task count and size | `ecs_desired_count`, `ecs_task_cpu`, `ecs_task_memory` | `1`, `512`, `1024` | `2`, `1024`, `2048` |
+| Log retention | `log_retention_days` | `7` | `365` |
+| Edge distribution reach | `cloudfront_price_class` | `PriceClass_100` | `PriceClass_All` |
+| Deletion protection and final snapshot | `deletion_protection`, `skip_final_snapshot` | `false`, `true` | `true`, `false` |
+
+Assumptions: the set is closed at sizing, retention and protection because a
+difference in **topology** would change what a deployment *is*, and a `dev` apply
+would then stop being evidence about this environment at exactly the moment that
+evidence is wanted. `vpc_cidr` is the clearest case: both roots pass the same
+block, because an address space is topology rather than a size. The narrowness is
+enforced from the module side as well as observed here --
+[`../../modules/network/variables.tf`](../../modules/network/variables.tf) exposes
+no `single_nat_gateway` toggle, no per-endpoint enable flag and no module-level
+`create_*` switch, so neither root has a lever that would build a different shape.
+
+Trade-offs: because the two differ only in sizing, a validated `dev` apply is real
+evidence about this root -- the same modules, the same graph, the same wiring. It
+is not evidence about this root's capacity behaviour, and cannot be: no `dev` run
+exercises a 32-unit ceiling, a 365-day retention or the protection flags below.
+
+### What makes this the production root
+
+Aurora's capacity floor here is **2**, deliberately above zero, and zero is
+permitted only in `dev`. Assumptions: a cluster with a zero floor pauses when idle
+and the first connection after a pause waits on the order of **fifteen seconds**
+while it resumes. A batch execution absorbs that; a person waiting on an online
+screen does not, and this is the environment that serves them. The ceiling of 32
+and the retention values are sized for the same reason -- production carries the
+load and keeps the operational evidence, where `dev` carries neither.
+
+Assumptions: the rules governing capacity are owned and enforced by
+[`../../modules/aurora-postgresql/variables.tf`](../../modules/aurora-postgresql/variables.tf),
+not by this root, which only passes values that satisfy them. That module accepts
+capacity between 0 and 256 Aurora Capacity Units in half-unit increments, requires
+the ceiling to be at least the floor, and constrains the auto-pause interval to
+between 300 and 86,400 seconds. A value this root passed that broke any of them
+would be refused at plan time by the module's own `validation` rather than
+discovered at apply.
+
+- **Deletion protection is on and the final snapshot is taken.** These are the two
+  flags that make the teardown above a two-step gesture, and they are the only
+  reason a production destroy cannot be a single mistyped command.
+- **The backup window does not overlap the batch window.** The nightly chain
+  starts at 02:00 and the preferred backup window is 07:00-08:00. Assumptions: the
+  disjointness is asserted rather than trusted --
+  `terraform_data.batch_window_disjoint` in `main.tf` fails a plan when the two
+  overlap, so the separation cannot be lost by editing one value and forgetting
+  the other.
+- **One writer instance and no read replica.** Read replicas are out of scope for
+  this migration; reporting reads go to the writer through read-only cross-schema
+  views, which is why no replica appears in the module graph and none should be
+  added here.
+- **Secrets carry a 30-day recovery window**, where a disposable environment has
+  no reason to hold deleted material at all.
+
+`.github/workflows/deploy.yml` applies this environment only through a GitHub
+environment that requires approval, while `dev` applies with no gate. Assumptions:
+the asymmetry follows the same disposability the flags encode. An environment that
+scales to zero, keeps logs for a week and destroys in one pass is cheap to
+re-create, so a human decision per apply would be protecting something nothing is
+protecting; this one carries deletion protection, a final snapshot and a year of
+evidence, so the approval is the control that stops an unintended destructive
+change reaching it.
+
+The baseline had the notifying half of that control and not the blocking half:
+`app/jcl/CBADMCDJ.jcl` L2 sets `NOTIFY` and a job time limit, so an operator was
+told the install had run and the job could not hang indefinitely. Nothing stood
+between submitting the deck and its taking the shared definition store read-write.
+The environment gate notifies **and** blocks, which is the part that is new.
 
 ## Static validation
 
@@ -203,8 +602,43 @@ terraform -chdir=infra/envs/prod validate
 tflint --chdir=infra/envs/prod --config="$(pwd)/infra/.tflint.hcl"
 ```
 
+Three further gates run over the package rather than over this directory alone,
+and all three judge this root:
+
+```bash
+# WHAT: check formatting across the whole package without rewriting a file.
+# WHY : Assumptions: `-check` reports and exits non-zero instead of reformatting,
+#       which is what makes it usable as a gate -- a formatting step that mutated
+#       the tree would leave CI reporting success on files it had just changed. It
+#       is run over `infra/` rather than this root because one package-wide
+#       invocation cannot forget a directory that a per-directory list would.
+terraform fmt -check -recursive infra/
+
+# WHAT: confirm the generated region below still matches the HCL beside it.
+# WHY : Assumptions: `--output-check` COMPARES and never writes, so it fails on a
+#       stale table instead of quietly fixing one. The same form runs in CI across
+#       every module and root; regenerating there was rejected deliberately,
+#       because a workflow that rewrote this file would hide the drift the gate
+#       exists to surface. Regenerate locally by dropping the flag, then commit the
+#       README and the HCL together as one change.
+terraform-docs --config "$(pwd)/infra/.terraform-docs.yml" --output-check infra/envs/prod
+
+# WHAT: run the infrastructure policy scanner over the package.
+# WHY : Assumptions: the scanner is advisory on its own -- CI runs it across all of
+#       `infra/` and then gates on a NAMED list of material checks rather than on a
+#       severity band, so a finding outside that list does not fail the build and a
+#       finding inside it does. Any suppression carries an explicit check id and a
+#       stated reason at the resource, and the workflow asserts that each permitted
+#       exception is still exactly where it was recorded, so a skip cannot be added
+#       silently or left behind after the reason for it has gone.
+checkov -d infra --framework terraform
+```
+
 `-backend=false` validates configuration only; it cannot produce a deployable
-remote-state plan.
+remote-state plan. None of the five gates above contacts AWS, which is the whole
+of what "statically validated" claims: they establish that the configuration is
+well formed, internally consistent, documented and policy-clean, and they
+establish nothing about a deployed environment.
 
 ## No secrets by construction
 
@@ -490,9 +924,29 @@ was written under.
 
 | Failure | Response |
 |:---|:---|
-| Backend bucket/table/key missing | Apply bootstrap first and repeat initialization. |
-| State lock held | Confirm another operation is not active before any unlock action. |
+| Backend bucket/table/key missing | Apply bootstrap first and repeat initialization. See [Prerequisites](#prerequisites). |
+| `init` reports an incomplete backend configuration | One of the four `-backend-config` values was not passed. The configuration is partial by design; see [Bootstrap and initialization](#bootstrap-and-initialization). |
+| `filebase64sha256` reports a path that does not exist | The Lambda archives were not built. Run the builder in [Prerequisites](#prerequisites) before planning again. |
+| `plan` or `plan -destroy` prompts with `Enter a value:` | One of the twelve non-defaulted inputs is unset. Both directions resolve variables alike; export them and re-run rather than answering the prompt. |
+| State lock held | Confirm another operation is not active before any unlock action. Queue the operation rather than cancelling the running one; [teardown.md](../../../docs/runbooks/teardown.md#concurrency-interrupted-operations-and-the-state-lock) owns `force-unlock` and the judgement of when a lock is genuinely orphaned. |
 | Plan contains unexpected destroys | Stop; do not apply the plan. |
-| Destroy is blocked by protection | Review and apply the protection change separately before a destroy plan. |
-| Module validation rejects a value | Correct the owning variable rather than bypassing its invariant. |
-| terraform-docs reports drift | Update the generated reference to match HCL before review. |
+| `apply` interrupted part-way | The environment may be partially provisioned and the lock may be abandoned. Do not re-run blind: take it to [teardown.md](../../../docs/runbooks/teardown.md#concurrency-interrupted-operations-and-the-state-lock). |
+| Destroy is blocked by protection | Expected. Review and apply the protection change separately before a destroy plan; see [Teardown](#teardown). |
+| Module validation rejects a value | Correct the owning variable rather than bypassing its invariant. A capacity value is refused by the [database module](../../modules/aurora-postgresql/variables.tf), which documents the rule it enforces. |
+| terraform-docs reports drift | Update the generated reference to match HCL before review. The CI check is check-only and does not rewrite this file. |
+| `tflint` reports a missing `description` | Every `variable` and `output` requires one; that is the mechanical half of the documentation gate, and the fix is the description rather than a lint exclusion. |
+
+## Related documents
+
+| Document | Covers |
+|:---|:---|
+| [`../dev/README.md`](../dev/README.md) | The development root: the same procedure on the other side of the five axes above |
+| [`../../README.md`](../../README.md) | Package-wide procedure, the module index and the ignore policy this root relies on |
+| [`../../bootstrap/README.md`](../../bootstrap/README.md) | The remote-state backend this root initializes against |
+| [`../../../docs/runbooks/deploy.md`](../../../docs/runbooks/deploy.md) | The full deployment procedure, of which this root is one step |
+| [`../../../docs/runbooks/teardown.md`](../../../docs/runbooks/teardown.md) | The authority for decommissioning, `force-unlock` and residual resources |
+| [`../../../docs/architecture/batch-orchestration.md`](../../../docs/architecture/batch-orchestration.md) | The nightly chain this root schedules, state by state |
+| [`../../../docs/CODE_DOCUMENTATION_STANDARD.md`](../../../docs/CODE_DOCUMENTATION_STANDARD.md) | The documentation convention this file is the prose half of |
+| [`../../../MIGRATION_README.md`](../../../MIGRATION_README.md) | Build, deploy, run, migrate, validate and roll back, end to end |
+| [`../../../CONTRIBUTING.md`](../../../CONTRIBUTING.md) | The explainability convention every file in this package follows |
+| [`../../../README.md`](../../../README.md) | The CardDemo application overview. The mainframe path it documents remains available and unchanged: this package adds a deployment path and removes none |
