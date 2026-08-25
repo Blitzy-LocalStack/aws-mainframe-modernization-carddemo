@@ -20,6 +20,41 @@
 #   fails the apply if V0 SQL, credential rotation prerequisites, or the Data
 #   API cannot complete; a stack is never reported ready with passwordless
 #   service roles.
+#
+# Provider configuration:
+#   This file deliberately declares NO `provider` block. versions.tf owns the
+#   only `provider "aws"` in this root's entire module graph, and all sixteen
+#   modules omit one so they inherit it -- including the root's `default_tags`.
+#   A second declaration here is not an override, it is a duplicate
+#   configuration error raised at `terraform init`. The note is recorded at this
+#   point because it is where a reader adding one would look first.
+#
+# Refactoring Rationale:
+#   This root replaces app/jcl/CBADMCDJ.jcl, the DFHCSDUP deck that installed
+#   the CICS resource group the online estate ran from. The defect being
+#   corrected is named rather than asserted: that deck was NOT idempotent. Its
+#   own instruction at L38 tells the operator "IF YOU ARE RERUNNING THIS,
+#   UNCOMMENT THE DELETE COMMAND", and the DELETE it refers to sits commented
+#   out at L42 -- so a second run required EDITING the deck first, and a second
+#   run made without that edit duplicated definitions instead of converging.
+#   The deck carries the evidence of exactly that: L50-L51 and L53-L54 are a
+#   byte-identical duplicate DEFINE MAPSET(COSGN00M) / DESCRIPTION(LOGIN
+#   SCREEN), one of five doubled mapset names, and ten of its PROGRAM stanzas
+#   name programs absent from app/cbl entirely -- drift a hand-maintained
+#   imperative deck accumulates silently, since defining a resource for a
+#   program that does not exist fails nothing at install time.
+#   A declarative graph converges instead of appending, so a re-run is safe and
+#   no file is edited to make one work. The control is a reviewed plan artifact
+#   -- `plan -out=tfplan` then `apply tfplan`, never `apply -auto-approve` --
+#   which is what makes the difference between the two runs visible before it is
+#   made rather than discoverable afterwards.
+#   Two further analogues place this file against the deck it replaces:
+#   CBADMCDJ.jcl L44-L45 registers the load library the region executed from
+#   (DEFINE LIBRARY(COM2DOLL) with DSNAME01(&HLQ..LOADLIB)), whose counterpart
+#   is the ECR repository plus the image tag each task definition pulls; and
+#   L25's single `SET HLQ=AWS.M2.CARDDEMO` -- one parameterisation variable at
+#   the top of the deck -- is answered by `terraform -chdir=infra/envs/prod`
+#   with this root's terraform.tfvars.
 # =============================================================================
 
 data "aws_partition" "current" {}
@@ -703,8 +738,25 @@ module "cloudfront_spa" {
 module "kms" {
   source = "../../modules/kms"
 
-  name_prefix                 = var.name_prefix
-  environment                 = var.environment
+  name_prefix = var.name_prefix
+  environment = var.environment
+
+  # WHY : Assumptions: this ternary is UNREACHABLE in this root and always yields 30.
+  #       variables.tf declares var.environment with default "prod" and a validation
+  #       whose condition is `var.environment == "prod"`, so the "dev" arm cannot be
+  #       selected here however the root is invoked. It is written as a conditional
+  #       rather than the literal 30 so that both environment roots carry the same
+  #       expression: AAP §0.4.1.6 confines dev/prod differences to sizing and
+  #       retention, and a reader diffing the two roots should find the destroy-window
+  #       policy stated identically in both rather than having to infer that two
+  #       different literals encode one rule.
+  # WHY : Trade-offs: a dead branch is accepted in exchange for that diffability, and
+  #       the cost is precisely that a reader can misread it as live -- which is why it
+  #       is recorded here instead of left to be rediscovered. The 30 it resolves to is
+  #       the deliberate value for this environment: a customer-managed key scheduled
+  #       for deletion is unrecoverable once the window closes, and every ciphertext
+  #       under it becomes unreadable, so production takes the longest window the
+  #       service offers rather than the shortest that would unblock a teardown.
   deletion_window_in_days     = var.environment == "dev" ? 7 : 30
   cloudfront_distribution_arn = module.cloudfront_spa.distribution_arn
 
@@ -877,13 +929,36 @@ resource "aws_iam_role_policy" "spa_publication" {
 module "network" {
   source = "../../modules/network"
 
-  name_prefix             = var.name_prefix
-  environment             = var.environment
-  vpc_cidr                = var.vpc_cidr
-  app_container_port      = 8080
-  database_port           = 5432
+  name_prefix        = var.name_prefix
+  environment        = var.environment
+  vpc_cidr           = var.vpc_cidr
+  app_container_port = 8080
+  database_port      = 5432
+
+  # WHY : Assumptions: log retention is one of the five values AAP §0.4.1.6 permits the
+  #       two roots to differ by, so it is driven from a root variable rather than fixed
+  #       in the module. It reads the SAME var.log_retention_days every other log group
+  #       in this root reads -- 365 days here -- because a flow log that outlived, or
+  #       expired before, the application logs it is correlated against would leave an
+  #       incident reconstructible from only half the evidence.
   flow_log_retention_days = var.log_retention_days
-  flow_log_kms_key_arn    = module.kms.s3_key_arn
+
+  # WHY : Assumptions: infra/modules/network declares this input nullable with a null
+  #       default so customer-managed encryption is AVAILABLE without that module
+  #       depending on the sibling kms module. That keeps it reusable in a root with no
+  #       key module, and it means the join has to happen somewhere -- an environment
+  #       root composing both is the only place that can see both. This is that join,
+  #       and it is deliberate rather than incidental.
+  # WHY : Trade-offs: supplying a key encrypts the flow-log group under a CardDemo-owned
+  #       CMK instead of the AWS-owned key CloudWatch would default to, at the cost of
+  #       one more grant the log-delivery principal must hold (infra/modules/kms carries
+  #       it as cloudwatch_log_delivery_source_arns). That grant is what makes the
+  #       encryption real; leaving this null would have encrypted nothing and still
+  #       reported success. The baseline is why the cost is accepted: all eight CICS
+  #       file resources in app/csd/CARDDEMO.CSD are defined RECOVERY(NONE) with
+  #       JOURNAL(NO), so the mainframe kept neither encryption nor a journal, and these
+  #       CMKs are protection this migration ADDS rather than a property being ported.
+  flow_log_kms_key_arn = module.kms.s3_key_arn
 
   # WHY : Assumptions: the SAME account boundary goes to every module that creates a
   #       role, so "every role this deployment creates" means one ceiling rather than a
@@ -893,22 +968,131 @@ module "network" {
   permissions_boundary_arn = var.permissions_boundary_arn
 }
 
+# -----------------------------------------------------------------------------
+# Container image registry: the load library, re-expressed as ECR repositories.
+# -----------------------------------------------------------------------------
+#
+# WHY : Assumptions: the repository count is TEN -- the eight Spring Boot services plus
+#       the browser SPA and the ETL image -- which is the inventory AAP §0.4.1.6 fixes,
+#       and every one of the ten is built from this repository rather than mirrored in.
+# WHY : Assumptions: `services/` holds NINE Maven modules but only EIGHT of them are
+#       images. `common-lib` is a library the eight services COMPILE AGAINST, not a
+#       deployable, so it has no repository here. Naming it would provision an ELEVENTH
+#       repository that .github/workflows/deploy.yml never pushes to, and an empty
+#       repository is not a visible failure -- it is a scan target that never reports, a
+#       lifecycle policy that never expires anything, and a line in the registry a later
+#       reader has to disprove. The off-by-one is easy precisely because nine is the
+#       number a reader gets from counting build modules.
+# WHY : Assumptions: var.repository_names is deliberately NOT passed. The image inventory
+#       is topology rather than sizing, and §0.4.1.6 confines dev/prod differences to
+#       sizing and retention, so the list lives once in infra/modules/ecr/variables.tf
+#       where both roots inherit it. That module does not merely default the set, it
+#       ASSERTS it -- a validation requiring exactly ten entries matching the named set
+#       -- so overriding it here with a hand-written list is the one way to turn a shared
+#       contract back into two copies free to drift.
+# WHY : Assumptions: the module provisions ONE further repository beyond those ten, and
+#       it is NOT an eleventh deployable. `aws-otel-collector` mirrors a pinned
+#       third-party image this repository caches rather than builds, and it is passed
+#       through the module's separate third_party_mirror_repository_names input --
+#       declared apart from the deployable inventory precisely so the ten-deployable
+#       count stays assertable while the cache remains visible. So the count of
+#       DEPLOYABLES is ten and the count of REPOSITORIES is eleven; conflating the two
+#       is what makes this look like an off-by-one in either direction.
+# WHY : Refactoring Rationale: this argument was MISSING, and its absence was not a
+#       dormant simplification -- it broke `terraform plan` outright in both roots. The
+#       ecs_service call below reads
+#       `module.ecr.repository_urls[local.telemetry_collector_repository]` and
+#       `module.ecr.repository_arns[...]` to pass the collector image and its pull grant,
+#       while local.telemetry_collector_repository's own note states the key comes from
+#       third_party_mirror_repository_names. With the input left at its empty default the
+#       module's setunion produced only the ten deployables, so both maps lacked that key
+#       and each index failed with "Invalid index ... object with 10 attributes". Wiring
+#       the input is what makes the key exist; the reference and the documentation
+#       describing it were already in place.
+# WHY : Assumptions: the mirror is REQUIRED rather than a convenience, which is why the
+#       fix is to create it instead of dropping the two references and letting the module
+#       fall back to its upstream public.ecr.aws default. infra/modules/ecs-service runs
+#       the collector sidecar in every task (enable_telemetry_collector defaults true),
+#       and infra/modules/network gives the application security group egress ONLY to the
+#       internal ALB, to Aurora and to the private endpoint ENIs -- every 0.0.0.0/0
+#       egress rule there was withdrawn as a finding. Amazon ECR Public is reachable
+#       through no interface endpoint, so a task told to pull from public.ecr.aws could
+#       not, and none would start.
 module "ecr" {
   source = "../../modules/ecr"
 
-  name_prefix  = var.name_prefix
-  environment  = var.environment
-  kms_key_arn  = module.kms.s3_key_arn
+  name_prefix = var.name_prefix
+  environment = var.environment
+
+  # WHY : Assumptions: exactly ONE entry, which is the ceiling the module's own
+  #       validation enforces, and it is the same literal the image reference and the
+  #       pull grant below both read from local.telemetry_collector_repository -- one
+  #       source for all three, so the repository that is created cannot drift from the
+  #       repository that is pulled from or the one the execution role is granted.
+  third_party_mirror_repository_names = [local.telemetry_collector_repository]
+
+  # WHY : Assumptions: the S3 key rather than a registry-specific one. An image layer is
+  #       an object in an ECR-managed bucket, so it belongs to the same object-store
+  #       boundary as the dataset generations and the SPA bundle; infra/modules/kms
+  #       publishes four CMKs to keep the datastore boundaries apart, and inventing a
+  #       fifth for layers would add a key to rotate without separating anything.
+  kms_key_arn = module.kms.s3_key_arn
+
+  # WHY : Assumptions: force_delete TRACKS deletion protection rather than being set
+  #       independently, so one flag governs whether this environment can be torn down
+  #       at all. In THIS root it resolves to false, because prod sets
+  #       deletion_protection = true -- the opposite of the dev root, where the same
+  #       expression resolves true so `terraform destroy` can satisfy the AAP §0.9.1
+  #       teardown criterion unattended.
+  # WHY : Trade-offs: false means a repository still holding images REFUSES deletion, so
+  #       a production destroy stops rather than discarding the only copy of an image an
+  #       incident might need to roll back to. Accepted deliberately: the cost is an
+  #       operator emptying the registry by hand as a separate, deliberate act, and the
+  #       alternative -- letting a single destroy silently delete every published image
+  #       -- removes the rollback path at the moment it is most likely to be wanted.
   force_delete = !var.deletion_protection
 }
 
 module "aurora" {
   source = "../../modules/aurora-postgresql"
 
-  name_prefix              = var.name_prefix
-  environment              = var.environment
-  isolated_subnet_ids      = module.network.isolated_data_subnet_ids
-  security_group_ids       = [module.network.data_security_group_id]
+  name_prefix = var.name_prefix
+  environment = var.environment
+
+  # WHY : Assumptions: the two names are DELIBERATELY different and this line is an
+  #       interface bridge, not a typo awaiting correction. infra/modules/network
+  #       publishes `isolated_data_subnet_ids` because it creates three tiers and has to
+  #       say WHICH one; infra/modules/aurora-postgresql accepts `isolated_subnet_ids`
+  #       because a database module has only one tier to be placed in and qualifying it
+  #       would add nothing. Both names are published contracts -- that module's
+  #       outputs.tf records that renaming an output breaks both environment roots -- so
+  #       the reconciliation belongs HERE, at the call, and a reader who "fixes" either
+  #       side to match the other breaks the wiring at plan time.
+  # WHY : Assumptions: these subnets carry NO route to the internet at all. That is the
+  #       property that makes them the data tier rather than merely a third set of
+  #       private subnets, and it is why the cluster is placed here instead of in
+  #       private_app_subnet_ids alongside the tasks that reach it.
+  isolated_subnet_ids = module.network.isolated_data_subnet_ids
+
+  # WHY : Assumptions: a SINGULAR producer feeding a PLURAL consumer, so the value is
+  #       wrapped in a one-element list to reconcile the arity -- the wrap is the bridge,
+  #       not an oversight. infra/modules/network publishes exactly one
+  #       `data_security_group_id` because it creates exactly one data security group,
+  #       while the database module accepts `security_group_ids` as a list so a caller
+  #       with a second group -- a bastion, an analytics client -- can attach it without
+  #       the module changing. This root has no such caller, so the list holds one
+  #       element BY DESIGN rather than by omission.
+  # WHY : Alternatives Considered: publishing a list from the network module so no wrap
+  #       were needed. Rejected because that module creates one group and a plural output
+  #       would advertise a set it cannot vary, pushing the same reconciliation onto every
+  #       other consumer of that output to spare this one line.
+  security_group_ids = [module.network.data_security_group_id]
+
+  # WHY : Assumptions: the Aurora CMK, not the shared object-store key.
+  #       infra/modules/kms publishes four separate customer-managed keys so that one
+  #       compromised grant reaches one datastore; the record data behind this endpoint
+  #       is the cardholder masters, so reusing the S3 key here would collapse two of
+  #       those four boundaries at a call site nobody would think to audit.
   kms_key_arn              = module.kms.aurora_key_arn
   secrets_kms_key_arn      = module.kms.secrets_key_arn
   engine_version           = var.aurora_engine_version
@@ -935,9 +1119,32 @@ module "aurora" {
   #       moment. Either value may move; they may not be moved onto each other.
   preferred_backup_window      = var.aurora_preferred_backup_window
   preferred_maintenance_window = var.aurora_preferred_maintenance_window
-  deletion_protection          = var.deletion_protection
-  skip_final_snapshot          = var.skip_final_snapshot
-  enable_http_endpoint         = true
+
+  # WHY : Assumptions: both flags come from root variables and BOTH resolve protectively
+  #       here -- deletion_protection true and skip_final_snapshot false -- which is the
+  #       inverse of the dev root. They are forwarded rather than hardcoded because they
+  #       are two of the five values §0.4.1.6 lets the roots differ by, and they are
+  #       forwarded as a PAIR because either alone leaves a gap: protection without a
+  #       final snapshot loses the data the moment protection is lifted, and a final
+  #       snapshot without protection makes losing it a single unreviewed apply away.
+  deletion_protection = var.deletion_protection
+  skip_final_snapshot = var.skip_final_snapshot
+
+  # WHY : Assumptions: the Data API is enabled because this root's own bootstrap depends
+  #       on it. aws_lambda_invocation.database_bootstrap applies the V0 schema and role
+  #       SQL into a cluster that sits in subnets with no internet route, so there is no
+  #       network path from a build runner to it; the Data API is the only way an apply
+  #       can reach it without placing a bastion in the data tier.
+  enable_http_endpoint = true
+
+  # WHY : Assumptions: NO read-replica input is passed, and none exists to pass. AAP
+  #       §0.2.2 excludes read replicas outright, so reporting reads reach the WRITER
+  #       through read-only cross-schema views under a SELECT-only role -- the mechanism
+  #       infra/modules/aurora-postgresql/main.tf records as its own Alternatives
+  #       Considered. This line exists so the absence reads as a decision rather than an
+  #       omission: a replica would add cost and replica-lag semantics to a report that
+  #       the golden masters compare byte-for-byte, and lag is precisely the kind of
+  #       difference that would surface as an intermittent parity failure.
 }
 
 # WHY : ⚠️ Assumptions: the card-selector signing key is generated here and never
@@ -2003,6 +2210,13 @@ resource "aws_lambda_function" "quiesce" {
     mode = "Active"
   }
 
+  # WHY : Assumptions: this edge is EXPLICIT because Terraform cannot infer it. The
+  #       function references aws_iam_role.lambda[...].arn, which orders it after the
+  #       ROLE but not after aws_iam_role_policy.lambda -- a separate resource that
+  #       carries the permissions. Without this edge the function, and the bootstrap
+  #       invocation that calls one of these four, can be created and called while its
+  #       role still holds no policy, which surfaces as an access denial on a graph that
+  #       otherwise looks complete.
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -2058,6 +2272,13 @@ resource "aws_lambda_function" "resume" {
     mode = "Active"
   }
 
+  # WHY : Assumptions: this edge is EXPLICIT because Terraform cannot infer it. The
+  #       function references aws_iam_role.lambda[...].arn, which orders it after the
+  #       ROLE but not after aws_iam_role_policy.lambda -- a separate resource that
+  #       carries the permissions. Without this edge the function, and the bootstrap
+  #       invocation that calls one of these four, can be created and called while its
+  #       role still holds no policy, which surfaces as an access denial on a graph that
+  #       otherwise looks complete.
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -2113,6 +2334,13 @@ resource "aws_lambda_function" "database_admin" {
     mode = "Active"
   }
 
+  # WHY : Assumptions: this edge is EXPLICIT because Terraform cannot infer it. The
+  #       function references aws_iam_role.lambda[...].arn, which orders it after the
+  #       ROLE but not after aws_iam_role_policy.lambda -- a separate resource that
+  #       carries the permissions. Without this edge the function, and the bootstrap
+  #       invocation that calls one of these four, can be created and called while its
+  #       role still holds no policy, which surfaces as an access denial on a graph that
+  #       otherwise looks complete.
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -2169,6 +2397,13 @@ resource "aws_lambda_function" "dataset_retention" {
     mode = "Active"
   }
 
+  # WHY : Assumptions: this edge is EXPLICIT because Terraform cannot infer it. The
+  #       function references aws_iam_role.lambda[...].arn, which orders it after the
+  #       ROLE but not after aws_iam_role_policy.lambda -- a separate resource that
+  #       carries the permissions. Without this edge the function, and the bootstrap
+  #       invocation that calls one of these four, can be created and called while its
+  #       role still holds no policy, which surfaces as an access denial on a graph that
+  #       otherwise looks complete.
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -2456,19 +2691,78 @@ module "cognito" {
   ]
 }
 
+# -----------------------------------------------------------------------------
+# Messaging: the five IBM MQ queues, re-expressed as SQS.
+# -----------------------------------------------------------------------------
+#
+# WHY : Assumptions: the queue inventory and every delivery parameter are topology, so
+#       nothing about them is passed from here. The module provisions TWO FIFO queues --
+#       the authorization request and reply pair, where MessageGroupId = card_num
+#       preserves per-card ordering -- and THREE standard queues for the inquiry
+#       request/reply pair and the terminal error sink, which have no ordering
+#       requirement. Each of the five carries its own dead-letter queue at
+#       max_receive_count 5. Those numbers are constants recovered from the baseline
+#       rather than choices this root may re-make, which is why they live in
+#       infra/modules/sqs/variables.tf as defaults both roots inherit identically.
 module "sqs" {
   source = "../../modules/sqs"
 
   name_prefix = var.name_prefix
   environment = var.environment
+
+  # WHY : Assumptions: the QUEUE key and not the S3 key. infra/modules/kms publishes four
+  #       separate CMKs so one compromised grant reaches one store, and an authorization
+  #       message body carries cardholder data -- the eighteen-field CSV request includes
+  #       the primary account number -- so reusing the object-store key here would
+  #       collapse two of those four boundaries at a call site nobody would audit.
   kms_key_arn = module.kms.sqs_key_arn
 }
 
+# -----------------------------------------------------------------------------
+# Generation datasets: the GDG bases, re-expressed as versioned S3 prefixes.
+# -----------------------------------------------------------------------------
+#
+# WHY : Assumptions: var.dataset_families is deliberately NOT passed. There are TEN
+#       generation-dataset families -- not six and not eleven -- and the inventory with
+#       its per-family provenance lives once in infra/modules/s3-datasets/variables.tf,
+#       which ASSERTS exactly ten keys, so both roots provision identical prefix
+#       topology. The measurement is direct: `grep -rh 'LIMIT(5)' app/jcl | wc -l`
+#       returns 10, distributed as SIX in app/jcl/DEFGDGB.jcl (L25 TRANSACT.BKUP, L31
+#       TRANSACT.DALY, L37 TRANREPT, L43 TCATBALF.BKUP, L49 SYSTRAN, L55
+#       TRANSACT.COMBINED), THREE in app/jcl/DEFGDGD.jcl (L28 TRANTYPE.BKUP, L51
+#       TRANCATG.PS.BKUP, L74 DISCGRP.BKUP) and ONE in app/jcl/DALYREJS.jcl (L25
+#       DALYREJS).
+# WHY : Assumptions: six is the plausible wrong answer and the more damaging one.
+#       DEFGDGB.jcl looks complete -- it is headed as the GDG bases the project needs
+#       and defines six in a single IDCAMS step -- so a reader stopping there provisions
+#       six. The four missing steps would still WRITE their objects, into a prefix
+#       carrying no lifecycle rule, so nothing would fail and those generations would
+#       accumulate without limit. Eleven is the wrong answer in the other direction: an
+#       exhaustive search for DEFINE GENERATIONDATAGROUP returns eleven statements over
+#       ten distinct base NAMES, because TRANREPT is defined twice, so counting
+#       statements rather than names provisions a prefix no batch step ever writes to.
+# WHY : Assumptions: every one of the ten baseline bases is LIMIT(5), which is why the
+#       lifecycle retains FIVE noncurrent versions -- bucket versioning plus that
+#       retention is the `LIMIT(5) SCRATCH` analogue, where LIMIT caps the generations
+#       kept and SCRATCH is what makes the one rolling off actually go away rather than
+#       linger uncatalogued.
+# WHY : Alternatives Considered: honouring TRANREPT's conflicting LIMIT(10) from
+#       app/jcl/REPTFILE.jcl by overriding that single family's retention. Rejected
+#       because the two baseline definitions contradict each other -- DEFGDGB.jcl says
+#       LIMIT(5) with SCRATCH, REPTFILE.jcl says LIMIT(10) without -- and AAP §0.4.1.7
+#       fixes a uniform five-generation retention across all ten. One family retaining
+#       ten would make the rule non-uniform for no stated benefit and leave the next
+#       reader unable to tell the exception from a mistake. The module keeps a per-family
+#       override available so the decision stays reversible without a topology change.
 module "s3_datasets" {
   source = "../../modules/s3-datasets"
 
   name_prefix = var.name_prefix
   environment = var.environment
+
+  # WHY : Assumptions: the S3 CMK, because these objects are dataset generations derived
+  #       from the cardholder masters and belong to the same object-store boundary as the
+  #       audit and SPA buckets that share this key.
   kms_key_arn = module.kms.s3_key_arn
   # WHY : Refactoring Rationale: this call used to pass
   #       `object_created_lambda_arn = aws_lambda_function.dataset_retention.arn`,
@@ -3077,22 +3371,73 @@ locals {
   }
 }
 
+# -----------------------------------------------------------------------------
+# Parameter Store publications: the root's own resources, owned by no module.
+# -----------------------------------------------------------------------------
+#
+# WHY : Assumptions: these resources are declared HERE rather than in a module because
+#       none of the sixteen publishes SSM parameters, and that is deliberate -- a value
+#       is only publishable once every producer feeding it is composed, and this root is
+#       the only layer that sees them all. infra/modules/aurora-postgresql/outputs.tf
+#       states the obligation directly of its writer_endpoint: AAP §0.5.3.5 requires the
+#       ENVIRONMENT ROOT to publish to Parameter Store so that no service hard-codes an
+#       endpoint. Each service reads what it needs at startup through its Spring profile.
+# WHY : Assumptions: what is published is ENDPOINTS AND IDENTIFIERS ONLY -- never a
+#       credential. Database credentials and seed-user passwords are generated during
+#       apply and written to Secrets Manager by the secrets and cognito modules, which is
+#       the mechanism AAP §0.4.1.6 credits with making the "no secrets committed"
+#       constraint structurally true rather than merely observed. The guarantee is stated
+#       at the resources rather than left implicit because a reader who finds no password
+#       here cannot otherwise tell whether that was a decision or an oversight.
 resource "aws_ssm_parameter" "runtime" {
   for_each = local.runtime_parameters
 
+  # WHY : Assumptions: the name is composed from var.name_prefix (through
+  #       local.parameter_prefix) and var.environment, on the assumption that dev and
+  #       prod may be applied into ONE account. Without the environment segment the two
+  #       roots would write the same names, and the second apply would silently
+  #       overwrite the first environment's endpoints with its own -- a failure that
+  #       surfaces as services connecting to the wrong estate, not as an apply error.
   name        = "${local.parameter_prefix}/${var.environment}/${each.value.service}/${each.value.environment_name}"
   description = "Runtime value injected as ${each.value.environment_name} for ${each.value.service}."
-  type        = "String"
-  value       = each.value.value
+
+  # WHY : Alternatives Considered: SecureString. Rejected as actively misleading rather
+  #       than merely unnecessary: every value in this map is an endpoint, an identifier
+  #       or a queue URL, so encrypting it would assert a secrecy the value does not have
+  #       and would train a reader to treat this prefix as a credential store -- which is
+  #       exactly the confusion that leads to a credential being added to it later. It
+  #       also costs a kms:Decrypt grant on every reading task role for no protection.
+  #       String keeps the boundary legible: secrets live in Secrets Manager, endpoints
+  #       live here, and the type is what says which.
+  type  = "String"
+  value = each.value.value
 }
 
+# WHY : Assumptions: the same two guarantees the per-service parameters above carry apply
+#       to this resource -- it exists so no service hard-codes an endpoint (§0.5.3.5), and
+#       it carries identifiers only and never a credential. It is a SEPARATE resource
+#       because its keys are platform-wide rather than service-scoped: the Aurora writer
+#       endpoint, port and database name, the dataset bucket and the seeded identity
+#       subjects are each read by several workloads and by the ETL, so keying them per
+#       service would publish one value under seven names and leave a reader unable to
+#       tell which copy is authoritative. The five keys it holds are enumerated at
+#       local.platform_parameters above rather than restated here, so there is one
+#       inventory rather than two that can disagree.
 resource "aws_ssm_parameter" "platform" {
   for_each = local.platform_parameters
 
+  # WHY : Assumptions: environment-segmented for the same reason as the per-service names
+  #       above -- these are the platform-wide keys, so a collision between two roots
+  #       sharing an account would repoint every workload at once rather than one.
   name        = "${local.parameter_prefix}/${var.environment}/${each.key}"
   description = "CardDemo ${var.environment} platform endpoint published by Terraform."
-  type        = "String"
-  value       = each.value
+
+  # WHY : Alternatives Considered: SecureString, rejected for the reason recorded on the
+  #       per-service resource above. It applies with particular force here: an Aurora
+  #       HOST NAME is not a credential, and encrypting it alongside the real credential
+  #       in Secrets Manager would blur the one distinction that makes the split legible.
+  type  = "String"
+  value = each.value
 }
 
 locals {
@@ -5210,12 +5555,31 @@ resource "terraform_data" "dataset_retention_path_ready" {
   }
 }
 
+# -----------------------------------------------------------------------------
+# Nightly trigger: the enterprise scheduler definitions, re-expressed.
+# -----------------------------------------------------------------------------
+#
+# WHY : Refactoring Rationale: this call replaces app/scheduler/CardDemo.ca7 and
+#       app/scheduler/CardDemo.controlm. AAP §0.2.2 retires both as SYNTAX while their
+#       INTENT is carried here, and the distinction is the whole point: neither file's
+#       grammar has a cloud analogue, so nothing is translated, but the thing they
+#       expressed -- one nightly trigger for the batch chain, with a place for a failed
+#       trigger to go -- is expressed instead as a cron schedule plus a dead-letter
+#       target. Two vendor-specific definitions of one schedule also meant two files that
+#       could disagree about when the chain ran; there is now one.
 module "eventbridge_scheduler" {
   source = "../../modules/eventbridge-scheduler"
 
-  name_prefix             = var.name_prefix
-  environment             = var.environment
-  state_machine_arn       = module.step_functions.daily_state_machine_arn
+  name_prefix       = var.name_prefix
+  environment       = var.environment
+  state_machine_arn = module.step_functions.daily_state_machine_arn
+
+  # WHY : Assumptions: the dead-letter target is the EXISTING terminal error queue rather
+  #       than a new one, so a trigger that could not be delivered lands in the same sink
+  #       the baseline's CARD.DEMO.ERROR queue became. A separate queue would split "the
+  #       chain failed" from "the chain never started" across two places an operator has
+  #       to remember to check, and the second is the failure mode with no other signal:
+  #       a schedule that never fired produces no execution, so nothing else reports it.
   dead_letter_arn         = module.sqs.error_queue_arn
   dead_letter_kms_key_arn = module.kms.sqs_key_arn
 

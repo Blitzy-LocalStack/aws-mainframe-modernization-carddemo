@@ -103,8 +103,37 @@ COPY package.json package-lock.json ./
 #   pinned toolchain stops being pinned -- and this package's TypeScript pin is
 #   load-bearing: raising it without also raising typescript-eslint leaves the JSDoc
 #   documentation gate installable and silently inert.
+# Assumptions: neither --legacy-peer-deps nor --force appears, and the absence is
+#   the decision rather than an oversight. Either flag makes npm resolve past a
+#   peer conflict instead of refusing, which would defeat the peer range that holds
+#   that TypeScript ceiling in place -- so the guard named just above would be
+#   disarmed by the very command that installs it. A peer conflict reported here
+#   means the version set in ui/package.json is wrong; the response is to correct
+#   that manifest, never to widen this line.
+# Trade-offs: --no-audit and --no-fund trim output and one registry round trip and
+#   touch neither resolution nor verification -- every package's integrity hash
+#   from the lock is still checked. Auditing belongs to CI, where a finding lands
+#   in a reviewable run and can be triaged; left on here it would instead fail
+#   image builds of an already-reviewed commit whenever an advisory is published
+#   later, which makes the build non-reproducible for a reason that has nothing to
+#   do with its inputs.
 RUN npm ci --no-audit --no-fund
 
+# Trade-offs: these are the second half of the split above and their position is
+#   the mechanism -- every layer from here down is invalidated by any source edit,
+#   so a one-character change in a screen component re-runs only the bundle step
+#   and leaves the 310-package layer cached.
+# Alternatives Considered: `COPY . .`, which is one line instead of three and was
+#   rejected. It would send the host's own node_modules, resolved for a
+#   developer's platform rather than this image's, straight over the tree npm ci
+#   has just installed; it would carry a stale local dist that the runtime stage
+#   below would then serve in place of this build's output; and it would pick up
+#   any .env a developer happens to hold, baking one machine's values into a
+#   shared artifact. ui/.dockerignore excludes exactly those paths, but naming the
+#   inputs here is the stronger of the two guards: an ignore file records what must
+#   not arrive, whereas this list records what the build actually reads, so a new
+#   input that nobody copies fails the build outright instead of silently resolving
+#   to whatever the context happened to hold.
 COPY tsconfig.json tsconfig.node.json vite.config.ts index.html ./
 COPY public ./public
 COPY src ./src
@@ -121,6 +150,15 @@ RUN npm run build
 #   receives the longer patch window.
 # Refactoring Rationale: digest-pinned for the same reason as the build stage, and
 #   with the index digest for the same reason.
+# Trade-offs: a second FROM rather than a single stage. The cost is this file's
+#   length and a build that cannot simply be run in place; what it buys is a
+#   runtime image carrying no toolchain whatsoever -- no Node, no npm, no resolved
+#   package tree, no compiler and no source -- because only the built bundle and a
+#   server cross the stage boundary. The ECR repository this image is pushed to
+#   scans on push, and such a report cannot distinguish a finding against a
+#   build-time dependency from one against a serving dependency, so each package
+#   left behind here is a whole class of finding that can never be raised against
+#   the deployed artifact.
 FROM nginx:1.30.4-alpine@sha256:97d490c12ba55b4946b01546d1c3ed324e8d41ab1c9fcb2a616aa470620e5b46 AS runtime
 
 # Alternatives Considered: reusing the image's own `nginx` account, which already
@@ -206,8 +244,23 @@ COPY --from=build --chown=10001:10001 /build/dist/ /usr/share/nginx/html/
 #   cannot bind a privileged port and because the internal load balancer's target
 #   group forwards to 8080 for every CardDemo service. ui/nginx.conf listens on the
 #   same port and the two must agree.
+# Assumptions: this instruction declares that contract for a reader and for
+#   tooling and enforces nothing; the binding is ui/nginx.conf's `listen`. Editing
+#   this number alone would leave the image serving 8080 while announcing another
+#   port, and editing only the `listen` would leave an accurate declaration in
+#   front of a port on which nothing answers -- so neither is ever changed by
+#   itself.
 EXPOSE 8080
 
+# Assumptions: the named account resolves to the 10001:10001 records created
+#   above; naming it rather than repeating the numbers keeps the non-root intent
+#   legible in image metadata while those records keep the identity deterministic.
+# Trade-offs: privileges are dropped HERE, after every instruction that needs to
+#   write as root -- the ownership fixes and the bundle copy -- and before the
+#   probe and the entry point, which need none. Dropping earlier would fail those
+#   copies outright; not dropping at all is what the port above is coupled to,
+#   because a root process could bind 80 whereas this one deliberately cannot, and
+#   that is the whole reason ui/nginx.conf listens on 8080.
 USER carddemo:carddemo
 
 # Assumptions: the probe speaks plain HTTP, unlike the service images. This origin
@@ -218,8 +271,32 @@ USER carddemo:carddemo
 #   document would additionally assert that the bundle copied, which sounds
 #   stronger but makes every probe a disk read and writes a log line every
 #   30 seconds for the life of the task.
-# Assumptions: wget rather than curl -- verified inside this exact digest, which
-#   ships BusyBox wget and no curl -- so the probe needs no package installation.
+# Refactoring Rationale: this note previously justified wget by asserting that the
+#   image "ships BusyBox wget and no curl". The second half was measured false
+#   inside this exact digest -- /usr/bin/curl is present, a real binary owned by
+#   the curl-8.21.0-r0 package -- so the probe would have run either way and the
+#   reason given did not hold. What actually decides it is durability rather than
+#   availability: /usr/bin/wget is a symlink to /bin/busybox and so belongs to the
+#   base userland, which no later `apk del` slimming step can take away, whereas a
+#   separately packaged curl is exactly what such a step removes. Losing the
+#   probe's binary does not fail loudly; it leaves a serving container permanently
+#   unhealthy and restarted on a loop, with a healthy access log and nothing to
+#   say why.
+# Trade-offs: --spider asks for headers only and --tries=1 suppresses wget's own
+#   internal retrying, so one probe is exactly one request and the retry policy
+#   lives in --retries below instead of being split across two mechanisms that
+#   would multiply into far more requests than either number suggests.
+# Trade-offs: the four durations are configuration, and each is a bound rather
+#   than a prediction. --start-period has only to cover nginx binding a listener
+#   after the entrypoint renders one template and writes one small document; there
+#   is no JVM to warm and no migration to run here, which is why it is 5s where
+#   the service images need 30s. The probe's own --timeout=4 sits under the 5s
+#   --timeout so wget reports the failure itself rather than being killed
+#   mid-request, which keeps a slow response distinguishable from a dead one, and
+#   that --timeout in turn stays under --interval so two probes cannot overlap.
+#   --retries=3 then withholds the unhealthy verdict until three consecutive
+#   misses, so an isolated dropped packet does not recycle a container that is
+#   serving.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD ["/usr/bin/wget", "--quiet", "--tries=1", "--timeout=4", \
          "--spider", "http://127.0.0.1:8080/healthz"]

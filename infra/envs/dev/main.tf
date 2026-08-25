@@ -967,6 +967,22 @@ module "ecr" {
 
   name_prefix = var.name_prefix
   environment = var.environment
+
+  # WHY : Refactoring Rationale: this argument was MISSING, and its absence broke
+  #       `terraform plan` in both environment roots rather than merely omitting a
+  #       cache. The ecs_service call below reads
+  #       `module.ecr.repository_urls[local.telemetry_collector_repository]` and
+  #       `module.ecr.repository_arns[...]`, and the preamble above already described the
+  #       mirror as provisioned from this input -- but with the input left at its empty
+  #       default the module's setunion yielded only the ten deployables, so both maps
+  #       lacked that key and each index failed with "Invalid index ... object with 10
+  #       attributes". Wiring it is what makes the key the references already assume
+  #       actually exist.
+  # WHY : Assumptions: exactly ONE entry, the ceiling the module's validation enforces,
+  #       read from the same local the image reference and the pull grant read, so the
+  #       repository created cannot drift from the one pulled from or the one granted.
+  third_party_mirror_repository_names = [local.telemetry_collector_repository]
+
   kms_key_arn = module.kms.s3_key_arn
 
   # WHY : Assumptions: force_delete tracks deletion protection rather than being set
@@ -2170,6 +2186,13 @@ resource "aws_lambda_function" "quiesce" {
     mode = "Active"
   }
 
+  # WHY : Assumptions: this edge is EXPLICIT because Terraform cannot infer it. The
+  #       function references aws_iam_role.lambda[...].arn, which orders it after the
+  #       ROLE but not after aws_iam_role_policy.lambda -- a separate resource that
+  #       carries the permissions. Without this edge the function, and the bootstrap
+  #       invocation that calls one of these four, can be created and called while its
+  #       role still holds no policy, which surfaces as an access denial on a graph that
+  #       otherwise looks complete.
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -2225,6 +2248,13 @@ resource "aws_lambda_function" "resume" {
     mode = "Active"
   }
 
+  # WHY : Assumptions: this edge is EXPLICIT because Terraform cannot infer it. The
+  #       function references aws_iam_role.lambda[...].arn, which orders it after the
+  #       ROLE but not after aws_iam_role_policy.lambda -- a separate resource that
+  #       carries the permissions. Without this edge the function, and the bootstrap
+  #       invocation that calls one of these four, can be created and called while its
+  #       role still holds no policy, which surfaces as an access denial on a graph that
+  #       otherwise looks complete.
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -2280,6 +2310,13 @@ resource "aws_lambda_function" "database_admin" {
     mode = "Active"
   }
 
+  # WHY : Assumptions: this edge is EXPLICIT because Terraform cannot infer it. The
+  #       function references aws_iam_role.lambda[...].arn, which orders it after the
+  #       ROLE but not after aws_iam_role_policy.lambda -- a separate resource that
+  #       carries the permissions. Without this edge the function, and the bootstrap
+  #       invocation that calls one of these four, can be created and called while its
+  #       role still holds no policy, which surfaces as an access denial on a graph that
+  #       otherwise looks complete.
   depends_on = [aws_iam_role_policy.lambda]
 }
 
@@ -2336,6 +2373,13 @@ resource "aws_lambda_function" "dataset_retention" {
     mode = "Active"
   }
 
+  # WHY : Assumptions: this edge is EXPLICIT because Terraform cannot infer it. The
+  #       function references aws_iam_role.lambda[...].arn, which orders it after the
+  #       ROLE but not after aws_iam_role_policy.lambda -- a separate resource that
+  #       carries the permissions. Without this edge the function, and the bootstrap
+  #       invocation that calls one of these four, can be created and called while its
+  #       role still holds no policy, which surfaces as an access denial on a graph that
+  #       otherwise looks complete.
   depends_on = [aws_iam_role_policy.lambda]
 }
 
