@@ -85,11 +85,29 @@ on:
         options: [dev, prod]
         default: dev
 
+# Trade-offs: least privilege -- the workflow-level default is read-only, so any job or
+# step added later starts with no write capability and must ask for it deliberately.
+# `contents: read` is the single scope needed at this level, and it exists for exactly
+# one step per job: actions/checkout, which reads the reviewed revision. The one scope
+# beyond it in this workflow -- `id-token: write` -- is granted per job below rather than
+# here, so the credentialed plan job's token capability is never in scope for the
+# credential-free static job. No job in this workflow is granted `checks: write` or
+# `pull-requests: write`, because Terraform emits no JUnit XML and this workflow
+# therefore publishes no annotations; a narrower permission set is the reason the
+# annotation reporter the sibling workflows use is deliberately absent here.
 permissions:
   contents: read
 
 # Trade-offs: static validation has no persistent side effect, so a stale run
 # may be cancelled safely instead of racing a newer revision for runner time.
+# Alternatives Considered: `cancel-in-progress: false`, which is what deploy.yml sets.
+# The two differ because their units of work differ, not by oversight. A deployment
+# holds the DynamoDB state lock and must be allowed to finish, so deploy.yml queues by
+# environment; this workflow only reads the tree and writes reports to a scratch
+# directory, so a cancelled run leaves nothing half-applied and nothing to reconcile.
+# Grouping by `github.ref` rather than by environment follows from the same fact: the
+# subject under review here is a revision, and the newest revision of a branch is the
+# only one whose verdict a reviewer acts on.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -97,12 +115,36 @@ concurrency:
 jobs:
   terraform-static:
     name: Format, validate, lint and scan the Terraform package
+    # Trade-offs: the runner image is pinned rather than drifting silently with
+    # `ubuntu-latest`, because this job's verdict depends on the image's preinstalled
+    # curl, unzip, tar and sha256sum and on its Python layout; an unreviewed image
+    # change could alter any of them and turn an unrelated week into a red gate with
+    # no commit to blame. Every tool this job actually gates on is separately
+    # checksum-pinned below, so the image supplies only the extraction plumbing.
     runs-on: ubuntu-24.04
+    # Trade-offs: a bounded ceiling is preferred to an unbounded job. Every step here
+    # is a download or a local scan of a fixed tree, so a run that stops making
+    # progress is hung rather than busy, and a hung job that is cancelled reports a
+    # failure a reviewer can act on instead of occupying a runner indefinitely. The
+    # ceiling is deliberately far above what the work needs, so it is a stall detector
+    # and never a pass/fail input.
     timeout-minutes: 60
+    # Trade-offs: restated at job scope rather than inherited, so this job's capability
+    # is legible where the job is read and cannot be widened by a later edit to the
+    # workflow-level default. Assumptions: this job needs NO secret of any kind -- it
+    # reaches no cloud account, so there is nothing for a step-scoped secret to carry
+    # and no credential whose blast radius has to be reasoned about. That is a
+    # property of the credential-free design, not an omission.
     permissions:
       contents: read
 
     steps:
+      # Assumptions: full-SHA action pins cannot be moved to attacker-controlled code
+      # while this job's token remains trusted (CWE-1357). A floating major tag such as
+      # `@v4` can be silently repointed by a tag move, a branch-protection lapse or a
+      # maintainer-account compromise; a 40-char commit SHA is content-addressed and
+      # cannot. The trailing `# v4.2.2` keeps the pin human-readable and lets
+      # Dependabot or Renovate advance it under review.
       - name: Check out the reviewed revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -128,12 +170,28 @@ jobs:
           install_dir="$RUNNER_TEMP/carddemo-infra-tools"
           mkdir -p "$install_dir"
 
+          # Assumptions: 1.15.8 is the exact CLI the infrastructure package was
+          #   validated on, and every `versions.tf` in the tree declares a floor of
+          #   >= 1.15.0. CI pins the single validated patch rather than tracking the
+          #   floor, so a newly released CLI cannot change this workflow's verdict on
+          #   an unchanged tree. Only the CLI is pinned here: the aws and random
+          #   PROVIDER constraints belong to `infra/**/versions.tf` and are resolved
+          #   against the tracked lock files, so restating them here would create a
+          #   second place to disagree about the same contract.
           terraform_version="1.15.8"
           terraform_archive="terraform_${terraform_version}_linux_amd64.zip"
           curl -fsSLo "$install_dir/$terraform_archive" "https://releases.hashicorp.com/terraform/${terraform_version}/${terraform_archive}"
           printf '%s  %s\n' "d25ce7b6902013ad905db3d2eab0be4cd905887fe88b81a6171b8d5503c31f3d" "$install_dir/$terraform_archive" | sha256sum -c -
           unzip -q "$install_dir/$terraform_archive" -d "$install_dir"
 
+          # Assumptions: each of the three archive versions below is the release the
+          #   package's gate configuration was authored against -- tflint 0.64.0 pairs
+          #   with the ruleset version `infra/.tflint.hcl` pins, and terraform-docs
+          #   0.20.0 renders the table shape the committed module READMEs already hold,
+          #   so advancing either without regenerating would report drift that is a
+          #   tool difference rather than a documentation defect. gitleaks 0.30.x-era
+          #   8.30.1 is the release whose `dir` subcommand and SARIF output the secret
+          #   step below invokes.
           tflint_version="0.64.0"
           tflint_archive="tflint_linux_amd64.zip"
           curl -fsSLo "$install_dir/$tflint_archive" "https://github.com/terraform-linters/tflint/releases/download/v${tflint_version}/${tflint_archive}"
@@ -568,15 +626,26 @@ jobs:
           validated=0
           for root in "${roots[@]}"; do
             test -f "$root/main.tf" || { echo "not a Terraform root: $root" >&2; exit 1; }
+            # Assumptions: `.terraform.lock.hcl` is TRACKED in all nineteen
+            #   directories precisely so `init` is reproducible, so CI's job is to
+            #   VERIFY that lock and never to regenerate it. `-lockfile=readonly` makes
+            #   a run that WOULD have rewritten it fail instead, which turns a stale or
+            #   hand-edited lock into a reviewable event.
+            #   Alternatives Considered: omitting the flag and letting init refresh the
+            #   lock silently. Rejected because the rewrite would happen on a runner
+            #   whose working tree is discarded, so the only signal -- that the
+            #   committed provider checksums no longer match what init resolves --
+            #   would be produced and then thrown away, leaving the next developer to
+            #   discover it locally.
             terraform -chdir="$root" init -backend=false -lockfile=readonly -input=false
             terraform -chdir="$root" validate
             validated=$((validated + 1))
           done
           if [ "$validated" -lt 3 ]; then
-            echo "validated only $validated Terraform roots; expected at least 3" >&2
+            echo "[ci-infra] validated only $validated Terraform roots; expected at least 3" >&2
             exit 1
           fi
-          echo "validated $validated Terraform roots"
+          echo "[ci-infra] validated $validated Terraform roots"
 
       # Assumptions: the AWS ruleset is itself pinned in infra/.tflint.hcl.
       # Initialization verifies its signature before recursive lint executes.
@@ -655,10 +724,10 @@ jobs:
             checked=$((checked + 1))
           done
           if [ "$checked" -lt 19 ]; then
-            echo "terraform-docs drift check covered only $checked directories; expected at least 19" >&2
+            echo "[ci-infra] terraform-docs drift check covered only $checked directories; expected at least 19" >&2
             exit 1
           fi
-          echo "terraform-docs drift check covered $checked directories"
+          echo "[ci-infra] terraform-docs drift check covered $checked directories"
 
       # WHY : terraform-docs above regenerates the GENERATED table and can therefore only
       #       detect drift in the part of a document a tool writes. Count claims in this
@@ -2635,31 +2704,109 @@ jobs:
 
       # Assumptions: advanced from upload-artifact v4.4.3 with every other pin in
       # this workflow family, for the reason measured once in services-ci.yml.
+      # Assumptions: `if: always()` so the scanner reports are captured even when an
+      # earlier gate failed -- a failed run is precisely when the Checkov and gitleaks
+      # output is worth reading.
       - name: Upload infrastructure security reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: carddemo-infra-reports
+          # Assumptions: the path is scoped to `infra-reports/**` and deliberately NOT
+          # to the workspace or to `infra/`. That EXCLUDES two neighbours it would
+          # otherwise be easy to sweep up: `infra/**/.terraform/`, which holds
+          # downloaded provider binaries, and any `*.tfstate*`, which may carry
+          # resolved sensitive attribute values. Both are git-ignored for the same
+          # reason, and an artifact is as readable as a commit to anyone with access to
+          # the run, so the ignore rules alone would not have protected them here.
           path: infra-reports/**
+          # Trade-offs: `error` rather than `warn`. Every gate above writes into
+          # infra-reports/, so an EMPTY directory means the security steps produced no
+          # evidence at all -- a failure of this job's audit contract, not a benign
+          # condition. `error` makes that absence fail the upload loudly instead of
+          # hiding a missing-report regression behind a green run.
           if-no-files-found: error
 
   terraform-plan:
     name: Produce a real plan for the selected environment
+    # Trade-offs: this job depends on the static job rather than running beside it, so a
+    # formatting, validation, lint, documentation-drift, secret or policy failure is
+    # reported before any cloud credential is minted at all. The cost is that the plan
+    # cannot start until the credential-free gates finish; that ordering is the point,
+    # because the cheapest way to keep a credentialed run rare is to require a clean
+    # static verdict first. Alternatives Considered: making the two independent to
+    # shorten the critical path -- rejected because it would exchange a real reduction
+    # in credential exposure for a saving on a job that only ever runs on an explicit
+    # manual request.
     needs: terraform-static
+    # Assumptions: a real plan reads remote state and evaluates against a live account,
+    # so it cannot run without credentials -- and a pull request raised from a FORK is
+    # never given them. Requiring `workflow_dispatch` makes that case a SKIP rather
+    # than a red job: no fork pull request, and no ordinary push, can enter this job,
+    # so a contributor never sees this workflow fail for a missing credential their
+    # change had nothing to do with. The credential-free graph is what actually gates
+    # a fork pull request, and it gates it completely.
+    # Alternatives Considered: guarding on
+    # `github.event.pull_request.head.repo.full_name == github.repository` so
+    # same-repository pull requests plan automatically. Rejected because it would mint
+    # cloud credentials on every push to every branch of this repository, making the
+    # credentialed path the default rather than the exception; requiring an explicit
+    # dispatch keeps the operator, not the trigger, in charge of when a real plan runs.
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_plan }}
+    # Trade-offs: pinned for the same reason as the static job -- this job extracts a
+    # checksum-verified archive with the image's own unzip and sha256sum, and an
+    # unreviewed image change could alter that plumbing with no commit to blame.
     runs-on: ubuntu-24.04
+    # Trade-offs: bounded for the same reason as the static job, and it matters more
+    # here: a plan holds no state lock, but a job that hangs while holding assumed-role
+    # credentials keeps a live session open, so a stall detector is also a way of
+    # bounding how long that session can exist.
     timeout-minutes: 60
+    # Assumptions: binding the job to a GitHub environment is what makes the resource
+    # identifiers below protectable -- `vars.*` resolve per environment, and an
+    # environment can additionally carry required reviewers and a branch policy, so the
+    # right to plan against prod is administered outside this file rather than being
+    # implied by the ability to dispatch it. The input is a `choice` restricted to dev
+    # and prod, so this can only ever name a real environment root.
     environment: ${{ inputs.environment }}
     permissions:
       contents: read
       # Assumptions: this scope mints a per-run OIDC token that STS exchanges for
-      # short-lived credentials, eliminating any stored cloud access key.
+      # short-lived credentials, eliminating any stored cloud access key. It is the
+      # single most consequential grant in this file, and it is declared HERE rather
+      # than at workflow scope for exactly that reason: at workflow scope every step of
+      # the credential-free static job -- the tool downloads, the linters, the secret
+      # scan, the policy scanner and the artifact upload -- would be able to request a
+      # cloud-exchangeable token that none of them has any use for. Scoping it to the
+      # one job that assumes a role is what keeps "no stored credential" from being
+      # traded for "a token every step can mint".
+      # Alternatives Considered: a stored access-key pair in repository secrets, which
+      # needs no `id-token` scope at all. Rejected because a long-lived key has to be
+      # rotated, can be exfiltrated by any step that can read the environment, and
+      # survives the run; a federated session cannot outlive the job that requested it.
       id-token: write
 
     steps:
+      # Assumptions: the same immutable full-SHA pin as the static job, and the same
+      # reason (CWE-1357) -- a tag that can be repointed is a way to run other people's
+      # code with this job's token. The reason binds harder in this job than in the
+      # static one, because this token can be exchanged for cloud credentials.
       - name: Check out the reviewed revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
+      # Assumptions: CWE-1357 -- this is the one action in this workflow published
+      # OUTSIDE the `actions/` organisation, so the immutable full-SHA pin carries more
+      # weight here than anywhere else in the file: it is the step that receives the
+      # OIDC token and returns cloud credentials, so a moved tag here would hand an
+      # attacker the role rather than merely the checkout. A maintainer-account
+      # takeover is the concrete precedent for that failure mode, and a
+      # content-addressed SHA is what makes it inapplicable. The pin is the same
+      # release deploy.yml assumes its deployment role with, so both credentialed
+      # paths in this repository trust exactly one reviewed revision of this action.
+      # Assumptions: no long-lived access key exists to configure -- `role-to-assume`
+      # with the job's `id-token: write` scope is an STS exchange, so the credentials
+      # are short-lived and per-run. Account-id masking keeps identity metadata from
+      # being copied out of these logs into unrelated diagnostics.
       - name: Configure short-lived AWS credentials
         uses: aws-actions/configure-aws-credentials@b47578312673ae6fa5b5096b330d9fbac3d116df # v4.2.1
         with:
@@ -2775,5 +2922,18 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: carddemo-infra-plan-${{ inputs.environment }}
+          # Assumptions: the human-readable `show` output is published and the BINARY
+          # `<env>.tfplan` is deliberately withheld, even though it sits in the same
+          # working tree. A saved plan file embeds every resolved attribute the apply
+          # would set, including the generated Aurora master password and the Cognito
+          # seed-user passwords; the rendered form masks those as sensitive. The
+          # artifact is the audit record, so it carries what a reviewer must read and
+          # not the material an attacker would want. `.terraform/` and any
+          # `*.tfstate*` are outside this path for the same reason.
           path: infra-reports/${{ inputs.environment }}-plan.txt
+          # Trade-offs: `error` rather than `warn`. This artifact IS the review
+          # evidence that a plan was produced and what it contained -- the direct
+          # analogue of the mainframe deployment job echoing its installed definitions
+          # into the job log. A silently absent plan would leave a green run asserting
+          # a review happened over nothing.
           if-no-files-found: error
