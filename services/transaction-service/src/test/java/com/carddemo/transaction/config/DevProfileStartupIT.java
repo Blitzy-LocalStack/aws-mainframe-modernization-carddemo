@@ -88,6 +88,16 @@ class DevProfileStartupIT {
    */
   private static final String POSTGRES_IMAGE =
       "postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193";
+  /**
+   * Class-path location of the harness that creates the schema's owning role in the container.
+   *
+   * <p>Assumptions: the role is a NOLOGIN role {@code data-migration/sql/V0__schemas_and_roles.sql} names and no container has, so it has
+   * to exist before Flyway opens a connection and assumes it. A Testcontainers init script runs once
+   * at container start, which is strictly earlier than Flyway's first connection; the alternative
+   * this replaces -- creating the role from {@code spring.flyway.init-sqls} -- carried Flyway's
+   * deprecated {@code initSql} setting and its per-connection removal notice.</p>
+   */
+  private static final String OWNER_ROLE_SCRIPT = "db/testharness/test-harness-owner-role.sql";
 
   /**
    * The engine this context runs its migrations and its pool against.
@@ -101,7 +111,8 @@ class DevProfileStartupIT {
    * deployment does.
    */
   @Container
-  static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(POSTGRES_IMAGE);
+  static final PostgreSQLContainer POSTGRES =
+          new PostgreSQLContainer(POSTGRES_IMAGE).withInitScript(OWNER_ROLE_SCRIPT);
 
   /** The stub issuer, serving the two documents a discovery fetch reads. */
   private static HttpServer issuer;
@@ -259,35 +270,6 @@ class DevProfileStartupIT {
       "Y2FyZGRlbW8tc3RhcnR1cC1wcm9iZS1rZXktbWF0ZXJpYWwtbm90LWEtc2VjcmV0";
 
   /**
-   * Creates the migration owner role this profile assumes, when the engine does not already carry it.
-   *
-   * <p>Refactoring Rationale: the base configuration hands Flyway one statement, {@code SET ROLE
-   * carddemo_ledger_owner}, naming the NOLOGIN role {@code data-migration/sql/V0__schemas_and_roles.sql}
-   * creates in a deployed cluster. A bare engine has never heard of it, and every case in this class failed
-   * context load with {@code role "carddemo_ledger_owner" does not exist} until this statement ran ahead of
-   * it. Overriding the list to empty, or to a no-op, was rejected for the same reason the repository suites
-   * beside this one reject it: the ownership split is the control being started up, and a migration that
-   * creates its objects as the connecting superuser instead would leave every {@code ALTER DEFAULT
-   * PRIVILEGES FOR ROLE} clause in the bootstrap SQL keyed on an identity that never created anything.
-   *
-   * <p>Assumptions: the statement is idempotent and terminated. Flyway runs its init SQL on EACH connection
-   * it opens rather than once per migration, so the role test has to be re-runnable; and Boot joins the list
-   * into a single script with newlines, so an unterminated statement would be concatenated with the {@code
-   * SET ROLE} that follows it.
-   *
-   * <p>Assumptions: {@code CREATE} on the database is granted through {@code format} with {@code %I} on
-   * {@code current_database()} rather than a literal, because the engine's database name is generated per
-   * run. The grant is what the OWNER needs in order to create the schema -- not what the connecting user
-   * needs in order to become it -- and {@code SET ROLE} drops the superuser attribute for the remainder of
-   * the session, so a superuser connection does not make it superfluous.
-   */
-  private static final String CREATE_OWNER_ROLE_IF_ABSENT =
-      "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname ="
-          + " 'carddemo_ledger_owner') THEN CREATE ROLE carddemo_ledger_owner NOLOGIN; END IF;"
-          + " EXECUTE format('GRANT CREATE ON DATABASE %I TO carddemo_ledger_owner',"
-          + " current_database()); END $$;";
-
-  /**
    * Supplies the values the platform would inject, and only those.
    *
    * <p>Assumptions: each entry below stands in for exactly one thing a deployment supplies, and nothing here
@@ -310,8 +292,17 @@ class DevProfileStartupIT {
     registry.add("spring.flyway.user", POSTGRES::getUsername);
     registry.add("spring.flyway.password", POSTGRES::getPassword);
     registry.add("spring.flyway.create-schemas", () -> "true");
-    registry.add("spring.flyway.init-sqls[0]", () -> CREATE_OWNER_ROLE_IF_ABSENT);
-    registry.add("spring.flyway.init-sqls[1]", () -> "SET ROLE carddemo_ledger_owner;");
+    // Refactoring Rationale: two entries stood here, `spring.flyway.init-sqls[0]` creating the NOLOGIN
+    //   role carddemo_ledger_owner if absent and `[1]` assuming it. That key maps to Flyway's deprecated
+    //   `initSql`, so both halves moved and neither is a dynamic property any more: the assumption is
+    //   issued by common-lib's FlywayOwnerRoleDataSourceCustomizer and re-asserted by its
+    //   FlywayOwnerRoleCallback, both from the profile's own
+    //   carddemo.database.flyway.owner-role, and the creation is the OWNER_ROLE_SCRIPT this class's
+    //   container runs at start -- which is strictly ahead of Flyway's first connection, where the
+    //   removed entries only managed to be ahead of the first migration.
+    //   Assumptions: nothing has to be registered in their place. Both replacements are reached by the
+    //   profile and the container this class already declares, so a case that used to fail context load
+    //   with `role "carddemo_ledger_owner" does not exist` now finds the role already present.
     registry.add("spring.datasource.hikari.data-source-properties.sslmode", () -> "disable");
     registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> issuerUrl);
     registry.add("carddemo.security.jwt.expected-client-id", () -> "carddemo-startup-probe-client");

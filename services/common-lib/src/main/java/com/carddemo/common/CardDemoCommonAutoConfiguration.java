@@ -1,5 +1,7 @@
 package com.carddemo.common;
 
+import com.carddemo.common.config.FlywayOwnerRoleCallback;
+import com.carddemo.common.config.FlywayOwnerRoleDataSourceCustomizer;
 import com.carddemo.common.control.OnlineWriteGate;
 import com.carddemo.common.control.OnlineWriteGateInterceptor;
 import com.carddemo.common.error.ApiErrorSecurityHandlers;
@@ -13,6 +15,8 @@ import com.carddemo.common.web.RequestBodySizeFilter;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Base64;
+import javax.sql.DataSource;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -769,6 +773,130 @@ public class CardDemoCommonAutoConfiguration {
         public RejectedRequestErrorReportValveCustomizer
                 carddemoRejectedRequestErrorReportValveCustomizer(Clock clock) {
             return new RejectedRequestErrorReportValveCustomizer(clock);
+        }
+    }
+
+    /**
+     * Registers the migration owner-role callback only where a migration engine is present and a
+     * service has named the role its schema is owned by.
+     *
+     * <p>Refactoring Rationale: the seven migrating services each carried
+     * {@code spring.flyway.init-sqls: ["SET ROLE carddemo_<context>_owner;"]}, which maps to a Flyway
+     * setting that engine deprecated in favour of a connect-time callback -- and which printed a
+     * deprecation notice on every connection it opened, seventy of them in one reactor build. The
+     * replacement is registered here rather than seven times because the statement is the same
+     * decision in all seven, and the only thing that differs is the role name, which stays in each
+     * service's own configuration where the rest of its database identity is.</p>
+     *
+     * <p>Assumptions: {@link ConditionalOnClass} names Flyway's callback interface as text so the
+     * condition is evaluated from class-file metadata, which is what allows the reporting context --
+     * the one bounded context that runs no migration and declares no Flyway at all -- to skip this
+     * configuration rather than fail resolving the bean method's return type. It is the same reason
+     * the servlet configurations above name their types as text.</p>
+     *
+     * <p>Assumptions: {@link ConditionalOnProperty} on the owner-role key is what keeps the
+     * registration out of a context that names no role. Presence is the condition, not a particular
+     * value, so a profile can deliberately opt out by overriding the key to an empty value -- see
+     * {@link com.carddemo.common.config.FlywayOwnerRoleCallback} for why the empty case is a
+     * documented opt-out rather than an error.</p>
+     *
+     * <p>Trade-offs: Spring Boot's Flyway auto-configuration collects {@code Callback} beans from the
+     * context, so a bean is all this has to contribute and no service needs to reference it. The cost
+     * is that the registration is invisible at each service's configuration -- what a reader sees
+     * there is one property -- which is why that property's own comment in each
+     * {@code application.yml} names this class.</p>
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = "org.flywaydb.core.api.callback.Callback")
+    @ConditionalOnProperty(name = FlywayOwnerRoleCallback.OWNER_ROLE_PROPERTY)
+    static final class FlywayOwnerRoleConfiguration {
+
+        /**
+         * Registers the callback that makes Flyway migrate as the schema's owner.
+         *
+         * <p>Assumptions: guarded on absence of the concrete type so a service needing different
+         * behaviour replaces it by declaring its own bean, which is the same escape hatch every other
+         * shared bean in this file offers. The guard names the concrete class rather than
+         * {@code Callback}, because a service may well declare an unrelated Flyway callback of its own
+         * and that must not silently displace this one.</p>
+         *
+         * @param ownerRole the role Flyway assumes before creating objects, named by
+         *     {@value com.carddemo.common.config.FlywayOwnerRoleCallback#OWNER_ROLE_PROPERTY}; an
+         *     empty value registers an inert callback
+         * @return the callback bean, never {@code null}
+         * @throws IllegalArgumentException if a non-empty value is not a lower-case identifier, which
+         *     fails the context at assembly rather than letting an unchecked name reach a privileged
+         *     statement
+         */
+        @Bean
+        @ConditionalOnMissingBean(FlywayOwnerRoleCallback.class)
+        public FlywayOwnerRoleCallback carddemoFlywayOwnerRoleCallback(
+                @Value("${" + FlywayOwnerRoleCallback.OWNER_ROLE_PROPERTY + ":}") String ownerRole) {
+            return new FlywayOwnerRoleCallback(ownerRole);
+        }
+    }
+
+    /**
+     * Registers the customizer that puts the owner role in force before Flyway takes hold of a
+     * connection, wherever Spring Boot's own Flyway support is what builds the engine.
+     *
+     * <p>Refactoring Rationale: the callback registered above was the whole of this control until it
+     * was measured. Flyway's PostgreSQL connection wrapper captures the session's role when it is
+     * constructed and its schema-history writes restore that captured role, so a role the callback
+     * assumes is reverted before {@code flyway_schema_history} is created -- the account context failed
+     * with {@code SQLSTATE 42501} on exactly that. The deprecated {@code spring.flyway.init-sqls} this
+     * work replaces did not have the problem because of WHERE it ran, on the raw JDBC connection
+     * before the wrapper existed, and Boot's configuration customizer is the one supported hook that
+     * reaches the same position. See {@link FlywayOwnerRoleDataSourceCustomizer} for the reading this
+     * rests on.
+     *
+     * <p>Assumptions: this is a second nested configuration rather than a second bean method beside
+     * the callback, because the two conditions genuinely differ. The callback's contract belongs to the
+     * migration engine and is satisfied by {@code flyway-core} alone; this customizer's contract
+     * belongs to Spring Boot's Flyway module, and a bean method whose return type implements a missing
+     * interface is resolved while the enclosing configuration is parsed, so the condition has to guard
+     * the class rather than the method.
+     *
+     * <p>Trade-offs: {@link ConditionalOnProperty} is restated here, duplicating one line of the
+     * configuration above. Accepted because the alternative -- one configuration guarded by the union
+     * of both class conditions -- would silently stop registering the CALLBACK in a context that has
+     * the engine but not Boot's Flyway module, widening the blast radius of a condition that exists
+     * only to protect the customizer.
+     */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(
+            name = {
+                "org.flywaydb.core.api.configuration.FluentConfiguration",
+                "org.springframework.boot.flyway.autoconfigure.FlywayConfigurationCustomizer"
+            })
+    @ConditionalOnProperty(name = FlywayOwnerRoleCallback.OWNER_ROLE_PROPERTY)
+    static final class FlywayOwnerRoleDataSourceConfiguration {
+
+        /**
+         * Registers the customizer that makes Flyway borrow connections which have already assumed the
+         * schema's owning role.
+         *
+         * <p>Assumptions: guarded on absence of the concrete type, the same escape hatch every other
+         * shared bean in this file offers, and named concretely rather than by the Boot interface so a
+         * service declaring an unrelated Flyway customizer of its own does not displace this one.
+         *
+         * @param ownerRole the role Flyway assumes before creating objects, named by
+         *     {@value com.carddemo.common.config.FlywayOwnerRoleCallback#OWNER_ROLE_PROPERTY}; an empty
+         *     value registers an inert customizer that leaves the configured DataSource alone
+         * @param applicationDataSources the context's DataSource beans, which the customizer compares
+         *     by instance so that it can refuse a configuration in which Flyway would elevate
+         *     connections belonging to the pool the application serves requests from
+         * @return the customizer bean, never {@code null}
+         * @throws IllegalArgumentException if a non-empty value is not a lower-case identifier, which
+         *     fails the context at assembly rather than letting an unchecked name reach a privileged
+         *     statement
+         */
+        @Bean
+        @ConditionalOnMissingBean(FlywayOwnerRoleDataSourceCustomizer.class)
+        public FlywayOwnerRoleDataSourceCustomizer carddemoFlywayOwnerRoleDataSourceCustomizer(
+                @Value("${" + FlywayOwnerRoleCallback.OWNER_ROLE_PROPERTY + ":}") String ownerRole,
+                ObjectProvider<DataSource> applicationDataSources) {
+            return new FlywayOwnerRoleDataSourceCustomizer(ownerRole, applicationDataSources);
         }
     }
 }

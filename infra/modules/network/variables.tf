@@ -18,7 +18,7 @@
 #   cannot be added ahead of the code that reads it, and a derived value
 #   belongs in main.tf's `locals` rather than here.
 #
-#   main.tf consumes all thirteen variables and outputs.tf republishes the two
+#   main.tf consumes all fourteen variables and outputs.tf republishes the two
 #   shared ports so the environment root can pass the exact values enforced by
 #   the security groups into ecs-service and aurora-postgresql. That round trip
 #   is deliberate: a literal 8080 or 5432 repeated in three modules works only
@@ -52,12 +52,19 @@
 #   leaving twelve. It has since moved once more, to THIRTEEN, with the addition of
 #   permissions_boundary_arn: every IAM role this package creates carries the account
 #   deployment boundary, and the flow-log role this module creates was the one role
-#   that did not, so the input is what lets the caller bound it. Every copy of the
-#   count is re-derived from the declarations
+#   that did not, so the input is what lets the caller bound it. It has now moved to
+#   FOURTEEN, with the addition of approved_additional_interface_endpoint_services:
+#   the interface-endpoint set is split into the EIGHT services AAP section 0.4.1.9
+#   enumerates and the TWO approved additions beyond them, because one input carrying
+#   ten names left the specification's eight unassertable anywhere -- the deviation
+#   was described in prose and nothing could check it. Splitting the input is what
+#   makes both halves exact sets, and the additions input is where the approval, the
+#   functional need and the recurring cost of each addition are recorded. Every copy
+#   of the count is re-derived from the declarations
 #   rather than decremented by hand, which is what the hand-written-count gate in
 #   the infrastructure workflow checks on every change.
 #
-# Parameters -- thirteen, of which two are required:
+# Parameters -- fourteen, of which two are required:
 #
 #   Naming and identity
 #     name_prefix              string       Leading component of each Name tag.
@@ -74,11 +81,15 @@
 #
 #   Private service connectivity
 #     interface_endpoint_services
-#                              set(string)  Exact ten AWS services reached by
-#                                           interface endpoint, including the
-#                                           identity provider and the trace
-#                                           collector, so the application tier
-#                                           needs no public egress at all.
+#                              set(string)  Exact EIGHT AWS services AAP section
+#                                           0.4.1.9 enumerates, reached by
+#                                           interface endpoint.
+#     approved_additional_interface_endpoint_services
+#                              set(string)  Exact TWO approved additions beyond
+#                                           that eight -- the identity provider
+#                                           and the trace-export target -- which
+#                                           is what lets the application tier
+#                                           need no public egress at all.
 #     app_container_port       number       Shared ALB-to-container port.
 #     database_port            number       Shared application-to-Aurora port.
 #
@@ -382,7 +393,8 @@ variable "subnet_newbits" {
 # -----------------------------------------------------------------------------
 # Private service connectivity
 #
-# These three values -- the endpoint set and the two shared ports -- are contracts
+# These four values -- the two halves of the endpoint set and the two shared ports --
+# are contracts
 # shared with sibling modules rather than independent environment-tuning knobs. main.tf consumes them in endpoint and
 # security-group resources, while outputs.tf republishes the two ports so the
 # calling root can pass the same values into ecs-service and
@@ -404,42 +416,27 @@ variable "subnet_newbits" {
 #       path. Neither is an environment variation: dev and prod must have the same
 #       topology. S3 is absent because it uses the gateway endpoint created
 #       unconditionally in main.tf rather than an interface endpoint.
-# WHY : Refactoring Rationale: this set is TEN rather than the eight specification
-#       section 0.4.1.9 enumerates, and the two additions are deliberate. `xray` carries
-#       the trace export named in section 0.9.3's tracing requirement; `cognito-idp`
-#       carries the identity-provider calls EVERY service makes -- issuer discovery and
-#       JSON-web-key-set fetching at start-up, and auth-service's user-pool operations.
-#       Section 0.4.1.9's list is the set needed to run the workload's own dependencies;
-#       an endpoint the identity path requires is not a topology change against it.
-# WHY : Refactoring Rationale: `cognito-idp` was WITHDRAWN from this set for a period, on
-#       a finding that was correct about mechanism and wrong about remedy, and the finding
-#       is preserved here because the arrangement that answers it is not obvious. main.tf
-#       attached ONE shared endpoint policy to every endpoint, and that policy admits only
-#       principals in this account -- while the identity calls that matter here are
-#       UNAUTHENTICATED by construction: OIDC discovery, the key set, and the sign-on,
-#       challenge-response, refresh, revoke and sign-out operations a user-pool client
-#       performs before or without holding any IAM credential. Those requests carry no
-#       principal for that condition to satisfy, so the shared policy denied them and the
-#       symptom would have been every sign-on refused at the endpoint.
-# WHY : Assumptions: the remedy is a per-endpoint policy rather than removal, and removal
-#       is what makes the difference. The withdrawal's stated fallback was the
-#       application-tier egress rule to the provider, but that rule admitted 0.0.0.0/0 and
-#       is itself withdrawn below -- and .github/workflows/infra-ci.yml now fails any
-#       egress rule naming an open destination. So with this name absent AND that rule
-#       gone there is no path to the provider at all, and sign-on fails closed rather than
-#       privately: the two withdrawals were individually defensible and jointly fatal.
-#       main.tf therefore keeps the account-scoped document for the other nine endpoints
-#       and attaches an additional statement on this one admitting exactly the five
-#       unauthenticated operations by name, with no principal condition. That satisfies
-#       both halves -- the private path serves unauthenticated sign-on, and no rule names a
-#       public destination -- and it is why infra-ci.yml asserts this name is present in
-#       BOTH the default and the validation below.
-# WHY : Alternatives Considered: dropping the name and restoring the open egress rule.
-#       Rejected because it reintroduces the finding that rule's withdrawal fixed: every
-#       application task able to open 443 to any public address in a workload holding
-#       cardholder data, to reach one dependency that has a private endpoint available.
+# WHY : Refactoring Rationale: this input's default and validation carried TEN names
+#       -- the eight above plus cognito-idp and xray -- and that is the defect this
+#       split repairs. Both additions are approved and both are kept; what could not
+#       be done was CHECK them, because one input holding ten names leaves the eight
+#       of section 0.4.1.9 asserted nowhere, so the deviation existed only in prose
+#       and an eleventh name would have been an ordinary-looking edit to a list that
+#       already disagreed with the specification. The eight now stand alone here, as
+#       an exact set this module asserts in its own right, and the approved additions
+#       are declared by approved_additional_interface_endpoint_services below, where
+#       each carries its functional justification and its recurring cost. main.tf
+#       creates endpoints over the UNION of the two, so the provisioned set is
+#       unchanged at ten and every endpoint keeps identical treatment; the structure
+#       follows infra/modules/ecr, which separates the ten deployable images the plan
+#       fixes from the one third-party mirror cached beside them for the same reason.
+#       Alternatives Considered: keeping one input and adding a second `validation`
+#       that asserted the eight were a SUBSET of it. Rejected because a subset test
+#       says nothing about what else the set holds, so the eleventh endpoint it is
+#       meant to stop still passes -- and the count the specification fixes would
+#       still not be readable from any single declaration.
 variable "interface_endpoint_services" {
-  description = "Exact set of short AWS service names given private interface endpoints in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls, ssm for configuration, xray for trace export and cognito-idp for identity-provider discovery, key-set and user-pool calls. main.tf expands each short name into its Region-qualified service name; S3 is excluded because it uses the separate gateway endpoint."
+  description = "Exact set of the EIGHT short AWS service names specification section 0.4.1.9 enumerates, each given a private interface endpoint in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls and ssm for configuration. main.tf expands each short name into its Region-qualified service name and creates one endpoint per entry in the UNION of this set and var.approved_additional_interface_endpoint_services; S3 is excluded from both because it uses the separate gateway endpoint."
   type        = set(string)
   default = [
     "ecr.api",
@@ -450,8 +447,6 @@ variable "interface_endpoint_services" {
     "sqs",
     "states",
     "ssm",
-    "xray",
-    "cognito-idp",
   ]
 
   validation {
@@ -459,6 +454,9 @@ variable "interface_endpoint_services" {
     # expression -- no required service may be missing and no
     # unreviewed service may be added. A character-shape regex alone
     # would accept both errors and the plan would remain green.
+    # Assumptions: an approved addition does not belong here. It is declared by
+    #     approved_additional_interface_endpoint_services, so this set stays
+    #     equal to the specification's eight and remains checkable against it.
     condition = var.interface_endpoint_services == toset([
       "ecr.api",
       "ecr.dkr",
@@ -468,10 +466,123 @@ variable "interface_endpoint_services" {
       "sqs",
       "states",
       "ssm",
-      "xray",
-      "cognito-idp",
     ])
-    error_message = "interface_endpoint_services must contain exactly ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states, ssm, xray and cognito-idp; the eight of specification section 0.4.1.9 plus the trace-export and identity-provider endpoints argued above, and the endpoint set is identical in every environment."
+    error_message = "interface_endpoint_services must contain exactly the eight services of specification section 0.4.1.9 -- ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm -- and the endpoint set is identical in every environment. An endpoint beyond those eight is an approved addition and belongs in approved_additional_interface_endpoint_services, where its justification and its recurring cost are recorded."
+  }
+}
+
+# WHY : Assumptions: this input exists because the endpoint inventory carries TWO
+#       kinds of claim and the frozen plan fixes the count of only one of them.
+#       var.interface_endpoint_services above is the eight services specification
+#       sections 0.4.1.6 and 0.4.1.9 enumerate. What this variable holds is the
+#       APPROVED DEVIATION from that number: two further endpoints this deployment
+#       requires to run at all, ratified in docs/adr/ADR-008-security-and-identity.md
+#       with the alternative that was refused and the recurring cost each one carries.
+#       Declaring them separately is what makes both counts assertable -- the
+#       specification's eight, and the two beyond it -- so an eleventh endpoint is a
+#       failed validation rather than one more name in a list that already differed
+#       from the specification.
+# WHY : Assumptions: cognito-idp is required by the identity path and is exercised on
+#       every request-serving start-up and every sign-on. Each service resolves the
+#       user pool's issuer document and its JSON web key set through this hostname,
+#       and auth-service performs the user-pool operations behind sign-on, the
+#       new-password challenge, refresh, revoke and sign-out. With the application
+#       tier's egress enumerated -- main.tf creates exactly four egress rules, to the
+#       load balancer, to Aurora, to the endpoint ENIs and to the S3 gateway prefix
+#       list -- there is no public path for those calls, so without this endpoint they
+#       are dropped at the security group and sign-on fails for every user. That is
+#       the acceptance criterion AAP section 0.9.1 states as sign-on working end to
+#       end, so this endpoint is what makes the enumerated egress and a working
+#       sign-on compatible.
+# WHY : Assumptions: xray is required by the trace path and has a consumer today.
+#       infra/modules/ecs-service attaches an AWS Distro for OpenTelemetry collector
+#       sidecar to every task with essential = true, its traces pipeline exports
+#       through the awsxray exporter, and each application container is pointed at the
+#       sidecar's loopback OTLP receiver -- so spans are created, collected and
+#       exported on the path this endpoint carries. The collector runs inside the same
+#       egress-enumerated subnets as the workload, so with this endpoint absent every
+#       export attempt is dropped at the group and the centralised tracing AAP
+#       sections 0.2.1.4 and 0.9.3 require has no destination.
+#       Refactoring Rationale: an earlier revision of this reasoning recorded xray as
+#       provisioned against NO consumer, on the premise that the collector sidecar was
+#       withdrawn from infra/modules/ecs-service. The sidecar is present and essential,
+#       so that premise has lapsed; it is corrected rather than carried forward,
+#       because a paid-for endpoint recorded as unexercised is exactly the entry a
+#       later reviewer would remove -- and removing it would silently disable trace
+#       export for every workload.
+# WHY : Refactoring Rationale: cognito-idp was WITHDRAWN from the endpoint set for a
+#       period, on a finding that was correct about mechanism and wrong about remedy,
+#       and the finding is preserved here because the arrangement that answers it is
+#       not obvious. main.tf attached ONE shared endpoint policy to every endpoint, and
+#       that policy admits only principals in this account -- while the identity calls
+#       that matter here are UNAUTHENTICATED by construction: OIDC discovery, the key
+#       set, and the sign-on, challenge-response, refresh, revoke and sign-out
+#       operations a user-pool client performs before or without holding any IAM
+#       credential. Those requests carry no principal for that condition to satisfy,
+#       so the shared policy denied them and the symptom would have been every sign-on
+#       refused at the endpoint.
+# WHY : Assumptions: the remedy is a per-endpoint policy rather than removal, and
+#       removal is what makes the difference. The withdrawal's stated fallback was the
+#       application-tier egress rule to the provider, but that rule admitted 0.0.0.0/0
+#       and is itself withdrawn below -- and .github/workflows/infra-ci.yml now fails
+#       any egress rule naming an open destination. So with this name absent AND that
+#       rule gone there is no path to the provider at all, and sign-on fails closed
+#       rather than privately: the two withdrawals were individually defensible and
+#       jointly fatal. main.tf therefore keeps the account-scoped document for the
+#       other nine endpoints and attaches an additional statement on this one
+#       admitting exactly the five unauthenticated operations by name, with no
+#       principal condition. That satisfies both halves -- the private path serves
+#       unauthenticated sign-on, and no rule names a public destination -- and it is
+#       why infra-ci.yml asserts this name is present in BOTH the default and the
+#       validation below.
+# WHY : Alternatives Considered: holding the specification's eight literally and
+#       restoring the open egress rule for these two dependencies. REFUSED, and this
+#       is the alternative the approval record turns on. It reintroduces the finding
+#       that rule's withdrawal fixed -- every application task able to open 443 to any
+#       public address, in a workload holding cardholder data -- and it contradicts
+#       the same section 0.4.1.9 that fixes the count, whose security-group contract
+#       permits only load-balancer-to-application on 8080, application-to-Aurora on
+#       5432 and application-to-endpoint on 443. Widening an endpoint ENUMERATION
+#       leaves that contract intact; restoring public egress breaks it. Of the two
+#       readings of one section, the deviation taken is the one that keeps the
+#       security property.
+#       Alternatives Considered: dropping the two dependencies instead. Refused
+#       because each is load-bearing rather than optional: without the identity
+#       endpoint no user can sign on, and without the trace endpoint the cross-cutting
+#       tracing deliverable has no destination.
+# WHY : Trade-offs: the recurring cost of the approval is stated rather than implied.
+#       An interface endpoint is billed per endpoint per availability zone per hour
+#       plus per GB processed, and this network spans three zones, so these two
+#       additions add 2 x 3 = SIX endpoint-zone-hours per hour on top of the
+#       specification's 8 x 3 = 24 -- thirty in total. At the us-east-1 list rate
+#       recorded in ADR-008 of USD 0.01 per endpoint-zone-hour that is USD 0.06 per
+#       hour, about USD 44 per month, and it is accepted as the price of removing an
+#       open egress path rather than as an incidental addition. The data-processing
+#       term is largely displaced rather than added, because the same traffic
+#       otherwise crosses the NAT gateways and accrues their per-GB charge.
+variable "approved_additional_interface_endpoint_services" {
+  description = "Exact set of the TWO interface-endpoint services approved BEYOND the eight of specification section 0.4.1.9: cognito-idp, which carries the issuer, key-set and user-pool calls every service makes at start-up and on every sign-on, and xray, which carries the trace export of the collector sidecar infra/modules/ecs-service attaches to every task. Both are functionally required because the application tier has no public egress at all, so a dependency with no endpoint here is dropped at the security group rather than routed out. main.tf creates endpoints over the union of this set and var.interface_endpoint_services, so each addition costs three endpoint-zone-hours -- one per availability zone -- and the two together add six to the specification's twenty-four. The approval, the refused alternative of eight endpoints plus internet egress, and the cost arithmetic are recorded in docs/adr/ADR-008-security-and-identity.md."
+  type        = set(string)
+  default = [
+    "cognito-idp",
+    "xray",
+  ]
+
+  validation {
+    # Assumptions: set equality, not a bound on size. A count bound would admit
+    #     any two names, so a swapped entry -- one approved endpoint replaced by
+    #     an unreviewed one -- would plan cleanly while the approval record
+    #     described something else. Equality is what ties the provisioned pair to
+    #     the pair ADR-008 ratifies.
+    # Assumptions: this set may not be shortened either, and that direction
+    #     matters as much as the other. Removing cognito-idp fails every sign-on
+    #     and removing xray silently discards every span, in both cases by
+    #     dropping the call at the application security group.
+    condition = var.approved_additional_interface_endpoint_services == toset([
+      "cognito-idp",
+      "xray",
+    ])
+    error_message = "approved_additional_interface_endpoint_services must contain exactly cognito-idp and xray, the two approved additions beyond the eight of specification section 0.4.1.9. Adding a third endpoint, removing one or substituting another is a change to fixed topology and to the recurring cost this module is approved for: it must be ratified in docs/adr/ADR-008-security-and-identity.md and gated in .github/workflows/infra-ci.yml, not made here."
   }
 }
 

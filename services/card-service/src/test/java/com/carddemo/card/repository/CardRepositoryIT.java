@@ -178,6 +178,16 @@ class CardRepositoryIT {
     //       integration tests in this build already pin, so one engine serves the whole suite.
     private static final String POSTGRES_IMAGE =
             "postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193";
+    /**
+     * Class-path location of the harness that creates the schema's owning role in the container.
+     *
+     * <p>Assumptions: the role is a NOLOGIN role {@code data-migration/sql/V0__schemas_and_roles.sql} names and no container has, so it has
+     * to exist before Flyway opens a connection and assumes it. A Testcontainers init script runs once
+     * at container start, which is strictly earlier than Flyway's first connection; the alternative
+     * this replaces -- creating the role from {@code spring.flyway.init-sqls} -- carried Flyway's
+     * deprecated {@code initSql} setting and its per-connection removal notice.</p>
+     */
+    private static final String OWNER_ROLE_SCRIPT = "db/testharness/test-harness-owner-role.sql";
 
     /**
      * The container every assertion in this class runs against, started once for the class.
@@ -188,7 +198,8 @@ class CardRepositoryIT {
      * nothing here relied on the self-type that argument refined.</p>
      */
     @Container
-    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(POSTGRES_IMAGE);
+    static final PostgreSQLContainer POSTGRES =
+            new PostgreSQLContainer(POSTGRES_IMAGE).withInitScript(OWNER_ROLE_SCRIPT);
 
     /**
      * The number of rows a page holds in this class, which is one fewer than every paging call asks

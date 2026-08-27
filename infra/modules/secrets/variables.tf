@@ -68,7 +68,10 @@ variable "name_prefix" {
     this stack's secrets sort together and are addressable by one IAM resource
     pattern. Also the value sibling modules use as the leading component of
     their resource names, which is why the accepted charset is narrower than
-    Secrets Manager alone would require.
+    Secrets Manager alone would require. THIS module imposes 2 to 32
+    characters of lower-case letters, digits and single interior hyphens,
+    beginning with a letter; the environment roots forward one prefix to
+    sixteen modules and so enforce the narrower INTERSECTION of all of them.
   EOT
   type        = string
   default     = "carddemo"

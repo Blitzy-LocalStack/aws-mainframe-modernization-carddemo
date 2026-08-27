@@ -25,16 +25,13 @@ here, never modified.
 | `<recovery-snapshot-id>` | DB snapshot identifier | Name you choose for the manual cluster snapshot taken as the pre-destroy recovery point in [Step 2b](#step-2b---preserve-a-decryptable-recovery-point). |
 | `<retained-snapshot-id>` | DB snapshot identifier | Name you choose for the copy of that snapshot encrypted under `<retained-key-arn>`. |
 | `<retained-key-arn>` | KMS key ARN | A customer-managed key **no root in this repository manages**, so nothing in this teardown can schedule it for deletion. It is what makes a retained snapshot restorable after the environment's own key is gone. |
-| `<repository-name>` | ECR repository name | One of the ten repositories. Resolve the set from the environment's `registry` output. |
-
-| `<final-snapshot-id>` | DB snapshot identifier | The Aurora final snapshot a protected teardown produces. Read it from the destroy output or from the cluster's snapshot list; it carries a generated suffix and is never a fixed name. |
-| `<repository-name>` | ECR repository name | One of the eleven repositories -- the ten this repository builds plus the `aws-otel-collector` mirror. Resolve the set from the environment's `registry` output. |
+| `<repository-name>` | ECR repository name | One of the **eleven** repositories -- the ten this repository builds plus the `aws-otel-collector` mirror, whose approval and cost reasoning are in [`docs/adr/ADR-002-compute-platform.md`](../adr/ADR-002-compute-platform.md) §4. Resolve the set from the environment's `registry` output rather than composing a name. |
 | `<log-group-name>` | CloudWatch log group name | A retained log group. Resolve the set from the environment's `observability` output. |
 | `<secret-name>` | Secrets Manager name | An entry left in its recovery window. Resolve names from the `service_credentials` output; never paste a resolved name back into this file. |
 | `<commit-sha>` | immutable image tag | The revision to roll forward or back to. Never `latest`; both roots reject that value outright. |
 | `<image-digest>` | `sha256:` digest | The immutable digest production deploys by, since the ECS service module refuses a mutable tag there. |
-| `<artifact-name>` | ECR artifact name | The key an `image_digests` entry is held under: one of the nine names `infra/envs/prod/variables.tf` L1246-L1261 admits. It is the repository name, **not** the ECS service name -- the modules compose that as `<prefix>-<service>-<environment>` [`infra/modules/ecs-service/main.tf` L80]. |
-| `<digest-map>` | local file path | The retained **complete** `image-digests.json` from the deployment being rolled back *from*. `.github/workflows/deploy.yml` L355 writes it under `deploy-reports/` and L590-L596 uploads that directory as the run's audit artifact, so the map that was deployed is recoverable after the fact; L601-L607 deletes the runner-local copy. |
+| `<artifact-name>` | ECR artifact name | The key an `image_digests` entry is held under: one of the **ten** names the validation at [`infra/envs/prod/variables.tf`](../../infra/envs/prod/variables.tf) L1324-L1339 admits -- the nine artifacts that run as an ECS task plus `aws-otel-collector`, the sidecar mirror. `ui` is not admissible. It is the repository name, **not** the ECS service name -- the modules compose that as `<prefix>-<service>-<environment>` [`infra/modules/ecs-service/main.tf` L90]. |
+| `<digest-map>` | local file path | The retained **complete** `image-digests.json` from the deployment being rolled back *from* -- normally **ten** keys, the nine workloads plus the mirrored collector. `.github/workflows/deploy.yml` L366 writes it under `deploy-reports/`, L497-L503 merges the collector's digest into it, and L745-L752 uploads that directory as the run's audit artifact, so the map that was deployed is recoverable after the fact; L756-L764 deletes the runner-local copy. |
 | `<cluster-name>` | ECS cluster name | Read from the environment's `ecs_cluster` output at the point of use. |
 | `<service-name>` | ECS service name | The service being rolled. Substitute each consumer in turn where a step names several. |
 
@@ -552,36 +549,70 @@ validation rejects it. **A module variable validation is evaluated when the plan
 it is applied**, so an incomplete map means no `prod` destroy plan exists at all -- measured on
 Terraform 1.15.8 against a `plan -destroy` carrying the identical condition.
 
-The map needs **nine** entries, and nine is not a typo for ten. The registry holds ten repositories,
-but only nine of them run as an ECS task: the eight services plus `data-migration`
-[`infra/envs/prod/main.tf` L341-L366]. `ui` is deliberately not an admissible key -- the browser
-bundle is published to the SPA bucket and its image runs no task, so a digest for it would configure
-nothing -- and the root's own validation says so, accepting exactly those nine names
-[`infra/envs/prod/variables.tf` L1234-L1272]. The deployment workflow builds all ten images and
-records digests for the same nine, skipping `ui` for that reason
-[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml).
+**The map must carry nine required entries and may carry a tenth.** Three counts meet here and only
+one of them is nine, so they are stated together:
+
+| Count | Value | Why |
+|:---|:---|:---|
+| Repositories the registry holds | **eleven** | The ten this repository builds plus the `aws-otel-collector` mirror, ratified in [`docs/adr/ADR-002-compute-platform.md`](../adr/ADR-002-compute-platform.md) §4 |
+| Artifacts that run as an ECS task | **nine** | The eight services plus `data-migration` [`infra/envs/prod/main.tf` L424-L448, `local.workloads`]. `ui` runs no task -- the browser bundle is published to the SPA bucket -- so a digest for it would configure nothing, and the root refuses it as a key |
+| Keys the root admits | **ten** | Those nine plus `aws-otel-collector` [`infra/envs/prod/variables.tf` L1324-L1339] |
+
+The nine task artifacts are what production **requires**: each one falls back to a mutable tag
+without a digest, and `ecs-service` rejects that outright in `prod`. The collector's entry is
+**optional** -- its reference may be an immutable private-registry tag, which
+[`infra/modules/ecs-service/variables.tf`](../../infra/modules/ecs-service/variables.tf) accepts for
+that container in any environment -- but recording it is what makes the task definition state which
+collector bytes ran.
+
+Assumptions: the deployment record therefore holds **ten** keys, not nine.
+[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) L338-L366 builds all ten images
+and records digests for the nine, skipping `ui`; L466-L503 then merges the mirror's digest into the
+same `deploy-reports/image-digests.json` on both branches of its "already mirrored?" test, so a
+complete record always carries the collector too.
+
+⚠️ Refactoring Rationale: the gate below asserted `(keys | sort)` **equal** to the nine task
+artifacts, and `<digest-map>` is defined above as the *complete* record that workflow writes -- so
+the gate rejected the very file this step tells an operator to load, and it did so with a message
+about an incomplete map. It now asserts what actually matters in both directions: every one of the
+nine required keys is present, and no key is one the root would discard. An equality test against
+ten was rejected as the fix, because it would fail a record produced before any mirror existed, and
+that record is legitimately nine-keyed.
 
 ```bash
-# WHAT: loads the nine-entry digest map from the deployment record, proves it is complete and
-#       well-formed, and exports it for the prod plan.
+# WHAT: loads the digest map from the deployment record, proves every required workload is present,
+#       every key is one the root admits and every value is a digest, then exports it for the plan.
 # WHY : Assumptions: `image-digests.json` in the deployment record is already keyed exactly as the
 #       variable expects, so it is loaded rather than retyped. The gate is here because a
 #       truncated or hand-edited record fails in a misleading place otherwise -- Terraform would
 #       report a mutable-tag violation naming ONE service, when the real fault is a missing key.
 # WHY : Alternatives Considered: passing the map as `-var 'image_digests={...}'` on each command.
-#       Rejected for a nine-entry map on the same grounds as the twelve exports above: it must be
-#       repeated identically on the plan and on anything re-planned after it, and a JSON object in
-#       a TF_VAR_ value is accepted directly, so nothing is gained by inlining it.
+#       Rejected on the same grounds as the twelve exports above: it must be repeated identically
+#       on the plan and on anything re-planned after it, and a JSON object in a TF_VAR_ value is
+#       accepted directly, so nothing is gained by inlining it.
+# WHY : Trade-offs: the two assertions are asymmetric on purpose. REQUIRED is a subset test, so a
+#       record that also carries `aws-otel-collector` -- which is what deploy.yml writes -- passes,
+#       and so does an older nine-key record from before the mirror existed. ADMISSIBLE is a
+#       superset test against the root's own allow-list, so a stray or misspelled key is refused
+#       HERE with the offending name, rather than by the root with a message about the whole map.
 DIGEST_MAP="$(jq -c . "<deployment-record>/image-digests.json")"
 jq -e '
-  (keys | sort) == ([
-    "account-service", "auth-service", "authorization-service", "batch-service",
-    "card-service", "data-migration", "reference-service", "reporting-service",
-    "transaction-service"
-  ] | sort)
-  and (all(.[]; test("^sha256:[a-f0-9]{64}$")))
+  ["account-service", "auth-service", "authorization-service", "batch-service",
+   "card-service", "data-migration", "reference-service", "reporting-service",
+   "transaction-service"] as $required
+  | ($required + ["aws-otel-collector"]) as $admissible
+  | keys as $present
+  | ($required - $present) as $absent
+  | ($present - $admissible) as $unknown
+  | if ($absent | length) > 0 then
+      "missing required digest: \($absent | join(", "))" | halt_error(1)
+    elif ($unknown | length) > 0 then
+      "key the root does not admit: \($unknown | join(", "))" | halt_error(1)
+    elif (all(.[]; type == "string" and test("^sha256:[a-f0-9]{64}$")) | not) then
+      "every value must be a lowercase sha256:<64 hex> digest" | halt_error(1)
+    else true end
 ' <<<"$DIGEST_MAP" > /dev/null || {
-  printf 'digest map is not the complete nine-entry set of sha256 digests\n' >&2
+  printf 'digest map rejected -- see the message above\n' >&2
   exit 1
 }
 export TF_VAR_image_digests="$DIGEST_MAP"
@@ -655,11 +686,11 @@ independent destroy blockers:
 | Blocker | Where | Effect while `deletion_protection = true` |
 |:---|:---|:---|
 | Aurora cluster deletion protection | `infra/modules/aurora-postgresql/main.tf` L739 | RDS refuses to delete the cluster |
-| SPA origin bucket and its log bucket | `infra/envs/prod/main.tf` L652 | `force_destroy` is false, so a populated bucket refuses deletion |
-| Versioned dataset bucket | `infra/envs/prod/main.tf` L2460 | `force_destroy` is false |
-| Shared access-log bucket | `infra/envs/prod/main.tf` L5071 | `access_log_bucket_force_destroy` is false |
-| ECR repositories | `infra/envs/prod/main.tf` L883 | `force_delete` is false, so repositories holding images refuse deletion |
-| Internal ALB | `infra/envs/prod/main.tf` L4724 | The module receives `enable_deletion_protection`, which leaves `force_destroy` false on its log destination |
+| SPA origin bucket and its log bucket | `infra/envs/prod/main.tf` L752 (`module "cloudfront_spa"`) | `force_destroy` is false, so a populated bucket refuses deletion |
+| Versioned dataset bucket | `infra/envs/prod/main.tf` L2822 (`module "s3_datasets"`) | `force_destroy` is false |
+| Shared access-log bucket | `infra/envs/prod/main.tf` L5712 (`module "observability"`) | `access_log_bucket_force_destroy` is false |
+| ECR repositories | `infra/envs/prod/main.tf` L1099 (`module "ecr"`) | `force_delete` is false, so repositories holding images refuse deletion |
+| Internal ALB | `infra/envs/prod/main.tf` L5346 (`module "alb"`) | The module receives `enable_deletion_protection`, which leaves `force_destroy` false on its log destination |
 
 Clearing protection is therefore a deliberate, separate, two-step gesture: change the flags in one
 reviewed apply, then destroy in a second.
@@ -1726,6 +1757,13 @@ Production rolls back by **immutable digest**, and the digest map has to be **co
 #       because the SPA is published to S3 and CloudFront rather than run as a task -- it has no
 #       task definition to carry a digest. Rolling the SPA back is a re-publish of the earlier
 #       build's objects, not a Terraform input.
+# WHY : Assumptions: `aws-otel-collector` is admissible as a TENTH key but is deliberately omitted
+#       here, which is why this map is nine entries where the one loaded in Step 1a is normally ten.
+#       With the key absent the root composes the sidecar reference as
+#       `<repository-url>:<pinned-upstream-tag>` rather than by digest
+#       [`infra/envs/prod/main.tf` L5088-L5091], and that is a private-registry tag this repository
+#       mirrors and pins in configuration, so it is not the mutable-tag case the module refuses.
+#       Add the key only to roll the COLLECTOR back; a code roll-back does not move it.
 # WHY : Assumptions: the values are the digests deploy.md Step 2 read back from ECR for the
 #       known-good commit. If that release's image-digests.json was kept, use it directly; the
 #       lookup below re-derives the same nine from the registry when it was not.
@@ -1791,8 +1829,8 @@ printf 'cluster=%s\nservices=%s\n' "$cluster" "$services"
 
 aws ecs wait services-stable --region "$AWS_REGION" --cluster "$cluster" --services $services
 
-# WHAT: merges the one replacement digest into the retained COMPLETE nine-artifact map, refuses
-#       anything that is not still nine artifacts, and prints the result for review.
+# WHAT: merges the one replacement digest into the retained COMPLETE map, refuses anything that no
+#       longer covers every workload, and prints the result for review.
 # WHY : Refactoring Rationale: this step passed a one-entry map --
 #       `-var 'image_digests={"<service-name>"="<image-digest>"}'` -- and it could not do what the
 #       text around it advertised. Terraform's `-var` ASSIGNS the variable; there is no merge form
@@ -1801,23 +1839,49 @@ aws ecs wait services-stable --region "$AWS_REGION" --cluster "$cluster" --servi
 #       `infra/modules/ecs-service` refuses in production, so the advertised single-service
 #       roll-back could not reach a plan at all -- let alone a reviewed one.
 # WHY : Assumptions: the retained map is the input, not a value composed by hand.
-#       `.github/workflows/deploy.yml` L339-L359 accumulates every pushed digest, writes the
-#       complete map to `deploy-reports/image-digests.json` and patches the same object into the
-#       root's `deployment.auto.tfvars.json`; L590-L596 uploads that directory as the run's audit
-#       artifact and L601-L607 deletes the runner-local copy, so `<digest-map>` is the audit
-#       artifact of the deployment being rolled back from.
-# WHY : Assumptions: `infra/envs/prod/variables.tf` L1246-L1261 admits exactly nine keys --
-#       `auth-service`, `account-service`, `card-service`, `transaction-service`,
+#       `.github/workflows/deploy.yml` L338-L366 accumulates every pushed digest and writes the map
+#       to `deploy-reports/image-digests.json`; L497-L503 merges the mirrored collector's digest
+#       into that same file and into the root's `deployment.auto.tfvars.json`; L745-L752 uploads the
+#       directory as the run's audit artifact and L756-L764 deletes the runner-local copy. So
+#       `<digest-map>` is the audit artifact of the deployment being rolled back from, and it
+#       normally carries TEN keys -- the nine workloads plus the collector.
+# WHY : Assumptions: `infra/envs/prod/variables.tf` L1324-L1339 admits exactly ten keys -- the nine
+#       workloads `auth-service`, `account-service`, `card-service`, `transaction-service`,
 #       `reference-service`, `batch-service`, `authorization-service`, `reporting-service` and
-#       `data-migration` -- and L1239-L1244 requires every value to match `^sha256:[a-f0-9]{64}$`.
-#       `ui` is absent by design rather than by omission: the browser bundle is published to S3 and
-#       its image runs no ECS task, so a digest for it would configure nothing.
-# WHY : Trade-offs: the nine-key assertion is carried here rather than left to Terraform, because
-#       neither of that variable's validations is a completeness check -- one restricts the keys and
-#       the other the value format, so an eight-entry map satisfies both and still drops one
-#       workload onto a tag that production refuses. Failing on the count names the problem while it
-#       is still a local file rather than a refused plan.
-ROLLBACK_DIGESTS="$(jq -ec --arg artifact '<artifact-name>' --arg digest '<image-digest>' '.[$artifact] = $digest | if (keys | length) == 9 then . else error("image_digests must carry all nine artifacts") end' "<digest-map>")"
+#       `data-migration`, plus `aws-otel-collector` -- and L1317-L1322 requires every value to match
+#       `^sha256:[a-f0-9]{64}$`. `ui` is absent by design rather than by omission: the browser bundle
+#       is published to S3 and its image runs no ECS task, so a digest for it would configure nothing.
+# WHY : Trade-offs: completeness is asserted here rather than left to Terraform, because neither of
+#       that variable's validations is a completeness check -- one restricts the keys and the other
+#       the value format, so an eight-entry map satisfies both and still drops one workload onto a
+#       tag that production refuses. Failing here names the artifact while the map is still a local
+#       file rather than a refused plan.
+# WHY : Refactoring Rationale: this assertion was `(keys | length) == 9`, and its input is the audit
+#       artifact described above -- which carries ten keys whenever the collector was mirrored, so the
+#       merge refused the exact file this step tells the operator to retain. It now requires the nine
+#       workloads and tolerates the collector, which is the property that actually matters: the map
+#       must cover every workload production plans by digest. Widening the equality to ten was
+#       rejected because a record written before any mirror existed is legitimately nine-keyed.
+ROLLBACK_DIGESTS="$(jq -ec --arg artifact '<artifact-name>' --arg digest '<image-digest>' '
+  ["account-service", "auth-service", "authorization-service", "batch-service",
+   "card-service", "data-migration", "reference-service", "reporting-service",
+   "transaction-service"] as $required
+  | (.[$artifact] = $digest)
+  | . as $merged
+  | ($required - ($merged | keys)) as $absent
+  | (($merged | keys) - ($required + ["aws-otel-collector"])) as $unknown
+  | if ($absent | length) > 0 then
+      error("image_digests is missing: \($absent | join(", "))")
+    elif ($unknown | length) > 0 then
+      error("image_digests key the root does not admit: \($unknown | join(", "))")
+    else $merged end' "<digest-map>")" || {
+  # WHY : Assumptions: the guard is not redundant. A command substitution that fails still ASSIGNS
+  #       -- to the empty string -- so without it the next line would print
+  #       "Review the complete map before planning: " with nothing after it, above a jq error an
+  #       operator scrolling for the map may not read.
+  printf 'digest map rejected -- see the message above; do not plan against it\n' >&2
+  exit 1
+}
 printf 'Review the complete map before planning: %s\n' "$ROLLBACK_DIGESTS"
 ```
 

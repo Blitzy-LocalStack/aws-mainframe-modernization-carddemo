@@ -35,9 +35,10 @@
 #     actually exercised.
 #   - Refactoring Rationale: an earlier overlay resolved the same problems by
 #     other means, and three of those means are the reason this one differs.
-#     It defined the schema's owning role and granted it privileges from
-#     `spring.flyway.init-sqls`, duplicating a definition that belongs to exactly
-#     one file and leaving the two free to disagree undetected; it carried a
+#     It defined the schema's owning role and granted it privileges from the
+#     Flyway connection-initialisation key, duplicating a definition that belongs
+#     to exactly one file and leaving the two free to disagree undetected; it
+#     carried a
 #     literal issuer address and a literal signing-key value, so a credential- and
 #     endpoint-shaped literal sat in source control; and it set `ddl-auto` to
 #     `validate`, which emits no DDL and therefore looks equivalent to `none` but
@@ -229,24 +230,13 @@ spring:
     #       definition here would drift from it silently.
     create-schemas: true
 
-    # WHY : Assumptions: the base runs one statement there to assume the schema's
-    #       owning role, so that objects the migration creates are owned by that
-    #       role and its grants apply to them. That role is created only by
-    #       data-migration/sql/V0__schemas_and_roles.sql, which a unit-test
-    #       container never runs, so the statement fails against a fresh instance
-    #       and takes the whole migration with it. Emptying the list is what
-    #       leaves ownership to the connecting user for the lifetime of the
-    #       container. Alternatives Considered: defining the role here so the
-    #       statement succeeds. Rejected on two independent grounds -- it would
-    #       duplicate a definition this repository assigns to exactly one file, so
-    #       the two could disagree without anything detecting it; and a test
-    #       profile that mints its own privilege structure would assert against a
-    #       privilege model it invented rather than the deployed one, which is
-    #       worse than not asserting at all. Trade-offs: object ownership under
-    #       test therefore differs from a deployment. Accepted because no
-    #       assertion in this module concerns ownership or grants, while every
-    #       assertion concerns the table shapes the migration produces.
-    init-sqls: []
+    # WHY : Refactoring Rationale: `init-sqls: []` stood here, emptying the one
+    #       statement the base ran to assume the schema's owning role. The base no
+    #       longer carries that statement under this key -- it maps to Flyway's
+    #       deprecated `initSql` -- so there is nothing left here to empty, and the
+    #       override moves to carddemo.database.flyway.owner-role at the foot of
+    #       this file, which is the key that now drives the assumption. The reason
+    #       for the override is unchanged and is restated there in full.
 
   jpa:
     hibernate:
@@ -362,6 +352,37 @@ logging:
     org.hibernate.orm.jdbc.bind: WARN
 
 carddemo:
+  # WHY : Refactoring Rationale: this override replaces `spring.flyway.init-sqls:
+  #       []` further up this file, and it exists for the same reason that did.
+  #       The base document names carddemo_authorization_owner here; common-lib's
+  #       FlywayOwnerRoleDataSourceCustomizer assumes it on every connection
+  #       Flyway is handed and FlywayOwnerRoleCallback re-asserts it,
+  #       and that role is created ONLY by
+  #       data-migration/sql/V0__schemas_and_roles.sql, which a unit-test
+  #       container never runs -- so the assumption fails against a fresh instance
+  #       and takes the whole migration with it. An empty value leaves both
+  #       components registered but inert, so ownership stays with the connecting
+  #       user for the lifetime of the container.
+  # WHY : Alternatives Considered: creating the role under test so the assumption
+  #       succeeds, which is what the auth, card, reference, transaction and batch
+  #       modules do from a Testcontainers init script. Rejected here on two
+  #       independent grounds, both carried over verbatim in substance from the key
+  #       this replaces -- it would duplicate a definition this repository assigns
+  #       to exactly one file, so the two could disagree without anything
+  #       detecting it; and a test profile that mints its own privilege structure
+  #       would assert against a privilege model it invented rather than the
+  #       deployed one, which is worse than not asserting at all. The distinction
+  #       from those five modules is not taste: each of them has an integration
+  #       test that reads the resulting owner out of pg_catalog, so the role they
+  #       create is a role something checks. This module has none.
+  # WHY : Trade-offs: object ownership under test therefore differs from a
+  #       deployment. Accepted because no assertion in this module concerns
+  #       ownership or grants, while every assertion concerns the table shapes the
+  #       migration produces.
+  database:
+    flyway:
+      owner-role: ""
+
   messaging:
     # WHY : Assumptions: five SECONDS, and the unit is the whole point of
     #       restating it. The reference program sets `MOVE 5000 TO

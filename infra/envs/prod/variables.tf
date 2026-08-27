@@ -1054,7 +1054,7 @@ variable "cloudfront_acm_certificate_arn" {
 #       reachable only at its generated CloudFront domain, which no certificate in
 #       cloudfront_acm_certificate_arn covers, so the pair would be inconsistent.
 variable "cloudfront_aliases" {
-  description = "Non-empty list of bare DNS names the SPA distribution serves, optionally with a leading wildcard label. Every entry must be covered by cloudfront_acm_certificate_arn and is forwarded unchanged to cloudfront-spa; entries are compared case-insensitively so one name cannot appear twice."
+  description = "Non-empty list of bare DNS names the SPA distribution serves, optionally with a leading wildcard label. Every entry must be covered by cloudfront_acm_certificate_arn and is forwarded unchanged to cloudfront-spa; entries are compared case-insensitively so one name cannot appear twice. At least one entry must be an EXACT name: the first exact name is the browser origin this root allows on the HTTP API, which cannot be given a wildcard Origin. Each dot-separated label is limited to 63 characters and each complete entry to 253, the limits DNS itself imposes; a leading wildcard marker is not measured as a label but does count toward the total."
   type        = list(string)
   nullable    = false
 
@@ -1064,6 +1064,55 @@ variable "cloudfront_aliases" {
       can(regex("^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", lower(alias)))
     ]) && length(distinct([for alias in var.cloudfront_aliases : lower(alias)])) == length(var.cloudfront_aliases)
     error_message = "cloudfront_aliases must contain at least one unique bare DNS name, optionally with a leading wildcard label; schemes, ports, paths and duplicate names are not accepted."
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: this rule is the companion to the change recorded
+  #       above `local.spa_origin` in this root's main.tf. A list holding only
+  #       wildcards satisfied every rule here and then produced no origin
+  #       infra/modules/api-gateway-http would accept, so the root declared valid a
+  #       configuration that could not plan -- and whether it planned depended on
+  #       where in the list the wildcard sat. Requiring one exact name states that
+  #       dependency where an operator can act on it, and it is also what makes the
+  #       filtered index in that local total rather than a possible out-of-range read.
+  #       Assumptions: `*.` is the one wildcard form the shape rule above admits, so
+  #       an entry that does not begin with it is an exact name by construction.
+  #       Trade-offs: an operator who genuinely wants only a wildcard alias on the
+  #       distribution has to name one concrete host as well. Accepted: that host is
+  #       the one viewers load the SPA from and the one the browser puts in its Origin
+  #       header, so it is a value the deployment already has rather than a new one.
+  validation {
+    condition     = length([for alias in var.cloudfront_aliases : alias if !startswith(alias, "*.")]) > 0
+    error_message = "cloudfront_aliases must include at least one EXACT name rather than wildcards alone: supply the host viewers actually reach the SPA on -- [\"app.example.com\", \"*.example.com\"] rather than [\"*.example.com\"] by itself. The first exact name becomes the browser origin this root allows on the HTTP API, and an HTTP API cannot be given a wildcard Origin without becoming callable from any page, so infra/modules/api-gateway-http refuses one."
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: the shape rule above constrains the characters and
+  #       separators of each alias and imposes no length at all, so a 64-character label
+  #       and a 254-character complete name both evaluated cleanly here and were left to
+  #       CloudFront to refuse partway through an apply, against the distribution rather
+  #       than against this input. The two rules below are separate blocks so the
+  #       diagnostic names which limit was exceeded, and they are stated here as well as
+  #       in infra/modules/cloudfront-spa so the refusal does not depend on which of the
+  #       two an operator is editing.
+  #       Assumptions: DNS caps a single label at 63 octets and a complete name at 253,
+  #       and a certificate subject is an ordinary DNS name, so these are the consumers'
+  #       limits rather than a policy chosen here.
+  #       Assumptions: a leading `*.` is NOT a DNS label -- it is the wildcard marker
+  #       CloudFront and ACM read -- so it is trimmed before each label is measured;
+  #       without the trim a wildcard alias would be measured against a one-character
+  #       label that no rule needs to see. It is deliberately still counted in the total
+  #       below, because those two characters ARE transmitted as part of the name.
+  validation {
+    condition = alltrue(flatten([
+      for alias in var.cloudfront_aliases : [
+        for label in split(".", trimprefix(alias, "*.")) : length(label) <= 63
+      ]
+    ]))
+    error_message = "Every dot-separated label in every cloudfront_aliases entry must be at most 63 characters, the maximum length DNS allows for a single label. A leading \"*.\" is the wildcard marker rather than a label and is not measured; shorten the offending label."
+  }
+
+  validation {
+    condition     = alltrue([for alias in var.cloudfront_aliases : length(alias) <= 253])
+    error_message = "Every cloudfront_aliases entry must be at most 253 characters in total, the maximum length DNS allows for a complete name. A leading \"*.\" counts toward that total because those characters are part of the name CloudFront serves."
   }
 }
 
@@ -1335,12 +1384,35 @@ variable "alb_certificate_arn" {
 #       handshake error on the private integration rather than as a bad input here.
 #       A wildcard is refused for the same reason -- a server name is one host.
 variable "internal_service_domain_name" {
-  description = "Bare DNS name covered by alb_certificate_arn, with no scheme, port, path or wildcard. Forwarded to the alb module as its certificate identity and to api-gateway-http as the TLS server name the private integration verifies, which is why it must be a host and not a URL."
+  description = "Bare DNS name covered by alb_certificate_arn, with no scheme, port, path or wildcard. Forwarded to the alb module as its certificate identity and to api-gateway-http as the TLS server name the private integration verifies, which is why it must be a host and not a URL. Each dot-separated label is limited to 63 characters and the complete name to 253, the limits DNS itself imposes."
   type        = string
   nullable    = false
 
   validation {
     condition     = can(regex("^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$", var.internal_service_domain_name))
     error_message = "internal_service_domain_name must be a bare DNS hostname covered by the ALB certificate, with no scheme, port, wildcard or path."
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: the rule above constrains the CHARACTERS and the
+  #       separators of this name and says nothing about its length, so a 64-character
+  #       label and a 254-character complete name both evaluated cleanly here and were
+  #       deferred to a provider or apply rejection -- ACM, the load balancer and API
+  #       Gateway each report an over-long name as an API error against whichever
+  #       resource happened to be reached first, which names neither this input nor the
+  #       limit it broke. The two rules below are split rather than combined precisely
+  #       so the diagnostic names WHICH limit was exceeded: one over-long label is a
+  #       different edit from a name that is too long overall.
+  #       Assumptions: DNS caps a single label at 63 octets and a complete name at 253,
+  #       and this value is used as a TLS server name and as a certificate subject, both
+  #       of which are ordinary DNS names -- so these are the limits every consumer of
+  #       the value applies, not a policy chosen here.
+  validation {
+    condition     = alltrue([for label in split(".", var.internal_service_domain_name) : length(label) <= 63])
+    error_message = "Every dot-separated label in internal_service_domain_name must be at most 63 characters, the maximum length DNS allows for a single label. Shorten the offending label; the complete name may still be up to 253 characters."
+  }
+
+  validation {
+    condition     = length(var.internal_service_domain_name) <= 253
+    error_message = "internal_service_domain_name must be at most 253 characters in total, the maximum length DNS allows for a complete name. A name may hold several labels of up to 63 characters each, but their total with the separating dots is bounded by 253."
   }
 }

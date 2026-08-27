@@ -502,7 +502,7 @@ services, repositories and adapters as non-`package-info.java` main-source Java:
 
 | Maven module | main-source classes | owned Flyway migrations |
 |---|---:|---|
-| `common-lib` | 48 | none — it owns no schema |
+| `common-lib` | 53 | none — it owns no schema |
 | `auth-service` | 30 | `V1__auth.sql`, `V2__auth_identity_sync.sql`, `V3__auth_identity_sync_operations.sql`, `V4__auth_folded_user_id.sql`, `V5__auth_folded_user_id_trim.sql`, `V6__auth_canonical_user_id.sql`, `V7__auth_identity_sync_provisioning_guard.sql`, `V8__auth_addressable_user_id.sql` |
 | `account-service` | 45 | `V1__account.sql`, `V2__account_inquiry_reply_ledger.sql`, `V3__batch_account_write_grant.sql` |
 | `card-service` | 25 | `V1__card.sql`, `V2__card_num_digit_domain.sql` |
@@ -596,6 +596,47 @@ documentation rather than delivery. `ServiceCatalogInventoryTest` in `common-lib
 asserts every count in this table against the module it names, so a figure here that
 drifts from the tree fails the build — which is what a countable claim in a document
 has to be to be worth stating.
+
+Refactoring Rationale: `common-lib` reads 53 where it read 51. Two classes were added,
+`com.carddemo.common.config.FlywayOwnerRoleDataSourceCustomizer` and
+`com.carddemo.common.config.MigrationOwnerRole`. The customizer puts the schema's owning role in
+force on the JDBC connection before Flyway wraps it, which is the only position from which the
+ownership survives: Flyway records the session's role when it wraps a connection and restores that
+recorded role around every schema-history write, so the callback below — which assumes the role one
+step later — had it undone before `flyway_schema_history` was created, and the account context failed
+with `permission denied for schema account`. The deprecated setting both replace did not have the
+problem because of where it ran, on the raw connection ahead of the wrapper, and the customizer is
+Spring Boot's supported way back to that position. `MigrationOwnerRole` is the configured role name
+validated once and quoted once, because an identifier allow-list standing between configuration and a
+privileged statement is the last thing that should exist in two copies.
+
+Refactoring Rationale: `common-lib` reads 51 where it read 50. The class added is
+`com.carddemo.common.config.FlywayOwnerRoleCallback`, which assumes the schema's owning role on
+every connection Flyway opens so that the objects a migration creates are owned by the role that
+owns the schema rather than by the identity that ran the migration. It replaces
+`spring.flyway.init-sqls`, whose Flyway 13 mapping is the deprecated `initSql` setting and which
+emitted a deprecation notice on every connection the seven migrating services opened. It is in the
+shared kernel rather than in each of those seven because the arrangement is identical in all of them
+and the statement it issues is privileged: the role name arrives from configuration, so it is
+validated against an identifier allow-list and quoted before it reaches `SET ROLE`, and that
+validation existing once is the difference between one place to get right and seven.
+
+Refactoring Rationale: `common-lib` reads 50 where it read 48. Two classes were added,
+`com.carddemo.common.config.RequiredEnvironmentVariablePostProcessor` and the refusal it raises,
+`com.carddemo.common.config.MissingEnvironmentVariablesException`, and they exist because every
+service states its deployment inputs as bare environment placeholders while Spring Boot's binder
+resolves an unresolvable placeholder to its own literal text rather than failing. A deployment
+missing one variable therefore started, reached the driver-class lookup and died with `'url' must
+start with "jdbc"` — a message naming neither the variable nor the property that reads it. The
+post-processor reads the environment once configuration data is loaded, finds every property whose
+winning value still refers to an environment variable nothing supplies, and refuses the start naming
+each one beside the property it feeds. Both are in the shared kernel rather than in a bounded context
+because the defect is shared: eight configurations declare between six and sixteen such inputs each,
+and a per-service check would be eight lists to keep in step with eight files. Alternatives
+Considered: declaring the keys per service through `@ConfigurationProperties` validation or
+`ConfigurableEnvironment.setRequiredProperties`, rejected because both test whether a PROPERTY is
+present and the property IS present — it holds the unresolved placeholder text, so neither mechanism
+can see the defect at all.
 
 Refactoring Rationale: `common-lib` reads 48 where it read 46. Two classes were added,
 `com.carddemo.common.web.RejectedRequestErrorReportValve` and its companion
@@ -1088,6 +1129,23 @@ envelope, the correlation filter, the timestamp formatter and the date-edit
 validator. The distinction matters when counting: a build produces nine modules
 and the target topology contains eight services; no environment currently deploys
 that topology.
+
+**Three different counts, and they are not interchangeable.** A reader auditing this
+tree against the plan meets all three, so they are reconciled here once: **nine Maven
+modules** are built (the eight services plus `common-lib`); **ten container images**
+are built and pushed (the eight services, the browser SPA and the ETL — `common-lib`
+has no Dockerfile because it is compiled into each service, and this is the count AAP
+§0.4.1.6 fixes); and **eleven ECR repositories** are provisioned, because
+[`../../infra/modules/ecr`](../../infra/modules/ecr) also holds one mirror of a pinned
+third-party telemetry collector image this repository does not build. Assumptions: the
+mirror is required rather than convenient — the collector runs as an essential sidecar
+on every task, the application tier has no public egress, and Amazon ECR Public is
+served by no interface endpoint, so a task pulling it publicly could not start. **Ten
+deployables plus one approved mirror = eleven**, and the approval, the alternatives
+refused and the recurring cost are in
+[`../adr/ADR-002-compute-platform.md`](../adr/ADR-002-compute-platform.md) §"4. One
+third-party image is mirrored into the private registry, and the registry therefore
+holds eleven repositories".
 
 > Alternatives Considered: a shared kernel versus duplicating the codecs.
 > The alternative was to let each service carry its own copy of the money type and

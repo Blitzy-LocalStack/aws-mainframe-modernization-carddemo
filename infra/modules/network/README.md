@@ -77,10 +77,12 @@ traffic can take that route at all. Every service a task actually calls —
 including the identity provider, whose endpoint is the reason the public rule
 below could be withdrawn — is reached through an interface endpoint or the S3
 gateway route without leaving the VPC. A default route grants nothing on its own;
-see entries 4 and 5. The `xray` endpoint is the one member of the set nothing calls
-today, and the trade-off under
-[Private AWS service paths](#private-aws-service-paths) says so rather than
-counting it among the reached services.
+see entries 4 and 5. Every member of the endpoint set has a named caller in this
+deployment, including `xray`: the collector sidecar `infra/modules/ecs-service`
+attaches to every task exports its spans over it. Refactoring Rationale: this
+paragraph used to name `xray` as the one member nothing calls, on the premise that
+the sidecar had been withdrawn; the sidecar is present and `essential = true`, so
+the premise has lapsed and is corrected here rather than carried forward.
 
 An `identity_provider_egress_cidrs` input and an `app_to_identity_provider` rule
 used to carry TLS 443 to any public destination from this tier, on the premise
@@ -90,12 +92,18 @@ joined the endpoint set, and both are now withdrawn — the reasoning is recorde
 
 ## Private AWS service paths
 
-Ten interface endpoints are created, one per entry in
-`interface_endpoint_services`, each placing an ENI in the private application
-subnets so that a task reaches the service without its traffic leaving the VPC.
-Eight of the ten are the set AAP §0.4.1.9 enumerates; `xray` and `cognito-idp` are
-the two beyond it, and each is justified below by a function this deployment
-performs rather than by intent.
+Ten interface endpoints are created, one per entry in the union of
+`interface_endpoint_services` and
+`approved_additional_interface_endpoint_services`, each placing an ENI in the
+private application subnets so that a task reaches the service without its
+traffic leaving the VPC. The split is what makes the count checkable: the first
+input is the exact eight AAP §0.4.1.9 enumerates, the second is the exact two
+approved beyond them, and `main.tf` unions the pair once in `locals` so every
+endpoint gets identical treatment. Refactoring Rationale: one input carried all
+ten names, so the specification's eight were asserted nowhere and an eleventh
+endpoint would have read as one more entry in a list that already differed from
+the specification. `infra/modules/ecr` separates its ten deployable images from
+its one third-party mirror for the same reason.
 
 The column that matters is the second one: it records which part of the migrated
 stack would stop working if the endpoint were removed.
@@ -114,44 +122,89 @@ stack would stop working if the endpoint were removed.
 | `cognito-idp` | Resolves the issuer and JWKS documents each service's JWT decoder fetches when its context refreshes. Private DNS makes the provider's public API hostname resolve to this endpoint's ENI, which is what allowed the public-egress rule that used to carry the same traffic to be withdrawn rather than merely narrowed |
 | S3 gateway endpoint | Carries dataset, statement and report object traffic. It is a route-table entry pointing at a service prefix list rather than an ENI, so it places no interface, carries no security group and incurs no hourly endpoint charge |
 
-Two of those ten are documented additions beyond the eight AAP section 0.4.1.9
-names, and they are named here rather than folded silently into the count.
-Section 0.4.1.9 lists the ECR API and Docker registry, CloudWatch Logs, Secrets
-Manager, KMS, SQS, Step Functions and SSM — eight. `xray` and `cognito-idp` are
-the ninth and tenth.
+### Approved additions beyond the specification's eight
 
-Assumptions: `cognito-idp` is load-bearing and is the reason the addition was
-made rather than the specified eight retained. Reaching the identity provider
-over the public path was the earlier arrangement, and it was withdrawn together
-with the `0.0.0.0/0` egress rule that carried it; when the endpoint was first
-introduced the shared account-scoped endpoint policy denied unauthenticated OIDC
-discovery, key-set and sign-on operations, which broke sign-on outright, so
-`main.tf` now attaches a per-endpoint policy admitting exactly those five
-operations by name. `.github/workflows/infra-ci.yml` asserts that `cognito-idp`
-appears in both halves of the variable, so it cannot be dropped from the default
-or from the validation without failing the build.
+Two of those ten are **approved additions** beyond the eight AAP §0.4.1.9 names,
+and they are recorded here rather than folded silently into the count. Section
+0.4.1.9 lists the ECR API and Docker registry, CloudWatch Logs, Secrets Manager,
+KMS, SQS, Step Functions and SSM — eight. `cognito-idp` and `xray` are the ninth
+and tenth, they are declared by their own input
+`approved_additional_interface_endpoint_services`, and the approval is ratified in
+[`docs/adr/ADR-008-security-and-identity.md`](../../../docs/adr/ADR-008-security-and-identity.md).
 
-Trade-offs: `xray` is provisioned and **has no consumer**, and that is registered
-as an open gap rather than presented as a working trace path.
-`services/common-lib/pom.xml` pulls `spring-boot-starter-opentelemetry`, so spans
-*are* created and their trace and span identifiers reach the logs alongside the
-correlation identifier `CorrelationIdFilter` sets — but no OTLP exporter target is
-configured anywhere in the tree, and the collector sidecar that once carried the
-export has been withdrawn from `infra/modules/ecs-service`, which records that
-argument and names span **export** as the thing lost. So no span reaches a managed
-tracing backend, and no statement in this document should be read as claiming one
-does. This leaves the tracing half of AAP section 0.9.3's cross-cutting
-observability expectation **unresolved**: reinstating export has to argue for its
-own exporter configuration on top of the endpoint that is already here. The
-endpoint is kept because withdrawing it would make reinstatement a topology change
-as well as a configuration one, and because its cost is three of the thirty
-endpoint-zone-hours this tier bills — one endpoint in each of the three zones.
-Note that `main.tf` still describes this entry as carrying "the trace export
-section 0.9.3 requires"; that description is the one this document declines to
-repeat, because nothing exports.
+**Both additions are load-bearing, not speculative.** `cognito-idp` carries the
+issuer document and JSON web key set every service's JWT decoder fetches at
+start-up and on refresh, and the user-pool operations `auth-service` performs
+behind sign-on, the new-password challenge, refresh, revoke and sign-out. `xray`
+carries the trace export of the AWS Distro for OpenTelemetry collector sidecar
+`infra/modules/ecs-service` attaches to every task with `essential = true`: its
+traces pipeline exports through the `awsxray` exporter and each application
+container is pointed at its loopback OTLP receiver, so spans are created,
+collected and exported over this endpoint.
 
-Assumptions: the endpoint set is identical in both environments and is validated
-against exactly this list rather than treated as an environment lever. Removing
+**The refused alternative is the reason the deviation stands.** Holding the
+specification's eight literally would mean reaching the identity provider and the
+tracing backend over a public path — and this tier has no public path. `main.tf`
+instantiates exactly four application-tier egress rules: to the load balancer on
+443, to Aurora on the database port, to the endpoint ENIs on 443, and to the S3
+gateway prefix list on 443. An earlier revision did carry an
+`identity_provider_egress_cidrs` input defaulting to `0.0.0.0/0`; it was withdrawn
+as a security finding, and `.github/workflows/infra-ci.yml` now fails any egress
+rule naming an open destination. So restoring eight endpoints plus internet egress
+would reintroduce that finding in a workload holding cardholder data, and it would
+contradict the same §0.4.1.9 whose security-group contract permits only
+load-balancer-to-application, application-to-Aurora and application-to-endpoint.
+Of the two readings of one section, the deviation taken is the one that keeps the
+security property: widening an endpoint **enumeration** leaves the contract
+intact, restoring public egress breaks it. Dropping the two dependencies instead
+was also refused — without `cognito-idp` no user can sign on, which fails the AAP
+§0.9.1 acceptance criterion directly, and without `xray` every span is discarded
+at the security group, which leaves the tracing AAP §§0.2.1.4 and 0.9.3 require
+with no destination.
+
+**The recurring cost of the approval, stated rather than implied.** An interface
+endpoint is billed per endpoint per availability zone per hour plus per GB
+processed, and this network spans three zones. The specification's eight cost
+8 × 3 = **24 endpoint-zone-hours** per hour; the two additions cost
+2 × 3 = **6 endpoint-zone-hours** per hour, for **30** in total. At the
+`us-east-1` list rate of USD 0.01 per endpoint-zone-hour recorded in ADR-008 the
+additions are **USD 0.06 per hour, about USD 44 per month** per environment. That
+is accepted as the price of removing an open egress path rather than as an
+incidental addition. The data-processing term is largely displaced rather than
+added, because the same traffic otherwise crosses the NAT gateways and accrues
+their per-GB charge.
+
+Assumptions: `cognito-idp` needs a **per-endpoint policy**, and the reason is not
+obvious. `main.tf` attaches one account-scoped endpoint policy to the other nine
+endpoints, admitting only principals in this account — but the identity calls that
+matter here are unauthenticated by construction: OIDC discovery, the key set, and
+the sign-on, challenge-response, refresh, revoke and sign-out operations a
+user-pool client performs before holding any IAM credential. Those requests carry
+no principal for that condition to satisfy, so the shared policy denied them and
+every sign-on failed at the endpoint. `main.tf` therefore adds a statement on this
+one endpoint admitting exactly those five operations by name with no principal
+condition.
+
+Refactoring Rationale: an earlier revision of this section recorded `xray` as
+provisioned with **no consumer**, on the premise that no OTLP exporter target was
+configured and that the collector sidecar had been withdrawn from
+`infra/modules/ecs-service`. Both halves have lapsed — the sidecar is composed and
+essential, and the task definition sets `OTEL_TRACES_EXPORTER=otlp` against its
+loopback receiver — so the claim is corrected rather than carried forward. A
+paid-for endpoint documented as unexercised is exactly the entry a later reviewer
+removes, and removing it would disable trace export for every workload while every
+gate stayed green.
+
+Both counts are gated. `.github/workflows/infra-ci.yml` asserts that
+`interface_endpoint_services` is exactly the eight and that
+`approved_additional_interface_endpoint_services` is exactly `cognito-idp` and
+`xray`, in both the `default` and the exact-set `validation` of each, that the two
+sets stay disjoint, and that `main.tf` iterates their union — so an unreviewed
+eleventh endpoint fails the build whichever input it is added to.
+
+Assumptions: the endpoint set is identical in both environments and each half is
+validated against exactly its own list rather than treated as an environment
+lever. Removing
 an entry does not degrade gracefully. Because the application group's egress is
 enumerated rather than allow-all, that service's traffic is dropped at the group
 instead of quietly falling back through NAT — which is the better failure, but
@@ -177,8 +230,10 @@ from that single fact rather than from oversight.
   is also what makes the standalone `validate` in the commands below meaningful.
 
 The call below is what both environment roots actually pass, reproduced rather
-than idealised. Seven inputs are supplied and the remaining six take their
-defaults; no value here is account-specific, and the encryption key arrives as a
+than idealised. Seven inputs are supplied and the remaining seven take their
+defaults — including both halves of the endpoint set, which is why an endpoint
+change is a module change rather than a per-environment one; no value here is
+account-specific, and the encryption key arrives as a
 reference to the sibling `kms` module's output rather than as a literal.
 
 ```hcl
@@ -785,11 +840,12 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | <a name="input_permissions_boundary_arn"></a> [permissions\_boundary\_arn](#input\_permissions\_boundary\_arn) | Same-account customer-managed IAM policy ARN used as the permissions boundary on the VPC flow-log delivery role this module creates. Required so no capability this module composes can exceed the account's deployment boundary. Supplied by the caller; never created here. | `string` | n/a | yes |
 | <a name="input_allow_service_managed_flow_log_encryption"></a> [allow\_service\_managed\_flow\_log\_encryption](#input\_allow\_service\_managed\_flow\_log\_encryption) | Whether this module may create the VPC flow-log group on CloudWatch Logs service-default encryption instead of a customer-managed key. False, the default, makes flow\_log\_kms\_key\_arn required. True is reserved for planning this module in isolation without the kms module and is not a supported setting for the dev or prod roots. | `bool` | `false` | no |
 | <a name="input_app_container_port"></a> [app\_container\_port](#input\_app\_container\_port) | TCP port admitted from the load-balancer security group to the application security group and republished for the calling root to pass into every ecs-service container and target group. The default 8080 matches the Spring Boot listeners; using the output rather than repeating the number keeps the rule and the listener aligned. | `number` | `8080` | no |
+| <a name="input_approved_additional_interface_endpoint_services"></a> [approved\_additional\_interface\_endpoint\_services](#input\_approved\_additional\_interface\_endpoint\_services) | Exact set of the TWO interface-endpoint services approved BEYOND the eight of specification section 0.4.1.9: cognito-idp, which carries the issuer, key-set and user-pool calls every service makes at start-up and on every sign-on, and xray, which carries the trace export of the collector sidecar infra/modules/ecs-service attaches to every task. Both are functionally required because the application tier has no public egress at all, so a dependency with no endpoint here is dropped at the security group rather than routed out. main.tf creates endpoints over the union of this set and var.interface\_endpoint\_services, so each addition costs three endpoint-zone-hours -- one per availability zone -- and the two together add six to the specification's twenty-four. The approval, the refused alternative of eight endpoints plus internet egress, and the cost arithmetic are recorded in docs/adr/ADR-008-security-and-identity.md. | `set(string)` | <pre>[<br/>  "cognito-idp",<br/>  "xray"<br/>]</pre> | no |
 | <a name="input_az_count"></a> [az\_count](#input\_az\_count) | Number of availability zones the network spans, and therefore the number of subnets created in each of the three tiers and the number of NAT gateways. The only supported value is 3, the topology shared by dev and prod. | `number` | `3` | no |
 | <a name="input_database_port"></a> [database\_port](#input\_database\_port) | TCP port admitted from the application security group to the isolated-data security group and republished for the calling root to pass into aurora-postgresql. The default 5432 matches PostgreSQL; the accepted range is the range Aurora PostgreSQL supports. | `number` | `5432` | no |
 | <a name="input_flow_log_kms_key_arn"></a> [flow\_log\_kms\_key\_arn](#input\_flow\_log\_kms\_key\_arn) | ARN of a customer-managed KMS key with which to encrypt the CloudWatch Logs group receiving this VPC's flow logs. Required unless allow\_service\_managed\_flow\_log\_encryption is explicitly set true, which is the opt-out reserved for planning this module in isolation without the kms module. Both environment roots pass the key the kms module produces. | `string` | `null` | no |
 | <a name="input_flow_log_retention_days"></a> [flow\_log\_retention\_days](#input\_flow\_log\_retention\_days) | Days the CloudWatch Logs group receiving this VPC's flow logs retains events before they age off, or 0 to retain them indefinitely. This is the one value in this module the dev and prod roots are expected to set differently, and it is the direct analogue of how long a mainframe job log was kept before it aged off the spool. | `number` | `30` | no |
-| <a name="input_interface_endpoint_services"></a> [interface\_endpoint\_services](#input\_interface\_endpoint\_services) | Exact set of short AWS service names given private interface endpoints in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls, ssm for configuration, xray for trace export and cognito-idp for identity-provider discovery, key-set and user-pool calls. main.tf expands each short name into its Region-qualified service name; S3 is excluded because it uses the separate gateway endpoint. | `set(string)` | <pre>[<br/>  "ecr.api",<br/>  "ecr.dkr",<br/>  "logs",<br/>  "secretsmanager",<br/>  "kms",<br/>  "sqs",<br/>  "states",<br/>  "ssm",<br/>  "xray",<br/>  "cognito-idp"<br/>]</pre> | no |
+| <a name="input_interface_endpoint_services"></a> [interface\_endpoint\_services](#input\_interface\_endpoint\_services) | Exact set of the EIGHT short AWS service names specification section 0.4.1.9 enumerates, each given a private interface endpoint in every environment: ecr.api and ecr.dkr for image pulls, logs for delivery, secretsmanager for credentials, kms for envelope operations, sqs for messaging, states for workflow calls and ssm for configuration. main.tf expands each short name into its Region-qualified service name and creates one endpoint per entry in the UNION of this set and var.approved\_additional\_interface\_endpoint\_services; S3 is excluded from both because it uses the separate gateway endpoint. | `set(string)` | <pre>[<br/>  "ecr.api",<br/>  "ecr.dkr",<br/>  "logs",<br/>  "secretsmanager",<br/>  "kms",<br/>  "sqs",<br/>  "states",<br/>  "ssm"<br/>]</pre> | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Leading component of the Name tag on every resource this module creates, ahead of the tier and the environment, giving the whole network one greppable identity shared with the rest of the stack. Lowercase letters, digits and hyphens only, no leading or trailing hyphen, at most 32 characters. | `string` | `"carddemo"` | no |
 | <a name="input_subnet_newbits"></a> [subnet\_newbits](#input\_subnet\_newbits) | Number of bits cidrsubnet adds to the vpc\_cidr prefix when carving each subnet, which fixes every subnet's size: at the default /16 and 4 additional bits each subnet is a /20. It must admit at least `3 * az_count` distinct subnets, because the three tiers are taken from consecutive netnum ranges of the one block rather than from separate per-tier address lists. | `number` | `4` | no |
 | <a name="input_tags"></a> [tags](#input\_tags) | Additional tags merged onto every taggable resource this module creates, on top of the provider-level default\_tags the calling root sets and underneath the per-resource Name tag this module composes. Network-specific tags belong here; tags common to the whole stack belong on the root's provider block, so that every module receives them without being passed them. | `map(string)` | `{}` | no |
@@ -806,7 +862,7 @@ hand — regenerate it with the command in [Validation](#validation) instead.
 | <a name="output_data_security_group_id"></a> [data\_security\_group\_id](#output\_data\_security\_group\_id) | Identifier (string) of the isolated-data security group, attached by aurora-postgresql to its cluster. It grants exactly one flow: ingress from the application-tier group on database\_port. It admits no CIDR range, so a host that is not a member of the application group cannot open a database session even from inside the VPC. |
 | <a name="output_database_port"></a> [database\_port](#output\_database\_port) | TCP port (number) this module admits from the application group to the isolated-data group. Both environment roots pass it to aurora-postgresql as its cluster port, so the rule and the engine cannot drift apart. |
 | <a name="output_flow_log_group_name"></a> [flow\_log\_group\_name](#output\_flow\_log\_group\_name) | Exact name (string) of the CloudWatch log group receiving this VPC's flow records. Both environment roots pass it to observability as its required vpc\_flow\_log\_group\_name input, which points that module's Logs Insights widgets at the group this module created rather than at a name reassembled from a prefix and an environment. |
-| <a name="output_interface_vpc_endpoint_ids"></a> [interface\_vpc\_endpoint\_ids](#output\_interface\_vpc\_endpoint\_ids) | Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface\_endpoint\_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states, ssm, xray and cognito-idp - ten keys, the same ten that variable's exact-set validation admits. No consumer reads it today - neither a sibling module nor either environment root - and it is published because attaching a metric, an alarm or a narrower endpoint policy to one specific endpoint needs that endpoint's identity, which rediscovering by service name from a data source would duplicate. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC. |
+| <a name="output_interface_vpc_endpoint_ids"></a> [interface\_vpc\_endpoint\_ids](#output\_interface\_vpc\_endpoint\_ids) | Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as the two endpoint inputs are written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm from var.interface\_endpoint\_services, plus cognito-idp and xray from var.approved\_additional\_interface\_endpoint\_services - ten keys, the eight of specification section 0.4.1.9 and the two approved additions, each input's exact-set validation admitting exactly its own half. No consumer reads it today - neither a sibling module nor either environment root - and it is published because attaching a metric, an alarm or a narrower endpoint policy to one specific endpoint needs that endpoint's identity, which rediscovering by service name from a data source would duplicate. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC. |
 | <a name="output_isolated_data_subnet_ids"></a> [isolated\_data\_subnet\_ids](#output\_isolated\_data\_subnet\_ids) | Ordered list of the isolated data subnet identifiers, one per availability zone, forming the DB subnet group read by aurora-postgresql. These subnets have no route to the internet at all - their route tables carry no default route, no NAT and no gateway - which is what makes them the correct home for the database and the wrong home for anything needing egress. |
 | <a name="output_nat_gateway_ids"></a> [nat\_gateway\_ids](#output\_nat\_gateway\_ids) | Map from availability-zone name to the NAT gateway serving that zone's private application subnet. No consumer reads it today - neither a sibling module nor either environment root; observability takes only the flow-log group name from this module. It is published because an alarm on a per-gateway metric - a failed-connection count, for instance - needs the gateway identity, and the zone key is what lets such an alarm name the zone it describes instead of an opaque identifier. |
 | <a name="output_nat_gateway_public_ips"></a> [nat\_gateway\_public\_ips](#output\_nat\_gateway\_public\_ips) | Map from availability-zone name to the Elastic IP address attached to that zone's NAT gateway. No consumer reads it today - neither a sibling module nor either environment root - and it is published so an operator or downstream system that has to allow-list CardDemo's egress can be handed the set. All az\_count entries are present, because egress can leave from any zone. |

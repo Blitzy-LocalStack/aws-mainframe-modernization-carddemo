@@ -314,10 +314,34 @@ jobs:
 
       # Assumptions: Vitest's run mode exits after one pass; watch mode would
       # wait for input indefinitely on a non-interactive runner.
+      # WHY : Refactoring Rationale: the check-ignore line is a REGRESSION assertion,
+      #       added because this step's report directory was untracked and unignored.
+      #       `.gitignore` named the equivalent directory for the services, infra and
+      #       secret-scan workflows and silently omitted this one, so a developer who
+      #       reproduced the command below locally was left with a stageable
+      #       `ui-reports/` holding machine-specific JUnit timings that an accidental
+      #       `git add .` would commit. Asserting the rule from the workflow that
+      #       creates the directory is what makes the ignore rule non-removable: a
+      #       future edit dropping it fails this run instead of restoring that state
+      #       unnoticed.
+      #       Assumptions: the assertion runs AFTER the mkdir and not before it,
+      #       because the rule is written anchored and directory-only -- `/ui-reports/`
+      #       -- so git can only resolve the name to that rule once the directory
+      #       exists; queried against a non-existent path the same command exits 1 and
+      #       would report a missing rule that is in fact present.
+      #       Assumptions: `-C ..` resolves the path at the repository root while this
+      #       step keeps the job's `ui` working directory, so the argument is spelled
+      #       exactly as an operator would spell it from the root -- the same name the
+      #       ignore rule and the upload step below both use.
+      #       Trade-offs: `-q` prints nothing on success, so the passing case leaves no
+      #       line in the log; the failing case is what needs to be legible, and the
+      #       step name plus the non-zero exit carries it.
       - name: Run component tests once and emit JUnit XML
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p ../ui-reports
+          git -C .. check-ignore -q ui-reports
           npm test -- --reporter=junit --outputFile=../ui-reports/vitest.xml
 
       # GATING at the `high` threshold -- a non-zero exit reddens the run, and no

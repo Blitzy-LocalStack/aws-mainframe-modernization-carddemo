@@ -419,8 +419,9 @@ final class DevProfileContractTest {
    *
    * <p>Refactoring Rationale: this is the batch analogue of the transport-security case the seven request
    * -serving contexts carry, and it asserts a different mechanism because this module protects that listener
-   * differently. It declares no {@code server.ssl} at all: its only client is the image HEALTHCHECK reaching
-   * {@code 127.0.0.1:8080/actuator/health} from inside the task's own network namespace, so the bind address
+   * differently. It declares no {@code server.ssl} at all: every client of that listener sits inside the
+   * task's own network namespace and reaches {@code 127.0.0.1:8080/actuator/health} from there -- the image
+   * declares no HEALTHCHECK, so the client is an operator or a task-definition command -- so the bind address
    * -- not a certificate -- is what keeps the endpoint unreachable from anywhere else. The reasoning is
    * recorded in full beside the key in {@code application.yml}.
    *

@@ -1256,6 +1256,33 @@ jobs:
               return text[opener.start():index]
 
 
+          def quoted_names(block_text, opener, label):
+              """Return the quoted names of one bracketed list inside a Terraform block.
+
+              Parameters:
+                  block_text (str): Source of one Terraform block, as block() returns it.
+                  opener (str): Literal text immediately preceding the list's "[", such
+                      as "default = [" or "toset([".
+                  label (str): Path and block name, used in the failure message so a
+                      failure names the declaration rather than the expression.
+              Returns:
+                  list[str]: The quoted names, in the order the list writes them.
+              Raises:
+                  AssertionError: If the block opens no such list, which means the
+                      declaration no longer states the set -- an equality check against
+                      an empty result would otherwise pass by measuring nothing.
+              """
+              assert opener in block_text, f"{label}: no list opened by {opener!r}"
+              # Assumptions: the slice ends at the FIRST "]" after the opener, which is
+              #     this list's own terminator for both shapes used here -- a bare
+              #     `default = [...]` and a `toset([...])`, neither of which nests a
+              #     further list. Scanning to the last "]" in the block would silently
+              #     span two lists and certify their concatenation.
+              start = block_text.index(opener) + len(opener)
+              body = block_text[start:block_text.index("]", start)]
+              return re.findall(r'"([a-z0-9.-]+)"', body)
+
+
           def spelled(path, pattern):
               """Read one spelled number out of a file's header comment.
 
@@ -1652,32 +1679,101 @@ jobs:
           #       by the two assertions below, which enforce the PRIVATE path the module now
           #       provisions: the identity provider is in the endpoint set, and no egress
           #       rule anywhere in the module names an unrestricted destination.
-          # WHY : Assumptions: the endpoint membership is read out of the variable's default
+          # WHY : Assumptions: the endpoint membership is read out of each variable's default
           #       list rather than out of prose about it, and the CIDR check scans the whole
           #       module body rather than a named resource, because the property being
           #       asserted is about the SET of rules -- a new rule with an open destination
           #       must fail this gate whatever it is called.
-          endpoint_block = re.search(
-              r'(?ms)^variable "interface_endpoint_services" \{.*?^\}',
-              Path(net_vars).read_text(),
-          )
-          assert endpoint_block, (
-              "infra/modules/network/variables.tf: the interface_endpoint_services variable "
-              "is absent or no longer a top-level block, so its membership cannot be checked."
-          )
-          # WHY : Assumptions: the name is required TWICE inside that block, and the pair is
-          #       the point rather than a quirk of the search. The block states the set once as
+          # WHY : Refactoring Rationale: this asserted only that cognito-idp appeared twice
+          #       inside ONE input that carried all ten endpoint names, so the eight AAP
+          #       sections 0.4.1.6 and 0.4.1.9 fix were asserted nowhere and an eleventh
+          #       endpoint was an ordinary-looking edit to a list that already differed from
+          #       the specification. The module now declares the eight and the two approved
+          #       additions as separate exact sets, and this step asserts BOTH literally:
+          #       the base set is the specification's eight, and the additions are exactly
+          #       cognito-idp and xray. A silent eleventh endpoint fails here whichever
+          #       input it is added to.
+          # WHY : Assumptions: each name is required TWICE inside its own block, and the pair
+          #       is the point rather than a quirk of the search. A block states its set once as
           #       the `default` and once inside the exact-set `validation`, and a name present
           #       in only one of them is a defect either way: in the default alone it is
           #       unvalidated, and in the validation alone it makes the module's own default
           #       fail the rule it declares. Requiring both is what makes this assertion about
           #       the endpoint CONTRACT rather than about one list.
-          assert endpoint_block.group(0).count('"cognito-idp"') >= 2, (
-              "infra/modules/network/variables.tf: cognito-idp is not in both the default and "
-              "the exact-set validation of interface_endpoint_services. Every service "
-              "resolves its issuer and JSON web key set at start-up and auth-service calls "
-              "the user pools API, so without that endpoint the only path left is a public "
-              "one -- which is the rule this module withdrew."
+          FROZEN_ENDPOINTS = [
+              "ecr.api",
+              "ecr.dkr",
+              "logs",
+              "secretsmanager",
+              "kms",
+              "sqs",
+              "states",
+              "ssm",
+          ]
+          APPROVED_ADDITIONAL_ENDPOINTS = ["cognito-idp", "xray"]
+
+          endpoint_inputs = (
+              ("interface_endpoint_services", FROZEN_ENDPOINTS),
+              ("approved_additional_interface_endpoint_services", APPROVED_ADDITIONAL_ENDPOINTS),
+          )
+          for input_name, expected_names in endpoint_inputs:
+              endpoint_block = block(net_vars, "variable", input_name)
+              for opener in ("default = [", "toset(["):
+                  listed = quoted_names(endpoint_block, opener, f"{net_vars}:{input_name}")
+                  assert listed == expected_names, (
+                      f"infra/modules/network/variables.tf: the {opener.strip()} list of "
+                      f"{input_name} is {listed}, not {expected_names}. The first input is the "
+                      "eight interface endpoints AAP sections 0.4.1.6 and 0.4.1.9 fix; the "
+                      "second is the two approved additions ratified in "
+                      "docs/adr/ADR-008-security-and-identity.md, each billed per availability "
+                      "zone per hour. Changing either set is a change to fixed topology and to "
+                      "the recurring cost this package is approved for."
+                  )
+              for required_name in expected_names:
+                  assert endpoint_block.count(f'"{required_name}"') >= 2, (
+                      f"infra/modules/network/variables.tf: {required_name} is not in both the "
+                      f"default and the exact-set validation of {input_name}, so the two halves "
+                      "of that contract disagree."
+                  )
+
+          # WHY : Assumptions: the two inputs must stay DISJOINT, and this is asserted rather
+          #       than left to the pair of exact-set checks above. main.tf unions them, and
+          #       setunion deduplicates, so an approved addition copied back into the base
+          #       set would provision the same ten endpoints while making the base set no
+          #       longer the specification's eight -- the one property the split exists to
+          #       keep checkable.
+          base_block = block(net_vars, "variable", "interface_endpoint_services")
+          for addition in APPROVED_ADDITIONAL_ENDPOINTS:
+              assert f'"{addition}"' not in base_block, (
+                  f"infra/modules/network/variables.tf: {addition} appears inside "
+                  "interface_endpoint_services. An approved addition belongs only in "
+                  "approved_additional_interface_endpoint_services, where its justification "
+                  "and its per-zone cost are recorded."
+              )
+
+          # WHY : Assumptions: main.tf must create endpoints over the UNION of the two inputs,
+          #       and the union expression is asserted verbatim for the same reason the ECR
+          #       projection is: reading one input alone would provision eight endpoints and
+          #       drop identity and trace export at the security group, and reading a third
+          #       collection would provision endpoints neither exact set says anything about.
+          endpoint_union = (
+              "setunion(\n"
+              "    var.interface_endpoint_services,\n"
+              "    var.approved_additional_interface_endpoint_services,\n"
+              "  )"
+          )
+          assert endpoint_union in network_body, (
+              "infra/modules/network/main.tf: local.interface_endpoint_services is not the "
+              "union of var.interface_endpoint_services and "
+              "var.approved_additional_interface_endpoint_services, so the provisioned "
+              "endpoint set is not the two sets this step has just certified."
+          )
+          assert re.search(
+              r"(?m)^  for_each = local\.interface_endpoint_services$", network_body
+          ), (
+              "infra/modules/network/main.tf: aws_vpc_endpoint.interface does not iterate "
+              "local.interface_endpoint_services, so the endpoints it creates are not derived "
+              "from the union of the two validated inputs."
           )
 
           # WHY : Assumptions: the scan is scoped to security-group EGRESS RULE blocks, and
@@ -1772,11 +1868,12 @@ jobs:
           #   so the mirror list could not be seen -- and it therefore reported PASS while
           #   main.tf unioned that second list into the same `for_each` and provisioned
           #   ELEVEN repositories. A gate scoped to a sub-list cannot see the total, so the
-          #   inventory it certified was not the inventory that would exist. Both halves are
-          #   asserted now: the deployable default IS the ten, and main.tf's `for_each`
-          #   collection is derived from that variable ALONE, so a re-introduced mirror --
-          #   as a second variable, a hard-coded name or an extra element -- reddens this
-          #   step instead of passing beneath it.
+          #   inventory it certified was not the inventory that would exist. Every half is
+          #   asserted now: the deployable default IS the ten, the mirror default and its
+          #   validation are the ONE approved name, the arithmetic 10 + 1 = 11 is stated,
+          #   and main.tf's `for_each` collection is the verbatim union of exactly those two
+          #   inputs -- so a third collection, a hard-coded name, an extra deployable or a
+          #   different cached image all redden this step instead of passing beneath it.
           ecr_vars = Path("infra/modules/ecr/variables.tf").read_text()
 
           # WHY : Assumptions: the variable's block is bounded by brace balance rather than by
@@ -1815,6 +1912,69 @@ jobs:
               "sections 0.4.1.6 and 0.5.1.12 fix this module at ten repositories -- the "
               "eight Spring Boot services plus ui and data-migration -- and a third-party "
               "image this migration does not build has no repository here at all."
+          )
+
+          # WHY : Assumptions: the mirror input is asserted by NAME and not by size, and
+          #   that is the whole point of this block. Its own validation used to bound only
+          #   the number of entries, so any one third-party image could occupy the approved
+          #   slot and plan cleanly while docs/adr/ADR-002-compute-platform.md described a
+          #   different one. The provisioned inventory is ten deployables plus ONE approved
+          #   mirror -- eleven repositories, which exceeds the ten AAP section 0.4.1.6 fixes
+          #   and is ratified there -- so both halves of the arithmetic are checked here:
+          #   the ten above, and the single name below.
+          # WHY : Refactoring Rationale: this step asserted the ten and the union expression
+          #   but said nothing about WHICH image the second input held, so the eleventh
+          #   repository could be delivered with no gate able to distinguish the ratified
+          #   mirror from an unreviewed artifact repository. Naming the approved value is
+          #   what turns the ADR entry into an enforced approval.
+          APPROVED_MIRRORS = ["aws-otel-collector"]
+          mirror_block = block(
+              "infra/modules/ecr/variables.tf",
+              "variable",
+              "third_party_mirror_repository_names",
+          )
+          mirror_default = quoted_names(
+              mirror_block, "default = [", "infra/modules/ecr/variables.tf:mirror"
+          )
+          assert mirror_default == APPROVED_MIRRORS, (
+              f"infra/modules/ecr/variables.tf: the third-party mirror default is "
+              f"{mirror_default}, not {APPROVED_MIRRORS}. The one approved mirror is the "
+              "AWS Distro for OpenTelemetry collector image every task runs as an essential "
+              "sidecar and cannot pull from public.ecr.aws, because the application tier has "
+              "no public egress. Caching anything else is a change to the approval recorded "
+              "in docs/adr/ADR-002-compute-platform.md."
+          )
+          # WHY : Assumptions: a subset test against the approved list is required rather
+          #   than a length bound, and the condition is read out of the HCL rather than
+          #   trusted. `setsubtract(var.<input>, ["aws-otel-collector"])` being empty admits
+          #   that name or nothing; `length(...) <= 1` admits ANY one name, which is the
+          #   weaker rule this assertion exists to keep from coming back.
+          mirror_validated = quoted_names(
+              mirror_block, "setsubtract(", "infra/modules/ecr/variables.tf:mirror"
+          )
+          assert mirror_validated == APPROVED_MIRRORS, (
+              "infra/modules/ecr/variables.tf: the third-party mirror input does not "
+              "validate its members against the approved list with setsubtract; the literal "
+              f"it compares against is {mirror_validated}. Without that, an unreviewed "
+              "eleventh artifact repository plans cleanly."
+          )
+          assert len(FROZEN_DEPLOYABLES) + len(mirror_default) == 11, (
+              "infra/modules/ecr: the provisioned repository inventory is "
+              f"{len(FROZEN_DEPLOYABLES)} deployables plus {len(mirror_default)} mirror(s), "
+              "not the ten deployables plus one approved mirror this package is ratified "
+              "for in docs/adr/ADR-002-compute-platform.md."
+          )
+          for approved in APPROVED_MIRRORS:
+              assert mirror_block.count(f'"{approved}"') >= 2, (
+                  f"infra/modules/ecr/variables.tf: {approved} is not in both the default "
+                  "and the validation of third_party_mirror_repository_names, so the two "
+                  "halves of that contract disagree."
+              )
+          assert '"aws-otel-collector"' not in repository_names_block, (
+              "infra/modules/ecr/variables.tf: the mirror name appears inside "
+              "repository_names. It belongs only in third_party_mirror_repository_names, so "
+              "that the ten deployables AAP section 0.4.1.6 fixes stay readable from one "
+              "declaration."
           )
 
           # WHY : Assumptions: the EFFECTIVE inventory is what `for_each` iterates, so the
@@ -1971,6 +2131,29 @@ jobs:
               ".github/workflows/deploy.yml: the collector mirror must pull by @sha256 digest. "
               "A tag in a public registry can be moved onto different bytes, so a tag-only "
               "pull is not a pin."
+          )
+
+          # WHY : Assumptions: the deployment's vulnerability gate iterates the ecr
+          #       module's whole repository_urls map -- eleven repositories, the ten
+          #       deployables plus the one approved mirror -- so it must choose the image
+          #       tag PER repository, and that branch is asserted here because no other
+          #       gate reads the two tag conventions together. Without it the loop asks
+          #       the registry for aws-otel-collector at this release's commit tag, which
+          #       is never pushed: the scan status reads UNKNOWN and the gate refuses
+          #       every deployment while reporting a missing scan rather than a missing
+          #       tag. Measured against the delivered workflow, which had that defect.
+          assert re.search(
+              r'if \[ "\$name" = "aws-otel-collector" \]; then\s*\n'
+              r'\s*tag="\$collector_tag"\s*\n'
+              r'\s*else\s*\n'
+              r'\s*tag="\$CARDDEMO_IMAGE_TAG"',
+              deploy,
+          ), (
+              ".github/workflows/deploy.yml: the image vulnerability gate does not select "
+              "the scanned tag per repository. The aws-otel-collector mirror is pushed "
+              "under the collector's upstream release tag, never under this release's "
+              "tag, so scanning every repository at $CARDDEMO_IMAGE_TAG asks for an image "
+              "identifier that has never existed and blocks every deployment."
           )
 
           print("Terraform prose counts: PASS")

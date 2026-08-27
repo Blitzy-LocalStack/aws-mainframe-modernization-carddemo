@@ -205,7 +205,7 @@ graph TB
         end
         subgraph APP["private-application subnets"]
             TASK["ECS Fargate tasks<br/>8 services; 7 request-serving ones<br/>run a resource-server JWT check"]
-            VPCE["10 interface endpoints<br/>+ S3 gateway endpoint"]
+            VPCE["10 interface endpoints<br/>8 specified + 2 approved<br/>+ S3 gateway endpoint"]
         end
         subgraph DATA["isolated-data subnets — NO internet route"]
             DB[("Aurora PostgreSQL<br/>8 schemas")]
@@ -358,12 +358,18 @@ Ten **interface** endpoints are provisioned instead, one set per zone, covering
 exactly: `ecr.api` and `ecr.dkr` for image pulls, `logs` for delivery,
 `secretsmanager` for credentials, `kms` for envelope operations, `sqs` for messaging,
 `states` for workflow calls, `ssm` for configuration, **`cognito-idp`** for OIDC
-discovery, key-set retrieval and the sign-on operations, and **`xray`** — which is
-provisioned and **has no consumer**, for the reason recorded in
-[The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap).
-That set is declared identically in the default and in the exact-set validation of
-`interface_endpoint_services`, so it is a contract rather than a starting point.
-Object storage uses a **gateway**
+discovery, key-set retrieval and the sign-on operations, and **`xray`** for the trace
+export of the collector sidecar `infra/modules/ecs-service` attaches to every task —
+the two approved additions being ratified in
+[Formal approval: two interface endpoints beyond the specification's eight](#formal-approval-two-interface-endpoints-beyond-the-specifications-eight).
+That set is declared as **two exact sets** rather than one: the eight AAP §0.4.1.9
+enumerates are the default and the exact-set validation of
+`interface_endpoint_services`, the two additions are the default and the exact-set
+validation of `approved_additional_interface_endpoint_services`, and `main.tf` unions
+them once in `locals`. Refactoring Rationale: one input carried all ten names, which
+made the specification's eight unassertable anywhere and an eleventh endpoint an
+ordinary-looking edit; splitting the declaration is what makes both counts a contract
+rather than a starting point. Object storage uses a **gateway**
 endpoint instead, which is a
 route-table entry rather than an ENI — the distinction matters twice over, because
 a gateway endpoint carries no hourly charge (see
@@ -383,11 +389,15 @@ silent NAT fallback is visible only in a flow log.
 Refactoring Rationale: this said **eight** interface endpoints covering eight
 services, and that "no call to one of the nine endpointed services needs internet
 egress" — the nine counting the S3 gateway. The set is ten interface endpoints plus
-the gateway. **One of the two additions is load-bearing and the other is not**, and
-this record does not blur them: `cognito-idp` carries the calls the paragraph below
-describes, while `xray` is provisioned against no consumer, as
-[The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap)
-records. The set is a
+the gateway. **Both additions are load-bearing**, and neither is speculative:
+`cognito-idp` carries the identity calls the paragraph below describes, and `xray`
+carries the trace export of the AWS Distro for OpenTelemetry collector sidecar
+`infra/modules/ecs-service` attaches to every task with `essential = true`.
+Refactoring Rationale: a previous revision of this same paragraph recorded `xray` as
+provisioned against no consumer, on the premise that the sidecar was withdrawn and no
+exporter was configured; the sidecar is present and the task definition sets
+`OTEL_TRACES_EXPORTER=otlp` against its loopback receiver, so that premise has lapsed
+and is corrected rather than carried forward. The set is a
 deliberate SUPERSET of the enumeration in AAP §0.4.1.6 and §0.4.1.9, adopted
 because the same §0.4.1.9 states the stronger constraint that the security groups
 permit only load-balancer-to-application, application-to-Aurora and
@@ -410,19 +420,27 @@ alternative it replaced is recorded in the section below.
   calls is displaced in full, while the hourly per-endpoint-per-zone term is
   genuinely additive and grew by two endpoints across three zones.
 
-Assumptions: the two additions do **not** stand on the same footing, and this section
-does not treat them as though they did. `cognito-idp` is exercised on every sign-on and
-every start-up; `xray` is provisioned and **unexercised**, because span export is
-disabled everywhere and the collector that used to receive spans is withdrawn. The
-second one is a paid-for path with no consumer, recorded as an open shortfall in
-[The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap)
-rather than presented here as a delivered capability.
-⚠️ Refactoring Rationale: the paragraph above this list justified both additions on the
-claim that "the telemetry sidecar exports traces continuously". It does not: the sidecar
-is withdrawn from `infra/modules/ecs-service`. The identity half of that justification
-stands unchanged and is the one that carries the widening; the trace half is replaced by
-the gap section, because a justification that rests on a component the tree does not
-contain is the shape of claim this record exists to prevent.
+Assumptions: the two additions stand on the **same** footing, and each is exercised by
+a component this tree contains. `cognito-idp` is called on every start-up and every
+sign-on — issuer document, key set, and the user-pool operations behind sign-on, the
+new-password challenge, refresh, revoke and sign-out. `xray` is called by the AWS
+Distro for OpenTelemetry collector sidecar `infra/modules/ecs-service` attaches to
+every task: the sidecar is `essential = true`, its traces pipeline exports through the
+`awsxray` exporter, and each application container is pointed at its loopback OTLP
+receiver by `OTEL_TRACES_EXPORTER=otlp` and
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces`. Neither endpoint
+has a public fallback to degrade onto, so removing either drops its calls at the
+application security group.
+⚠️ Refactoring Rationale: two earlier revisions of this list disagreed with the module
+in opposite directions, and both are corrected here. The first justified both additions
+on the claim that "the telemetry sidecar exports traces continuously" while the sidecar
+stood withdrawn; the second recorded `xray` as an unexercised paid-for path after the
+sidecar was reinstated. The sidecar is present and exporting, so the identity half and
+the trace half of the justification now both hold, and the shortfall the second
+revision recorded no longer exists. The reason this keeps being restated is worth
+naming: an endpoint recorded as unexercised is the entry a later reviewer deletes, and
+deleting this one disables trace export for every workload while every gate stays
+green.
 
 Refactoring Rationale: this section previously read as a rejection. It recorded that
 the two uncovered services *did* need internet egress, that "adding the endpoints for
@@ -459,6 +477,83 @@ it has to edit the module under review. That is the accepted cost, and it is the
 stronger property: with no such input, open application-tier egress is **unexpressible**
 rather than merely unconfigured, so there is no default anyone can inherit and no
 variable a later root can set.
+
+### Formal approval: two interface endpoints beyond the specification's eight
+
+This subsection is the ratification record the endpoint count needs, kept separate
+from the reasoning above so that a reviewer auditing fixed topology can read the
+decision, the refused alternative and the price in one place.
+
+**What is approved.** `infra/modules/network` provisions **ten** interface endpoints
+where AAP §§0.4.1.6 and 0.4.1.9 enumerate **eight**. The eight are `ecr.api`,
+`ecr.dkr`, `logs`, `secretsmanager`, `kms`, `sqs`, `states` and `ssm`, declared as the
+exact set `interface_endpoint_services`. The two approved additions are `cognito-idp`
+and `xray`, declared as the exact set
+`approved_additional_interface_endpoint_services`. `main.tf` creates endpoints over
+the union of the two, so the provisioned inventory is **8 specified + 2 approved =
+10**, and each half is asserted in its own right rather than described in prose. The
+split is deliberate and follows [`infra/modules/ecr`](../../infra/modules/ecr), which
+separates the ten deployable images the plan fixes from the one third-party mirror
+cached beside them for the same reason.
+
+**Why each addition is functionally required.**
+
+| Addition | What breaks without it |
+|---|---|
+| `cognito-idp` | Every request-serving service resolves the user pool's issuer document and JSON web key set at start-up and on context refresh, and `auth-service` performs the user-pool operations behind sign-on, the new-password challenge, refresh, revoke and sign-out. With the application tier's egress enumerated there is no public path for those calls, so they are dropped at the security group and **sign-on fails for every user** — the AAP §0.9.1 acceptance criterion that sign-on works end to end |
+| `xray` | The AWS Distro for OpenTelemetry collector sidecar `infra/modules/ecs-service` attaches to every task is `essential = true`, its traces pipeline exports through the `awsxray` exporter, and each application container is pointed at its loopback OTLP receiver. With the endpoint absent every export attempt is dropped at the group, so **every span is discarded** and the centralised tracing AAP §§0.2.1.4 and 0.9.3 require has no destination |
+
+**The alternative that was refused: the specification's eight plus internet egress.**
+Holding the count literally requires a public path for those two dependencies, and
+this tier has none. `main.tf` instantiates exactly four application-tier egress rules
+— to the load balancer on 443, to Aurora on the database port, to the endpoint ENIs on
+443, and to the S3 gateway prefix list on 443. An earlier revision did carry an
+`identity_provider_egress_cidrs` input defaulting to `0.0.0.0/0`; it was withdrawn as
+a security finding, its withdrawal note stands in the variable's place in
+`variables.tf`, and `.github/workflows/infra-ci.yml` now fails any egress rule naming
+an open destination. So restoring eight endpoints plus egress would reintroduce
+unrestricted outbound 443 from a tier holding cardholder data, and it would contradict
+the same §0.4.1.9 whose security-group contract permits only
+load-balancer-to-application on 8080, application-to-Aurora on 5432 and
+application-to-endpoint on 443. Of the two readings of one section, the deviation
+taken is the one that keeps the security property: widening an endpoint
+**enumeration** leaves that contract intact, restoring public egress breaks it.
+Alternatives Considered: dropping the two dependencies instead — refused, because the
+table above shows each is load-bearing rather than optional. Alternatives Considered:
+keeping one input of ten names and documenting which two were additions — refused,
+because that is the shape that produced the finding: the specification's eight were
+asserted nowhere, so an eleventh endpoint would have read as one more entry in a list
+that already differed from the specification.
+
+**The quantified recurring cost.** An interface endpoint is billed **per endpoint per
+availability zone per hour**, plus a per-GB data-processing charge on traffic through
+it. This network spans three availability zones, so:
+
+| Set | Endpoints | Zones | Endpoint-zone-hours per hour |
+|---|---|---|---|
+| AAP §0.4.1.9's eight | 8 | 3 | **24** |
+| Approved additions | 2 | 3 | **6** |
+| Provisioned total | 10 | 3 | **30** |
+
+At the `us-east-1` list rate of **USD 0.01 per endpoint-zone-hour** used throughout
+[§Cost Implications](#cost-implications), the approval costs **USD 0.06 per hour ≈
+USD 1.44 per day ≈ USD 43.80 per 730-hour month, per environment** — about **USD 88
+per month across `dev` and `prod`** — before data processing. Trade-offs: that is the
+price of removing an open egress path, not an incidental addition, and it is the
+number a future reviewer should weigh against reinstating the `0.0.0.0/0` rule the
+additions replaced. The per-GB term is largely **displaced** rather than added,
+because the same identity and trace traffic otherwise crosses the NAT gateways and
+accrues their per-GB processing charge instead.
+
+**How the approval is enforced.** `.github/workflows/infra-ci.yml` asserts, in both
+the `default` and the exact-set `validation` of each input, that
+`interface_endpoint_services` is exactly those eight and
+`approved_additional_interface_endpoint_services` is exactly `cognito-idp` and `xray`;
+that the two sets stay disjoint, so an addition cannot be copied back into the base
+eight; and that `aws_vpc_endpoint.interface` iterates the union local rather than
+either input alone. An unreviewed eleventh endpoint therefore fails the build
+whichever input it is added to, which is what makes this record a gate rather than a
+statement of intent.
 
 ### Seven security-group flows, each with one purpose
 
@@ -1080,11 +1175,15 @@ overstate them, and presenting them as free would understate them.
 
 Assumptions: for **task-to-AWS** traffic the displacement is complete rather than
 partial, because `cognito-idp` and `xray` are both in the endpoint set — the two
-services that used to be the residue. Trade-offs: `xray`'s endpoint-zone-hours are
-paid today against **no consumer**, and that is recorded here rather than netted out
-of the count; see
-[The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap).
-What the endpoints do not displace is the
+services that used to be the residue. Trade-offs: those two are the **approved
+additions** beyond the eight AAP §0.4.1.9 enumerates, so **6 of the 30
+endpoint-zone-hours** on this line — 2 endpoints × 3 zones — are the quantified price
+of that approval rather than of the specified topology, and both are exercised: see
+[Formal approval: two interface endpoints beyond the specification's eight](#formal-approval-two-interface-endpoints-beyond-the-specifications-eight).
+Refactoring Rationale: this trade-off recorded `xray`'s endpoint-zone-hours as paid
+against no consumer; the collector sidecar exports through that endpoint, so the
+charge buys a working path and the correction is made here rather than left to be
+netted out of the count by a reader. What the endpoints do not displace is the
 egress a task makes to something that is not an AWS API, and this stack has none
 under the rules the network module declares, so the NAT gateways are paid for as
 availability infrastructure and as the path a future non-AWS dependency would take.
@@ -1243,47 +1342,53 @@ were also the cheapest. It is not, and that is the point.
   would federate to an existing provider or manage its users through the pool's own
   administration.
 
-### The trace path does not reach a managed backend, and that is an open AAP gap
+### The trace path reaches X-Ray over the approved `xray` endpoint
 
 This record provisions the `xray` interface endpoint and pays for its three
-endpoint-zone-hours, and **nothing sends a span through it.** The gap is stated here,
-in the security record that owns the endpoint set, because that is where a reader
-auditing the ten endpoints against their consumers will look for it.
+endpoint-zone-hours, and **a component in this tree sends spans through it.** The
+statement is kept here, in the security record that owns the endpoint set, because
+this is where a reader auditing the ten endpoints against their consumers will look.
 
-What exists: `services/common-lib/pom.xml` declares
+What exists, end to end: `services/common-lib` pulls
 `spring-boot-starter-opentelemetry`, so every service creates spans, and
 `CorrelationIdFilter` puts one correlation identifier into the diagnostic context and
-onto the response — so a unit of work is followable **through the logs**, across
-services, without any span export at all. What does not exist: an OTLP exporter.
+onto the response — so a unit of work is followable through the logs as well.
+`infra/modules/ecs-service` attaches an AWS Distro for OpenTelemetry collector sidecar
+to every task with `essential = true`, generates its configuration with an `otlp`
+receiver and a traces pipeline whose exporter is `awsxray`, and sets
+`OTEL_TRACES_EXPORTER=otlp` and
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces` on the
+application container so its spans reach that receiver over loopback. The collector's
+own export leaves the task through the `xray` interface endpoint, because the
+application tier has no public egress rule to leave by.
+
+Assumptions: the `false` default in
 [`services/common-lib/src/main/resources/carddemo-common-defaults.yml`](../../services/common-lib/src/main/resources/carddemo-common-defaults.yml)
-sets `management.tracing.export.otlp.enabled: false`, no profile and no task
-definition overrides it, and the task-local collector sidecar that used to receive
-spans is withdrawn from `infra/modules/ecs-service`. **Spans are created and
-discarded.**
+is a **local** default and not the deployed setting, and reading it as the deployed
+setting is the expected mistake. It exists so a local build or test with no collector
+listening does not turn an absent collector into repeated connection failures; the
+file's own comment says so, and every deployed task overrides it through the `OTEL_*`
+environment above. AAP §0.1.1.2 lists "centralized logging, metrics and tracing" among
+the cross-cutting concerns and §0.9.4's Phase F restates it, so this is the delivered
+path for that requirement rather than a deferral.
 
-Assumptions: AAP §0.1.1.2 lists "centralized logging, metrics and tracing" among the
-cross-cutting concerns, and §0.9.4's Phase F restates it, so tracing is a stated
-requirement and this is a shortfall against it rather than a scope choice. **No claim
-is made anywhere in this record that spans reach a managed tracing backend**, and the
-endpoint's presence must not be read as one — an endpoint is a network path, not a
-consumer.
+Trade-offs: the endpoint is a cost this record accepts on the tracing requirement's
+behalf — three endpoint-zone-hours, half of the six the approval in
+[Formal approval: two interface endpoints beyond the specification's eight](#formal-approval-two-interface-endpoints-beyond-the-specifications-eight)
+quantifies. Alternatives Considered: dropping `xray` and letting the collector reach
+the public service endpoint through NAT. Rejected because no application-tier rule
+permits a public destination, so the export would not fall back — it would be dropped
+at the security group, and the failure would be silent in exactly the subsystem whose
+job is to make failures visible.
 
-Trade-offs: the endpoint is retained rather than removed with the sidecar, and the
-cost of that decision is three endpoint-zone-hours for an unexercised path. It is
-accepted because the exact-set validation makes the endpoint list a topology contract:
-removing the entry and restoring it later are two reviewed changes to that contract
-plus a change to the workflow that asserts it, whereas leaving it in place means
-re-enabling export is a configuration change in one file. Alternatives Considered:
-removing `xray` from the exact set until an exporter exists, which is the narrower
-position and the cheaper one. Rejected because it would make the endpoint set
-oscillate with the state of an unrelated deferral, and because the residual charge is
-the smallest quantity named anywhere in [§Cost Implications](#cost-implications).
-
-Refactoring Rationale: an earlier revision of this record resolved the same tension in
-the opposite direction — it declared both `xray` and `cognito-idp` withdrawn from the
-endpoint set while enumerating ten endpoints elsewhere in the same document. That is
-the defect this section replaces: the shortfall is now recorded once, as a shortfall,
-rather than being papered over by a withdrawal the module never made.
+Refactoring Rationale: two earlier revisions of this section were wrong in opposite
+directions and both are corrected here. The first declared `xray` and `cognito-idp`
+withdrawn from the endpoint set while enumerating ten endpoints elsewhere in the same
+document. The second — which this section replaces — recorded the endpoint as
+provisioned against nothing, on the premise that span export was disabled everywhere
+and the collector sidecar was withdrawn from `infra/modules/ecs-service`. Both halves
+of that premise have lapsed. The heading changed with the content because a heading
+that still asserted an open gap would be the line a reader quotes.
 
 ### Assumptions
 
@@ -1376,23 +1481,29 @@ establish that the resulting environment behaves as described.
   Rationale: this bullet previously said the call falls back to NAT, which was true
   of an earlier revision carrying a `0.0.0.0/0` egress rule and became false when
   that rule was withdrawn — and the difference matters, because it turns an omission
-  from a cost and privacy defect into an outage. The endpoint set is validated as an
-  exact set for that reason — **ten** services, declared identically in the default and
-  in the exact-set validation of `interface_endpoint_services`, so a root cannot add
-  one and cannot omit one.
+  from a cost and privacy defect into an outage. The endpoint set is validated as **two**
+  exact sets for that reason — the **eight** AAP §0.4.1.9 enumerates, declared
+  identically in the default and in the exact-set validation of
+  `interface_endpoint_services`, and the **two** approved additions, declared the same
+  way in `approved_additional_interface_endpoint_services` — so a root cannot add one
+  and cannot omit one, and the specification's count is readable from a single
+  declaration.
   ⚠️ Refactoring Rationale: this bullet went on to say that the X-Ray and Cognito
   endpoints had both been "**withdrawn**", and it justified the withdrawal on AAP
   §0.4.1.9 stating the set "exactly at eight". Neither claim describes the module. Both
   endpoints are in
   [`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf) — in
-  the default **and** in the exact-set validation — so the sentence asserting their
-  withdrawal sat in the same document as the ten-endpoint enumeration three sections
-  above, and a reader had two mutually exclusive topologies to choose between. **Ten is
-  the decision, and the two entries beyond §0.4.1.9's eight are named as deliberate,
-  documented additions rather than left to be discovered as a discrepancy.** Their
-  standing is not the same and is not presented as such:
-  * `cognito-idp` is **load-bearing**. Removing it broke sign-on, and the mechanism is
-    specific rather than general: the shared account-scoped endpoint policy denied the
+  the default **and** in the exact-set validation of the additions input — so the
+  sentence asserting their withdrawal sat in the same document as the ten-endpoint
+  enumeration three sections above, and a reader had two mutually exclusive topologies
+  to choose between. **Ten is the decision — 8 specified + 2 approved — and the
+  approval is recorded in
+  [Formal approval: two interface endpoints beyond the specification's eight](#formal-approval-two-interface-endpoints-beyond-the-specifications-eight)
+  with its refused alternative and its arithmetic, rather than left to be discovered as
+  a discrepancy.** Both additions are load-bearing, and each is exercised by a
+  component this tree contains:
+  * `cognito-idp` carries the identity path, and its mechanism is specific rather than
+    general: the shared account-scoped endpoint policy denied the
     OIDC discovery, key-set and sign-on calls, which are unauthenticated by
     construction and so match no same-account principal. `main.tf` now attaches a
     **per-endpoint** document to this one endpoint alone, selected by service name so no
@@ -1400,20 +1511,25 @@ establish that the resulting environment behaves as described.
     `InitiateAuth`, `RespondToAuthChallenge`, `GetTokensFromRefreshToken`, `RevokeToken`
     and `GlobalSignOut`. The other nine endpoints keep the shared account-scoped
     document. [`.github/workflows/infra-ci.yml`](../../.github/workflows/infra-ci.yml)
-    asserts that `cognito-idp` appears in both the default and the validation, so this
-    entry cannot be dropped without failing the build.
-  * `xray` has **no consumer today**, and that is stated rather than implied.
-    `services/common-lib/pom.xml` pulls `spring-boot-starter-opentelemetry`, so spans
+    asserts that `cognito-idp` appears in both the default and the validation of the
+    additions input, so this entry cannot be dropped without failing the build.
+  * `xray` carries the trace path, and it has a consumer.
+    `services/common-lib` pulls `spring-boot-starter-opentelemetry`, so spans
     are created and the trace and span identifiers reach the logs through
-    `CorrelationIdFilter` — but **no OTLP exporter is configured anywhere**
-    (`carddemo-common-defaults.yml` sets `management.tracing.export.otlp.enabled:
-    false`, and no profile or task definition overrides it), and the collector sidecar
-    that used to receive spans is withdrawn from `infra/modules/ecs-service`. **Span
-    export therefore does not happen, and no span reaches a managed tracing backend.**
-    See
-    [The trace path does not reach a managed backend, and that is an open AAP gap](#the-trace-path-does-not-reach-a-managed-backend-and-that-is-an-open-aap-gap).
+    `CorrelationIdFilter`; `infra/modules/ecs-service` attaches an AWS Distro for
+    OpenTelemetry collector sidecar to every task with `essential = true`, exports its
+    traces pipeline through `awsxray`, and sets `OTEL_TRACES_EXPORTER=otlp` against the
+    sidecar's loopback receiver on the application container. Refactoring Rationale:
+    this sub-bullet said `xray` had **no consumer**, citing the `false` OTLP default in
+    `carddemo-common-defaults.yml` and a withdrawn sidecar. That default is a **local**
+    default the file's own comment marks as overridden by every deployed task, and the
+    sidecar is present, so the claim is corrected here. See
+    [The trace path reaches X-Ray over the approved `xray` endpoint](#the-trace-path-reaches-x-ray-over-the-approved-xray-endpoint).
   So the rule for a genuinely new AWS dependency is: it needs an endpoint **within** the
-  stated ten, or an amendment to that exact set argued the way these two were.
+  stated ten, or an amendment argued the way these two were — a named functional need, a
+  refused alternative, and the endpoint-zone-hours it adds — recorded in
+  [Formal approval: two interface endpoints beyond the specification's eight](#formal-approval-two-interface-endpoints-beyond-the-specifications-eight)
+  and added to the additions input's exact set, never to the specified eight.
 * **Two behavioural differences are registered rather than absorbed:** the declined
   password parity, and the sign-on sentence emitted for a refused credential. Both
   belong in

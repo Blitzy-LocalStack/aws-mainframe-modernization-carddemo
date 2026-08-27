@@ -92,8 +92,8 @@ spring:
 
   main:
     # WHY : Assumptions: spring-boot-starter-web is on this module's classpath
-    #       only so the actuator health endpoint can answer the Dockerfile
-    #       HEALTHCHECK; the module registers no controller, so a test context has
+    #       only so the actuator health endpoint can be read inside a running task;
+    #       the module registers no controller, so a test context has
     #       nothing to serve. Pinning `none` states that, and no servlet container
     #       is created and no port bound for any context this key governs.
     #       Alternatives Considered: repeating
@@ -348,8 +348,8 @@ spring:
     #       beside the other three, which is the obvious fix and was MEASURED to
     #       break the production configuration. An init script runs as the
     #       container's own generated superuser, so a schema it creates is owned by
-    #       that superuser; the init-sqls below then assume the NOLOGIN owner role,
-    #       which drops the superuser attribute, and the next statement --
+    #       that superuser; Flyway then assumes the NOLOGIN owner role, which drops
+    #       the superuser attribute, and the next statement --
     #       CREATE TABLE batch.batch_run -- fails with SQLSTATE 42501 permission
     #       denied, because the assumed role holds CREATE on the DATABASE but not on
     #       a schema another role owns. Every integration test in this module aborted
@@ -358,7 +358,7 @@ spring:
     #       it reproduces the deployed ownership exactly. V0 declares
     #       `CREATE SCHEMA IF NOT EXISTS batch AUTHORIZATION carddemo_batch_owner`,
     #       so in a provisioned environment the schema belongs to that role; here
-    #       Flyway issues the CREATE while the SET ROLE below is in force, so
+    #       Flyway issues the CREATE while that assumed role is in force, so
     #       pg_namespace.nspowner resolves to the same role. Ownership is the
     #       property that has to match, not merely the schema's existence, because
     #       every ALTER DEFAULT PRIVILEGES FOR ROLE clause in that bootstrap file is
@@ -393,40 +393,34 @@ spring:
     #       depends on.
     clean-disabled: true
 
-    # WHY : Refactoring Rationale: init-sqls IS restated, and it has to be. The
-    #       base document's single statement is `SET ROLE carddemo_batch_owner`,
-    #       naming a NOLOGIN role that V0 creates in a deployed environment and that
-    #       a fresh container has never heard of; left inherited, all three
-    #       integration classes failed context load with
-    #       `role "carddemo_batch_owner" does not exist`.
-    #       Alternatives Considered: overriding this to an empty list or to a
-    #       no-op so that the ownership split simply does not happen under test.
-    #       Rejected because the split is the whole of the control -- objects a
-    #       migration creates must belong to the NOLOGIN owner, since the bootstrap
-    #       file's default-privilege clauses are keyed on the creating role -- and a
-    #       suite that stopped exercising it would leave it asserted by nothing.
-    #       The two statements below reproduce it instead: the role is created if
-    #       absent, granted CREATE on whichever database the container generated,
-    #       and then assumed, so Flyway creates the schema, the history table and
-    #       every V1 object as carddemo_batch_owner exactly as it does when
-    #       deployed.
-    #       Assumptions: the first statement must be idempotent because Flyway
-    #       runs every string here on EACH connection it opens, not once per
-    #       migration. The role test and the grant are both re-runnable, and the
-    #       grant names its target through format() with %I over
-    #       current_database() rather than a literal, because Testcontainers
-    #       generates the database name and no fixed value would match it. CREATE on
-    #       the database is required and is not implied by role creation: a fresh
-    #       role holds only the PUBLIC grants, CONNECT and TEMPORARY, so without it
-    #       CREATE SCHEMA fails the moment the SET ROLE takes effect.
-    #       Trade-offs: the container's own user is a superuser and could assume
-    #       this role with no grant at all, which makes the GRANT look superfluous.
-    #       It is kept because the grant is what the OWNER needs in order to create
-    #       the schema, not what the connecting user needs in order to become it,
-    #       and SET ROLE drops the superuser attribute for the rest of the session.
-    init-sqls:
-      - "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'carddemo_batch_owner') THEN CREATE ROLE carddemo_batch_owner NOLOGIN; END IF; EXECUTE format('GRANT CREATE ON DATABASE %I TO carddemo_batch_owner', current_database()); END $$;"
-      - "SET ROLE carddemo_batch_owner;"
+    # WHY : Refactoring Rationale: `init-sqls` stood here, restating the base
+    #       document's `SET ROLE carddemo_batch_owner` and prefixing it with a
+    #       statement that created the NOLOGIN role a fresh container has never
+    #       heard of -- left inherited without that prefix, every integration class
+    #       failed context load with `role "carddemo_batch_owner" does not exist`.
+    #       Both halves have moved, in different directions, because the key that
+    #       carried them maps to Flyway's deprecated `initSql` and the engine
+    #       printed a removal notice on every connection it opened. The `SET ROLE`
+    #       half is now issued by common-lib's
+    #       FlywayOwnerRoleDataSourceCustomizer on each connection before Flyway
+    #       wraps it, and re-asserted by FlywayOwnerRoleCallback on connect and
+    #       before each migration; both read the base document's
+    #       carddemo.database.flyway.owner-role, so this profile inherits it and
+    #       no longer restates it. The CREATE ROLE half moved to
+    #       Section 0 of db/testharness/test-harness-schemas-and-foreign-tables.sql,
+    #       the init script all fifteen container-starting classes in this module
+    #       already supply, which runs once at container start and therefore
+    #       strictly before Flyway's first connection.
+    #       Alternatives Considered: overriding the owner role to an empty value
+    #       here, so the ownership split simply does not happen under test. Rejected
+    #       for the same reason the removed key rejected an empty list: the split IS
+    #       the control -- objects a migration creates must belong to the NOLOGIN
+    #       owner, since every ALTER DEFAULT PRIVILEGES FOR ROLE clause in the
+    #       bootstrap file is keyed on the creating role and is inert otherwise --
+    #       and a suite that stopped exercising it would leave it asserted by
+    #       nothing. BatchRunRepositoryIT and BatchAccountWriteGrantIT read the
+    #       resulting owner by name, which is what makes the arrangement checked
+    #       rather than described.
 
   jpa:
     hibernate:
@@ -557,8 +551,8 @@ management:
     web:
       exposure:
         # WHY : Assumptions: emptied, against the base document's `health`. The
-        #       base exposes that one endpoint so the Dockerfile HEALTHCHECK and the
-        #       load-balancer-free task probe have something to call; under test
+        #       base exposes that one endpoint so an operator or a task-definition
+        #       health check inside the task has something to call; under test
         #       nothing calls it, and with the web application type set to none above
         #       there is no web surface to publish it on. Emptying the include list
         #       states that intent at the actuator rather than relying only on the

@@ -252,21 +252,23 @@ spring:
     #   opens its first connection -- and the integration-test setup in the java
     #   tree is what creates them, in a documented step on each of the eight
     #   consuming classes, ahead of context refresh. This file inherits
-    #   create-schemas unchanged and leaves the base profile's own ownership
-    #   statement in force, so the deployed mechanism that makes migrated
-    #   objects belong to the NOLOGIN owner is the mechanism these tests
-    #   actually exercise. CustomerMasterRepositoryIT asserts the resulting
+    #   create-schemas unchanged and leaves the base profile's own
+    #   carddemo.database.flyway.owner-role in force -- common-lib's
+    #   FlywayOwnerRoleDataSourceCustomizer assumes that role on every connection
+    #   Flyway is handed and FlywayOwnerRoleCallback re-asserts it -- so the
+    #   deployed mechanism that makes migrated objects belong to
+    #   the NOLOGIN owner is the mechanism these tests actually exercise. CustomerMasterRepositoryIT asserts the resulting
     #   owner by name, which is what would catch that statement being lost.
     # Alternatives Considered: two shapes are rejected here.
     #   Turning Flyway's create-schemas on for the test profile makes
     #   the schema appear but leaves it owned by whichever user the container
     #   generated, so every default-privilege grant keyed on the owning role is
-    #   inert and the ownership assertion fails. Adding statements to
-    #   spring.flyway.init-sqls that create the role, grant it rights and then
-    #   assume it makes the assertion pass, but it turns this profile into a
-    #   second, unversioned definition of the cluster's role graph -- free to
-    #   drift from the document that holds that authority, and recorded in no
-    #   migration history. Placing the prerequisite in the test setup keeps one
+    #   inert and the ownership assertion fails. Declaring the role and its
+    #   grants from this profile, so that the callback's assumption succeeds,
+    #   makes the assertion pass, but it turns this profile into a second,
+    #   unversioned definition of the cluster's role graph -- free to drift from
+    #   the document that holds that authority, and recorded in no migration
+    #   history. Placing the prerequisite in the test setup keeps one
     #   authority for the deployed graph and one harness step for the container.
     # Trade-offs: each of the SEVEN consuming classes therefore carries a small
     #   setup step that a reader has to find in java rather than here -- the

@@ -199,7 +199,9 @@ class CustomerMasterRepositoryIT {
      * the service starting rather than part of its migration, so {@code V1__account.sql} contains no
      * {@code CREATE SCHEMA} and the base profile forbids Flyway from creating one. Supplying the
      * precondition here is what lets the migration run against the ownership a deployment gives it: the
-     * base profile's own {@code spring.flyway.init-sqls} statement assumes this role, so every object
+     * base profile's own {@code carddemo.database.flyway.owner-role} names this role, common-lib's
+     * {@code FlywayOwnerRoleDataSourceCustomizer} assumes it before Flyway wraps a connection and its
+     * {@code FlywayOwnerRoleCallback} re-asserts it, so every object
      * {@code V1__account.sql} creates belongs to it, which is the arrangement
      * {@link #flywayAppliedTheProductionAccountMigration()} then asserts by name.</p>
      *

@@ -267,10 +267,20 @@ USER carddemo:carddemo
 #   sits behind CloudFront, which terminates TLS at the edge, so nginx serves
 #   cleartext inside the VPC and an HTTPS probe would fail on every healthy task.
 # Assumptions: /healthz is probed rather than /index.html, because ui/nginx.conf
-#   answers it from the server block itself with access logging off. Probing the
-#   document would additionally assert that the bundle copied, which sounds
-#   stronger but makes every probe a disk read and writes a log line every
-#   30 seconds for the life of the task.
+#   answers it from the server block itself, so a reply proves nginx is routing
+#   without depending on any file having landed in the document root. Probing the
+#   document would additionally assert that the bundle copied, which sounds stronger
+#   but makes every probe a disk read for the life of the task.
+# Refactoring Rationale: this note also counted "writes a log line every 30 seconds"
+#   among the costs of probing the document, and that half no longer holds:
+#   ui/nginx.conf now declares access logging off at the exact-match /index.html
+#   location as well, because the history fallback's internal redirect makes that
+#   location the one where a deep-link request is finally logged, and the fallback's
+#   own declaration could not reach it. So a probe of the document would write no
+#   line either, and a cost that no longer exists cannot decide anything.
+#   The decision is unchanged and its remaining reasons are the two above;
+#   the withdrawn one is named rather than deleted so a reader comparing this note
+#   with that file does not read the agreement as an oversight.
 # Refactoring Rationale: this note previously justified wget by asserting that the
 #   image "ships BusyBox wget and no curl". The second half was measured false
 #   inside this exact digest -- /usr/bin/curl is present, a real binary owned by

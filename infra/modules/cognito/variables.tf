@@ -99,7 +99,7 @@
 #       part of the module has already been created, leaving a half-built pool
 #       to clean up by hand, whereas a validation block fails during plan.
 variable "name_prefix" {
-  description = "Lowercase token prefixed to environment-specific resource names such as the user pool, app client and Secrets Manager entries. The authorization groups are invariant carddemo-admin and carddemo-user values and deliberately do not inherit this prefix."
+  description = "Lowercase token prefixed to environment-specific resource names such as the user pool, app client and Secrets Manager entries. The authorization groups are invariant carddemo-admin and carddemo-user values and deliberately do not inherit this prefix. THIS module imposes 2 to 20 characters of lower-case letters, digits and hyphens beginning with a letter -- it is the source of the two-character floor and the leading-letter rule the environment roots enforce as part of the narrower INTERSECTION they forward to sixteen modules."
   type        = string
   default     = "carddemo"
 

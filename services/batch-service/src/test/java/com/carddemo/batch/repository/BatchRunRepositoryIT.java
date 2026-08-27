@@ -196,8 +196,8 @@ class BatchRunRepositoryIT {
      * class asserts on arrives from {@code db/migration/V1__batch.sql} through Flyway and from nowhere
      * else. That asymmetry is easy to misread as an oversight in the harness: an init script runs as the
      * container's superuser, so a {@code batch} schema created there would be owned by that user, and
-     * the test profile's Flyway {@code init-sqls} then assumes a NOLOGIN role which is refused CREATE on
-     * a schema it does not own. Letting Flyway create the schema under that role instead -- which is why
+     * Flyway then assumes a NOLOGIN role which is refused CREATE on a schema it does not own. Letting
+     * Flyway create the schema under that role instead -- which is why
      * the profile sets {@code create-schemas} true rather than false -- reproduces the ownership a
      * deployed environment has, and that ownership is itself asserted below.</p>
      */
@@ -205,7 +205,16 @@ class BatchRunRepositoryIT {
             "db/testharness/test-harness-schemas-and-foreign-tables.sql";
 
     /**
-     * The NOLOGIN role the test profile's Flyway {@code init-sqls} creates and assumes.
+     * The NOLOGIN role the harness script creates and common-lib assumes.
+     *
+     * <p>Refactoring Rationale: both halves used to be the test profile's Flyway {@code init-sqls}. That
+     * key maps to Flyway's deprecated {@code initSql}, so creation moved to Section 0 of the harness
+     * script above and assumption moved to
+     * {@code com.carddemo.common.config.FlywayOwnerRoleDataSourceCustomizer}, which assumes the role on
+     * each connection before Flyway wraps it, with
+     * {@code com.carddemo.common.config.FlywayOwnerRoleCallback} re-asserting it on connect and before
+     * each migration. Both read {@code carddemo.database.flyway.owner-role}. The role, and every
+     * assertion below that reads it, are unchanged.</p>
      *
      * <p>Assumptions: the name is the deployed one, declared at
      * {@code data-migration/sql/V0__schemas_and_roles.sql} L713 as the authorization of the
@@ -504,17 +513,19 @@ class BatchRunRepositoryIT {
     /**
      * Confirms Flyway created the {@code batch} schema under the migration owner role.
      *
-     * <p>Assumptions: this is the assertion that makes the test profile's {@code init-sqls} mean
-     * something. Those statements create the NOLOGIN owner role, grant it CREATE on the container's
-     * generated database and assume it, precisely so that the objects Flyway creates belong to that
-     * role as they do in a deployed environment. Nothing about a successful migration reveals which
-     * role owns its output, so the ownership is read from the catalog.</p>
+     * <p>Assumptions: this is the assertion that makes the owner-role arrangement mean something. The
+     * harness script creates the NOLOGIN owner role and grants it CREATE on the container's generated
+     * database; common-lib's callback assumes it on every connection Flyway opens, precisely so that the
+     * objects Flyway creates belong to that role as they do in a deployed environment. Nothing about a
+     * successful migration reveals which role owns its output, so the ownership is read from the
+     * catalog.</p>
      *
      * <p>Assumptions: the four FOREIGN schemas are asserted to exist and to be owned by someone else
      * in the same case, because the two halves together state the whole boundary: this module's schema
-     * is created by its own migration under its own role, and the four it merely reads arrive from
-     * the init script as the container's user. A harness path that had been renamed would fail
-     * here.</p>
+     * is created by its own migration under its own role, and the four it merely reads are created by
+     * the init script as the container's user -- the script's own Section 0 mints the owner role but
+     * assumes nothing, so the schemas it goes on to create stay with the connecting user. A harness path
+     * that had been renamed would fail here.</p>
      *
      * <p>Assumptions: the artifact this case pins is
      * {@code data-migration/sql/V0__schemas_and_roles.sql}, whose L713 declares the authorization of the

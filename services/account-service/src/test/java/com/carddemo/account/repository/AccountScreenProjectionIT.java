@@ -242,7 +242,9 @@ class AccountScreenProjectionIT {
      * the service starting rather than part of its migration, so {@code V1__account.sql} contains no
      * {@code CREATE SCHEMA} and the base profile forbids Flyway from creating one. Supplying the
      * precondition here lets the migration run under the ownership a deployment gives it, because the base
-     * profile's own {@code spring.flyway.init-sqls} statement assumes this role and every object
+     * profile's own {@code carddemo.database.flyway.owner-role} names this role, common-lib's
+     * {@code FlywayOwnerRoleDataSourceCustomizer} assumes it before Flyway wraps a connection and its
+     * {@code FlywayOwnerRoleCallback} re-asserts it, and every object
      * {@code V1__account.sql} creates therefore belongs to it.</p>
      *
      * <p>Trade-offs: the three statements below name the same role the bootstrap document names, so the two

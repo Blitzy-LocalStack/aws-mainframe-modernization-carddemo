@@ -40,9 +40,10 @@
 #   more than is true and a reader acting on it would draw the wrong conclusion
 #   about this task's network footprint: the task DOES run an embedded servlet
 #   container while a job is running. services/batch-service/pom.xml declares
-#   spring-boot-starter-web and spring-boot-starter-actuator so that the image
-#   HEALTHCHECK has a health endpoint to probe, and that is the whole of the
-#   listener's purpose. Two properties keep it from making this a server. It is
+#   spring-boot-starter-web and spring-boot-starter-actuator so that a health
+#   endpoint exists to be read from inside the task while a job runs -- the image
+#   itself declares no HEALTHCHECK, for the reason recorded above its ENTRYPOINT --
+#   and that endpoint is the whole of the listener's purpose. Two properties keep it from making this a server. It is
 #   bound to the loopback address by the server.address key of application.yml,
 #   so it is reachable only from inside the task; and it exposes the health
 #   endpoint alone, with details suppressed. It also cannot outlive the job:
@@ -178,8 +179,8 @@
 #     so both namespaces would bind to nothing here". Every clause of that was
 #     inverted. pom.xml declares spring-boot-starter-actuator at L188-191 and
 #     spring-boot-starter-web at L223-226, and the comments beside them argue why
-#     each is PRESENT -- the actuator to give the image HEALTHCHECK a target, the
-#     web starter to carry the servlet that answers it -- not why either is
+#     each is PRESENT -- the actuator to publish the health endpoint, the web
+#     starter to carry the servlet that answers it -- not why either is
 #     rejected. Both namespaces therefore bind to something real, so an override
 #     written here would take effect silently rather than be ignored, which
 #     reverses the risk the note was warning about: a reader told the keys are

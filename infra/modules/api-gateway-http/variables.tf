@@ -1659,7 +1659,7 @@ variable "integration_timeout_milliseconds" {
 }
 
 variable "integration_tls_server_name" {
-  description = "Server name the private integration verifies against the certificate the internal ALB listener presents. REQUIRED with no default: main.tf always emits the integration's tls_config from it, so every hop from this edge to the load balancer is TLS with the server identity checked."
+  description = "Server name the private integration verifies against the certificate the internal ALB listener presents. REQUIRED with no default: main.tf always emits the integration's tls_config from it, so every hop from this edge to the load balancer is TLS with the server identity checked. Each dot-separated label is limited to 63 characters and the complete name to 253, the limits DNS itself imposes."
   type        = string
   nullable    = false
 
@@ -1706,6 +1706,35 @@ variable "integration_tls_server_name" {
   validation {
     condition     = can(regex("^[A-Za-z0-9*]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$", var.integration_tls_server_name))
     error_message = "The integration_tls_server_name value must be a bare hostname such as \"internal.carddemo.example\" -- no scheme, no port and no path. A leading \"*\" label is admitted because a wildcard certificate legitimately presents one."
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: the shape rule above constrains this name's
+  #       characters and separators and imposed no length, so a 64-character label
+  #       and a 254-character complete name both passed here and were deferred to
+  #       the provider, which reports an over-long server name against the
+  #       integration rather than against this input -- the same class of late,
+  #       misattributed failure the paragraphs above exist to prevent. The
+  #       environment roots apply these limits to the value they pass; they are
+  #       repeated here so a caller invoking this module directly gets the same
+  #       refusal.
+  #       Assumptions: DNS caps a single label at 63 octets and a complete name at
+  #       253. A TLS server name is compared against a certificate subject, which is
+  #       an ordinary DNS name, so those are the limits both sides of the handshake
+  #       apply.
+  #       Assumptions: a leading `*.` is the wildcard marker the rule above admits
+  #       rather than a label, so it is trimmed before each label is measured and is
+  #       still counted in the total, because those characters are part of the name.
+  #       Trade-offs: two separate blocks rather than one condition, so the
+  #       diagnostic names which limit was exceeded -- shortening a single label and
+  #       shortening the whole name are different edits.
+  validation {
+    condition     = alltrue([for label in split(".", trimprefix(var.integration_tls_server_name, "*.")) : length(label) <= 63])
+    error_message = "Every dot-separated label in integration_tls_server_name must be at most 63 characters, the maximum length DNS allows for a single label. A leading \"*.\" is the wildcard marker rather than a label and is not measured; shorten the offending label."
+  }
+
+  validation {
+    condition     = length(var.integration_tls_server_name) <= 253
+    error_message = "The integration_tls_server_name value must be at most 253 characters in total, the maximum length DNS allows for a complete name. A name may hold several labels of up to 63 characters each, but their total with the separating dots is bounded by 253."
   }
 }
 

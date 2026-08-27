@@ -12,7 +12,12 @@
 #   Dockerfiles, and the asymmetry is deliberate -- infra/modules/ecr asserts the
 #   ten deployables as an exact set and holds the mirror in a separate input, so
 #   the count the frozen plan fixes stays assertable while the cached sidecar
-#   image stays visible.
+#   image stays visible. That eleventh repository EXCEEDS the ten AAP section
+#   0.4.1.6 fixes and is a ratified deviation rather than an accident: the
+#   approval, the alternatives refused and the recurring cost are recorded in
+#   docs/adr/ADR-002-compute-platform.md, and every step below that iterates the
+#   registry -- the push loop, the mirror and the vulnerability gate -- treats the
+#   two kinds of repository by their own tag convention rather than as one set.
 #
 # Parameters:
 #   workflow_dispatch.environment selects dev or prod; image_tag optionally
@@ -377,6 +382,12 @@ jobs:
       #       that was never pushed, and every task stops with CannotPullContainerError.
       #       docs/runbooks/deploy.md carries the same procedure for an operator applying
       #       by hand, and the two are deliberately the same commands in the same order.
+      #       Assumptions: this is the ONE third-party repository the registry holds, so
+      #       the inventory this workflow pushes to is ten deployables plus one approved
+      #       mirror -- eleven repositories against the ten AAP section 0.4.1.6 fixes.
+      #       infra/modules/ecr admits that one name and no other, and the deviation is
+      #       ratified in docs/adr/ADR-002-compute-platform.md rather than left implicit
+      #       in this step.
       # WHY : This step exists because the environment roots point every task's
       #       telemetry sidecar at a PRIVATE registry reference rather than at the
       #       upstream public one. infra/modules/network enumerates the application
@@ -533,16 +544,48 @@ jobs:
           blocking=0
           : > deploy-reports/image-scan-findings.txt
 
-          # WHY : Refactoring Rationale: this loop selected the tag per repository,
-          #       because one repository -- the withdrawn aws-otel-collector mirror --
-          #       carried a fixed upstream version tag rather than this release's commit.
-          #       Every repository this workflow pushes to is now one this repository
-          #       builds, so every image carries the same release tag and the branch is
-          #       gone with the mirror it existed for.
+          # WHY : Refactoring Rationale: this loop dropped its per-repository tag
+          #       selection on the reasoning that every repository the workflow pushes to
+          #       is now one this repository builds, so every image carries this release's
+          #       tag. That is false, and the loop's own input says so: it iterates the
+          #       keys of the ecr module's repository_urls output, which holds ELEVEN
+          #       repositories -- the ten deployables AAP section 0.4.1.6 fixes plus the
+          #       one approved aws-otel-collector mirror ratified in
+          #       docs/adr/ADR-002-compute-platform.md. The mirror is pushed by the step
+          #       above under the collector's upstream release tag and never under this
+          #       release's tag, so a single tag="$CARDDEMO_IMAGE_TAG" asked the registry
+          #       for an image identifier that has never existed: the waiter returns
+          #       immediately, describe-image-scan-findings yields nothing, the status
+          #       reads UNKNOWN and the wildcard branch below sets blocking=1 -- refusing
+          #       EVERY deployment whatever the findings actually say, and reporting a
+          #       missing scan rather than a missing tag. The branch is restored together
+          #       with the mirror it exists for, so the mirror is gated on its own tag
+          #       instead of being gated out of existence.
+          # WHY : Assumptions: the collector's tag is spelled here as a literal rather
+          #       than carried over from the mirror step, because each `run:` block is a
+          #       separate shell and nothing survives between two of them except what is
+          #       written to the environment file. It cannot drift unnoticed: the prose
+          #       gate in .github/workflows/infra-ci.yml reads every collector_tag=
+          #       literal in this file and requires the set to equal the single
+          #       telemetry_collector_image_tag both environment roots pass, so a release
+          #       advanced in one place and not the other fails review rather than
+          #       reintroducing this defect from the other direction.
+          # WHY : Trade-offs: the mirror is gated on exactly the same CRITICAL/HIGH rule
+          #       as an image this repository builds, even though the remedy differs -- a
+          #       finding here is answered by advancing the pinned upstream digest in the
+          #       mirror step rather than by rebuilding a Dockerfile. Accepted: the
+          #       collector runs as an essential sidecar in every task, so exempting it
+          #       would leave the one container present in all eleven task definitions as
+          #       the only unscanned one.
+          collector_tag="v0.49.0"
           while IFS= read -r name; do
             repository="$(jq -er --arg name "$name" '.[$name]' <<<"$repos")"
             repository_name="${repository#*/}"
-            tag="$CARDDEMO_IMAGE_TAG"
+            if [ "$name" = "aws-otel-collector" ]; then
+              tag="$collector_tag"
+            else
+              tag="$CARDDEMO_IMAGE_TAG"
+            fi
 
             # WHY : Assumptions: the waiter is allowed to fail. It returns non-zero when a
             #       scan finishes in a state other than COMPLETE, and the status is read

@@ -232,13 +232,27 @@ resource "aws_cloudfront_response_headers_policy" "security_headers" {
       override     = true
     }
 
-    # WHY : Assumptions: strict-origin-when-cross-origin, matching ui/nginx.conf.
-    #       A CardDemo path can carry an account identifier or a card number in the
-    #       URL -- /account/update and /cards/:num both do -- so a full referrer
-    #       sent off-origin would disclose one. This value sends the origin alone
-    #       cross-origin and nothing at all when leaving HTTPS for HTTP.
+    # WHY : Assumptions: strict-origin, matching ui/nginx.conf. A CardDemo path
+    #       carries a selection context -- /account/update and /cards/:opaqueCardId
+    #       both do -- so a full referrer sent anywhere would disclose one. This
+    #       value sends the origin alone, and nothing at all when leaving HTTPS for
+    #       HTTP.
+    # WHY : Refactoring Rationale: this was strict-origin-when-cross-origin, which
+    #       withholds the path only from ANOTHER origin and sends the full URL on a
+    #       same-origin request. Because override is true, this policy is what the
+    #       viewer actually receives, so the value here decides what the SPA sends
+    #       back to its own origin -- and that referrer was measured reaching the
+    #       origin's access log on every /assets/ and /config.json request, carrying
+    #       the opaque route selector with it. The two files are changed together
+    #       for the reason the first line gives: whichever header survives must
+    #       express the same rule.
+    # WHY : Trade-offs: a same-origin referrer no longer says which route requested
+    #       a bundle. Accepted for the same reason as at the origin -- bundle names
+    #       are content hashed and therefore already unique -- and this
+    #       distribution's own access logging omits the referrer field entirely, so
+    #       nothing downstream of the edge loses a field it was reading.
     referrer_policy {
-      referrer_policy = "strict-origin-when-cross-origin"
+      referrer_policy = "strict-origin"
       override        = true
     }
 

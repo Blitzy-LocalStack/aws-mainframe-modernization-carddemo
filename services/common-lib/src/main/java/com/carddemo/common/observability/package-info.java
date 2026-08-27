@@ -235,8 +235,8 @@
  * units</strong>:
  *
  * <pre>
- * root 1 + money 2 + codec 7 + error 7 + web 6 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 = 48
- * root 2 + money 3 + codec 8 + error 8 + web 7 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 = 59
+ * root 1 + money 2 + codec 7 + error 7 + web 6 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 + config 5 = 53
+ * root 2 + money 3 + codec 8 + error 8 + web 7 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 + config 6 = 65
  * </pre>
  *
  * <p>This package's own share of that total is:
@@ -250,7 +250,7 @@
  * is a different act from correcting a false claim. That distinction does not survive scrutiny: a
  * target presented in a section headed "the count canon", with cross-check sums inviting a reader to
  * re-derive it, is read as a closed inventory, and a closed inventory the tree contradicts is false
- * however it was arrived at. All eleven charters now state the measured figures, this one included, and
+ * however it was arrived at. All twelve charters now state the measured figures, this one included, and
  * its own thirty-two-class measurement above was itself already three classes stale by the time the
  * remediation finished -- which is the argument for the check rather than for another hand count.
  * {@code SharedKernelInventoryTest} re-derives every labelled addend, both totals and each charter's

@@ -284,7 +284,7 @@ graph LR
     E --> F[Roll out services]
     F --> F1[Narrow CSP, publish SPA with config.json]
     F1 --> G[Smoke verification]
-%% The registry apply sits BEFORE the image build because the ten ECR repositories are
+%% The registry apply sits BEFORE the image build because the eleven ECR repositories are
 %% Terraform-managed: on a clean account there is nothing to push to until it has run.
 %% Narrowing the CSP sits AFTER the environment apply because the API origin it names does
 %% not exist until that apply creates it.
@@ -407,16 +407,18 @@ brackets the apply rather than simply preceding it:
 |:---|:---|:---|
 | 2 (this section) | Runs the Maven, SPA and ETL build gates | A failing gate must stop the release before anything is published |
 | [2c](#step-2c---build-the-operational-lambda-packages) | Builds the three Lambda archives | Every `plan` in this runbook evaluates `filebase64sha256` over them, and the first of those plans is 2d |
-| [2d](#step-2d---provision-the-artifact-registry-before-the-first-push) | Applies `module.ecr` alone | The ten repositories a push needs are created by the environment root, so nothing can be pushed before this |
+| [2d](#step-2d---provision-the-artifact-registry-before-the-first-push) | Applies `module.ecr` alone | All eleven repositories a push needs -- the ten built here and the collector mirror -- are created by the environment root, so nothing can be pushed before this |
 | [2e](#step-2e---build-tag-and-push-the-ten-images) | Builds, tags, pushes and records digests | Produces the `image_digests` map the environment apply consumes |
 | [2f](#step-2f---refuse-a-release-on-a-critical-or-high-registry-finding) | Reads each image's registry scan | The only window where the finding exists and no task definition names the image yet |
 | [3](#step-3---provision-the-environment) | Plans and applies the whole environment | Consumes `image_tag` and the digests from 2e |
 
 **Nine of the ten run as ECS tasks.** `ui` is published to the SPA origin bucket in Step 6 and no
-task definition names it, which is why the digest map assembled at the end of this step carries nine
-entries rather than ten. In `prod` that map is not optional: `infra/modules/ecs-service` validates
-`image_uri` and rejects a mutable tag when `environment == "prod"`, so a production apply fails at
-plan time unless every one of the nine task artifacts has a digest here.
+task definition names it, so it is never a key in the digest map: the nine that do run as tasks are
+the map's **required** entries. Step 2b's collector mirror contributes an optional tenth key, which
+Step 2e merges, so a complete map is nine or ten entries and never includes `ui`. In `prod` the nine
+are not optional: `infra/modules/ecs-service` validates `image_uri` and rejects a mutable tag when
+`environment == "prod"`, so a production apply fails at plan time unless every one of the nine task
+artifacts has a digest here.
 
 > The blocks in this step and in Steps 6 and 7 are written to run under `set -euo pipefail` in one
 > shell, in the order given, and several end in `exit 1` so a failed check stops the sequence rather
@@ -519,15 +521,24 @@ curl -fsSL https://bootstrap.pypa.io/get-pip.py | ./.venv/bin/python
 
 ### Step 2a - Provision the registry and resolve its addresses
 
-The ten repositories are Terraform-managed, so they exist only after an apply, and a push to a
-repository that does not exist fails with `name unknown`. Complete Step 3's export block and its
+The registry's repositories are Terraform-managed, so they exist only after an apply, and a push
+to a repository that does not exist fails with `name unknown`. This sub-step creates **eleven** of
+them: the ten this repository builds and pushes, plus the `aws-otel-collector` mirror Step 2b
+populates. Assumptions: eleven is what `-target=module.ecr` creates because
+`infra/modules/ecr/main.tf` keys its repositories over
+`setunion(repository_names, third_party_mirror_repository_names)`, and `registry.repository_urls` is
+keyed over that same union -- which is why Step 2b can read the mirror's address out of the map this
+sub-step produces. The count and its cost reasoning are ratified in
+[`docs/adr/ADR-002-compute-platform.md`](../adr/ADR-002-compute-platform.md) §4.
+
+Complete Step 3's export block and its
 backend-enabled `init` before this sub-step, then return here: `init` is idempotent, so Step 3
 re-running it costs nothing, and `plan` requires a value for every no-default variable even when it
 is narrowed with `-target`. Step 2c's Lambda archives must also already exist -- the Prerequisites
 block above builds them, and `deploy.yml` builds them immediately before this same initialization.
 
 ```bash
-# WHAT: creates the ten Terraform-managed ECR repositories ahead of any push, then reads each
+# WHAT: creates the eleven Terraform-managed ECR repositories ahead of any push, then reads each
 #       repository's registry address and the registry hostname they share.
 # WHY : Alternatives Considered: creating the repositories with ad-hoc `aws ecr create-repository`
 #       calls. Rejected because the full plan in Step 3 would then discover unmanaged resources it
@@ -617,7 +628,7 @@ addressing that root can run until every one is set -- including the targeted re
 sub-steps below, and including a destroy plan. They are absent from `terraform.tfvars` deliberately:
 an ARN and a hostname belong to a deployment, not to the repository, and none of them is a secret.
 
-The registry and the ten repository addresses are Terraform-managed, so they must exist before
+The registry and its eleven repository addresses are Terraform-managed, so they must exist before
 anything is pushed and before Docker can authenticate to them. Provision the registry alone with a
 saved targeted plan, read the addresses back from state, and only then log in. This is the same
 ordering `deploy.yml` uses and for the same reason: creating repositories with ad-hoc CLI calls leaves
@@ -760,7 +771,7 @@ terraform -chdir="$root" init -input=false -lockfile=readonly \
 > exporting an empty string that `init` would then report as a malformed backend.
 
 ```bash
-# WHAT: creates the ten Terraform-managed ECR repositories and nothing else, then records their
+# WHAT: creates the eleven Terraform-managed ECR repositories and nothing else, then records their
 #       registry addresses as a flat name-to-URL map.
 # WHY : Assumptions: -target is legitimate here and only here. The registry is a true prerequisite
 #       of the image push, and the push is a prerequisite of the digests the full plan consumes, so
@@ -912,12 +923,17 @@ fi
 ```
 
 ```bash
-# WHAT: asserts the map holds exactly the nine admissible task artifacts, then hands it to the
-#       environment root as an auto-loaded variable file.
+# WHAT: asserts the map holds exactly the nine task artifacts it was built from, then hands it to
+#       the environment root as an auto-loaded variable file.
 # WHY : Assumptions: the assertion is what makes the production path work. infra/modules/ecs-service
 #       refuses a mutable tag when environment == "prod", so a map missing even one of the nine
 #       fails the production plan; catching that here names the missing artifact instead of leaving
 #       an operator to read a validation error against an image_uri.
+# WHY : Assumptions: EQUALITY against nine is right here because the map asserted is the one this
+#       step just built from the nine task artifacts. The root itself admits a TENTH key,
+#       `aws-otel-collector`, so a map that also carries the mirrored collector's digest is equally
+#       valid as an INPUT -- see Step 2e, which merges it. Do not read this nine as the root's
+#       admissible set.
 # WHY : Assumptions: the filename suffix matters. Terraform auto-loads *.auto.tfvars.json from the
 #       root directory, so no -var-file argument is needed and no later command can forget it.
 #       .gitignore excludes *.auto.tfvars.json, so the file cannot be committed.
@@ -1275,17 +1291,32 @@ docker push "$mirror"
 #       out of the upstream multi-platform index -- the task definitions pin `X86_64`/`LINUX`, so that
 #       manifest is the right one -- and the pushed object is therefore a different manifest with its
 #       own digest.
-# WHY : Assumptions: the key is `aws-otel-collector`, which both roots admit in `image_digests`
-#       alongside the nine task images. Each root prefers a recorded digest and falls back to the
-#       immutable tag, so a plan run before any mirror exists still resolves; recording the digest is
-#       what makes the registered task definition state WHICH collector bytes ran.
+# WHY : Assumptions: the key is `aws-otel-collector`, the TENTH key both roots admit in
+#       `image_digests` alongside the nine task images. Each root prefers a recorded digest and falls
+#       back to the immutable tag, so a plan run before any mirror exists still resolves; recording
+#       the digest is what makes the registered task definition state WHICH collector bytes ran.
+# WHY : ⚠️ Refactoring Rationale: the digest is captured into a shell variable here and NOT exported.
+#       This step printed `export TF_VAR_image_digests='{"aws-otel-collector":"<mirror-digest>", ...}'`,
+#       which could not work in two independent ways. A literal `...` is not JSON, so the export was
+#       not a runnable command; and `TF_VAR_image_digests` is the WHOLE map, so even completed by hand
+#       it would have been overwritten a few steps later -- Step 2e ASSIGNS that variable from the
+#       nine task digests it just read back, which would have discarded the collector entry silently
+#       and left the task definitions on the pinned tag while this step reported success. The variable
+#       is therefore carried to Step 2e, which merges it, and this step no longer claims to set the
+#       input.
+# WHY : Assumptions: this sub-step runs BEFORE Step 2e in the documented order, which is why the
+#       merge is Step 2e's rather than this one's. Running them the other way round would work
+#       equally well, but only one order can be written down, and the merge belongs with the
+#       assignment it must survive.
 # WHY : Trade-offs: re-pushing an existing tag is not a no-op. The repository is IMMUTABLE-tagged, so
 #       the registry refuses it with `ImageTagAlreadyExistsException`; read the digest first and skip
 #       the push commands above when one is already there. A `describe-images` failure naming any
 #       other exception is a real failure -- an access denial or a throttle -- and must not be read as
 #       "absent".
-aws ecr describe-images --repository-name "$collector_repository_name"   --image-ids "imageTag=${collector_tag}"   --query 'imageDetails[0].imageDigest' --output text
-export TF_VAR_image_digests='{"aws-otel-collector":"<mirror-digest>", ...}'
+collector_digest="$(aws ecr describe-images --repository-name "$collector_repository_name" \
+  --image-ids "imageTag=${collector_tag}" \
+  --query 'imageDetails[0].imageDigest' --output text)"
+printf 'collector digest: %s\n' "$collector_digest"
 ```
 
 #### The application tier reaches no public destination, and identity resolves privately
@@ -1344,8 +1375,9 @@ python3 infra/lambda/build_packages.py --check
 
 ### Step 2d - Initialise the environment root and provision the artifact registry
 
-The ten repositories the images are pushed to are **Terraform-managed**, so they do not exist on a
-clean account until this root has created them. That makes the registry the first thing the
+The eleven repositories the images are pushed to are **Terraform-managed**, so they do not exist on
+a clean account until this root has created them -- the ten this repository builds, plus the
+`aws-otel-collector` mirror Step 2b populates. That makes the registry the first thing the
 environment root applies, and it is applied on its own: a targeted plan establishes the registry
 under the same state the full apply will use, so nothing is created outside Terraform's knowledge.
 
@@ -1370,7 +1402,7 @@ terraform -chdir="infra/envs/<env>" init -input=false -lockfile=readonly \
 
 ```bash
 # WHAT: creates and applies a plan limited to the artifact registry, then reads back the address of
-#       each of the ten repositories.
+#       each of the eleven repositories.
 # WHY : Alternatives Considered: creating the repositories with ad-hoc `aws ecr create-repository`
 #       calls. Rejected because Terraform would then discover unmanaged resources on the full plan,
 #       and because those repositories would carry none of the scan-on-push, KMS encryption or
@@ -1431,8 +1463,8 @@ aws ecr get-login-password --region "<aws-region>" \
 #       lookup derives from.
 # WHY : Assumptions: `ui` is deliberately EXCLUDED from the digest map. The browser bundle is
 #       published to S3 by Step 6 and its image runs no ECS task, so a digest for it would configure
-#       nothing -- and `image_digests` validates its keys against the nine artifacts that do run as
-#       tasks, so including `ui` fails the plan with a message naming it.
+#       nothing -- and `image_digests` validates its keys against the ten it admits, the nine that
+#       run as tasks plus the mirrored collector, so including `ui` fails the plan naming it.
 # WHY : Trade-offs: this rebuilds images that services-ci.yml and ui-ci.yml already validated. The
 #       deployment rebuild is the artifact that actually ships; the review-time build proves the
 #       Dockerfiles before any account credential exists.
@@ -1470,7 +1502,8 @@ printf '%s\n' "$digests" | jq -e 'length == 9'
 ```
 
 ```bash
-# WHAT: hands the nine captured digests to Terraform as the `image_digests` input.
+# WHAT: merges the collector digest Step 2b captured into the nine task digests read back above, and
+#       hands the resulting map to Terraform as the `image_digests` input.
 # WHY : Assumptions: this is the variable `infra/envs/<env>/variables.tf` declares for exactly this
 #       purpose -- any artifact named in it is deployed BY DIGEST instead of by the mutable tag, and
 #       `infra/modules/ecs-service` refuses a mutable tag outright in production, so an incomplete
@@ -1478,10 +1511,17 @@ printf '%s\n' "$digests" | jq -e 'length == 9'
 # WHY : Assumptions: the value is exported as JSON because the variable's type is `map(string)`; each
 #       value is validated against `^sha256:[a-f0-9]{64}$`, which is exactly what the registry
 #       returned above, so a truncated or mis-copied digest fails at plan rather than at task start.
+# WHY : Assumptions: the merge is conditional on `collector_digest` being set, so this export is
+#       correct whether or not Step 2b has run: without it the map is the nine task artifacts and each
+#       root composes the sidecar reference from the pinned mirror tag instead, which both roots
+#       accept. With it the map is the complete ten the roots admit. The merge is HERE rather than in
+#       Step 2b because this line assigns the whole variable, so anything exported earlier would be
+#       discarded by it.
 # WHY : Trade-offs: `image_tag` is still set (Step 2a) even though every task runs by digest. It is
 #       what the push above tagged, and the tag is how an operator finds the image again in the
 #       registry; the digest is what the task definition names.
-export TF_VAR_image_digests="$digests"
+export TF_VAR_image_digests="$(jq -ec --arg collector "${collector_digest:-}" '
+  if $collector == "" then . else . + {"aws-otel-collector": $collector} end' <<<"$digests")"
 ```
 
 The ECR module enables scan-on-push, so inspect each repository's scan findings before the full apply
@@ -1529,7 +1569,7 @@ cannot disagree with the commit being deployed. A configured environment therefo
 | `CARDDEMO_ALB_CERTIFICATE_ARN` | `alb_certificate_arn` | Regional ACM ARN covering `internal_service_domain_name` |
 | `CARDDEMO_INTERNAL_SERVICE_DOMAIN_NAME` | `internal_service_domain_name` | Bare DNS name the ALB certificate covers |
 | `CARDDEMO_CLOUDFRONT_ACM_CERTIFICATE_ARN` | `cloudfront_acm_certificate_arn` | Must be issued in **us-east-1** |
-| `CARDDEMO_CLOUDFRONT_ALIASES_JSON` | `cloudfront_aliases` | JSON list, e.g. `["app.example.com"]`; must be non-empty |
+| `CARDDEMO_CLOUDFRONT_ALIASES_JSON` | `cloudfront_aliases` | JSON list of bare DNS names, e.g. `["app.example.com"]`. Must be non-empty **and must include at least one EXACT (non-wildcard) name** -- `["app.example.com", "*.example.com"]` is accepted, `["*.example.com"]` alone is refused by both roots. The **first** exact name becomes the browser origin the root allows on the HTTP API [`infra/envs/<env>/main.tf`, `local.spa_origin`], and an HTTP API cannot be given a wildcard `Origin` without becoming callable from any page, so a wildcard-only list has no origin to derive and is rejected at the root naming that requirement [`infra/envs/dev/variables.tf` L857-L860 and its `prod` twin] |
 | `CARDDEMO_GITHUB_OIDC_PROVIDER_ARN` | `github_oidc_provider_arn` | Output of `infra/bootstrap`, created once per account |
 | `CARDDEMO_PERMISSIONS_BOUNDARY_ARN` | `permissions_boundary_arn` | Organisation IAM guardrail |
 | `CARDDEMO_MASK_HMAC_SECRET_ARN` | `mask_hmac_secret_arn` | ARN of the masking HMAC secret. The secret's **value** is the operator's to create and must be canonical standard base64 of at least 32 random bytes -- see the note below |

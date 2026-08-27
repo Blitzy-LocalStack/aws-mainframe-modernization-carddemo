@@ -799,7 +799,7 @@ public class Transaction {
      * plan's section 0.4.1.9 masking discipline is the reason it is closed here. Note that the
      * exposure is the retained log itself and does NOT depend on this module opening a request path:
      * {@code services/batch-service/pom.xml} declares both {@code spring-boot-starter-actuator} and
-     * {@code spring-boot-starter-web} so that the container can answer the image health probe, and
+     * {@code spring-boot-starter-web} so that a health read taken inside the task is answerable, and
      * this rendering would be just as durable if it declared neither. What is given up is that a
      * failure diagnosed from this string alone does not name the card; the identifier resolves it
      * against the stored row, and the accessor above returns the full value to a caller that needs

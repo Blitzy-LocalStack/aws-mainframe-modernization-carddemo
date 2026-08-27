@@ -172,12 +172,24 @@ sections 0.2.1.4 and 0.9.3 make centralised metrics *and* tracing a cross-cuttin
 deliverable, and without the sidecar two of the three signals had no destination at
 all -- every service published `/actuator/prometheus` to nothing, and the shared
 OpenTelemetry starter created spans no exporter carried. Both count objections are
-answered rather than ignored: the ten deployables of section 0.4.1.6 are provisioned
+answered rather than ignored, and in both cases the answer is a **ratified deviation
+with the specified count still separately assertable**, not a claim that the count is
+unchanged. The ten deployables of section 0.4.1.6 are provisioned
 from `infra/modules/ecr`'s `repository_names` and gated in CI as an exact set, while
-the collector mirror is a separate `third_party_mirror_repository_names` entry holding
-a third-party image this repository does not build; and `xray` is one of the ten
-interface endpoints `infra/modules/network` validates rather than a ninth beside
-eight. What was already kept is unchanged and still the signal every operational
+the collector mirror is the single entry of a separate
+`third_party_mirror_repository_names` input holding
+a third-party image this repository does not build -- so the registry holds **ten
+deployables plus one approved mirror = eleven repositories**, approved in
+[`docs/adr/ADR-002-compute-platform.md`](../../../docs/adr/ADR-002-compute-platform.md)
+§"4. One third-party image is mirrored into the private registry, and the registry therefore holds eleven repositories". And `xray` is one of
+the **two approved additions** declared by `infra/modules/network`'s
+`approved_additional_interface_endpoint_services`, beside the exact eight of section
+0.4.1.9 held in `interface_endpoint_services` -- **8 specified + 2 approved = 10**
+endpoints, approved in
+[`docs/adr/ADR-008-security-and-identity.md`](../../../docs/adr/ADR-008-security-and-identity.md)
+§"Formal approval: two interface endpoints beyond the specification's eight", where the
+refused alternative and the recurring per-availability-zone cost of each are recorded.
+What was already kept is unchanged and still the signal every operational
 procedure reads: container logs in this module's own log group -- the collector writes
 its own diagnostics there too, under its own stream prefix -- `common-lib`'s
 `MetricsConfig` common tags, and end-to-end request correlation through

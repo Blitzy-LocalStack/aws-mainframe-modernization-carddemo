@@ -567,10 +567,12 @@ jobs:
           Returns:
               None. Successful completion lets the workflow step exit zero.
           Raises:
-              AssertionError: If a service's application.yml, its Dockerfile or either
+              AssertionError: If a service's application.yml does not resolve
+                  sslrootcert to the required anchor, if its Dockerfile or either
                   environment root names a different path, if a Dockerfile does not
-                  install the bundle at all, or if the two pinned bundle digests in the
-                  repository disagree.
+                  install the bundle at all, if the two pinned bundle digests in the
+                  repository disagree, or if the resolver's own self-test does not
+                  reproduce every expected verdict.
               OSError: If any of the read paths is absent, which is a moved file rather
                   than a contract defect and is left to surface as itself.
           """
@@ -592,10 +594,185 @@ jobs:
           ETL_ANCHOR = "/etc/ssl/certs/aws-rds-global-bundle.pem"
           SCRATCH = "/tmp/carddemo-rds-ca-bundle.pem"
 
+          # Assumptions: the anchor is stated by exactly this declaration text -- the
+          #   environment variable a deployment overrides with, defaulting to the path every
+          #   service image installs the verified bundle at. It is assembled by concatenation
+          #   rather than written as an f-string so that the two brace characters never sit
+          #   adjacent in this file: a doubled opening brace is workflow expression syntax,
+          #   and a Python f-string is the one construct that produces it here by accident.
+          REQUIRED_DEFAULT = "${CARDDEMO_DB_SSL_ROOT_CERT:" + SERVICE_ANCHOR + "}"
+
+          # Assumptions: a value that is a single reference to a LOWER-CASE dotted property is
+          #   the only indirection this gate follows. Constraining the shape that way is what
+          #   keeps an environment-variable reference -- upper snake case, resolved by the
+          #   platform and not by another key in the same document -- from being mistaken for
+          #   an indirection and silently accepted without its default being read.
+          INDIRECTION = re.compile(r"^\$\{([a-z][a-z0-9._-]*)\}$")
+
+
+          def scalar_paths(document):
+              """Flatten one configuration document into dotted paths against raw scalar text.
+
+              Parameters:
+                  document: The whole text of one application.yml, as read from disk.
+              Returns:
+                  A dict mapping each dotted property path to the raw text declared for it,
+                  unresolved: a placeholder is returned as written, which is the whole point of
+                  reading the file rather than starting a context.
+              Raises:
+                  Nothing. A line this parser does not recognise contributes no path, because a
+                  document is being surveyed rather than validated here.
+              """
+              # Alternatives Considered: parsing with PyYAML, which would remove this function
+              #   entirely. Rejected because nothing else in this repository's CI imports a
+              #   third-party module, so adopting one here would make a gate that reads files
+              #   depend on a runner image shipping a library -- a dependency whose absence
+              #   would present as this gate failing rather than as a missing package.
+              # Assumptions: the documents are single-document, comment-annotated maps indented
+              #   with spaces, and every value this gate reads is a plain scalar on the key's own
+              #   line. A block scalar's body can contribute a spurious deeper path, which is
+              #   harmless: paths are looked up by exact name, and a deeper entry is popped off
+              #   the stack before any shallower key is recorded.
+              flattened = {}
+              stack = []
+              for line in document.splitlines():
+                  stripped = line.strip()
+                  if not stripped or stripped.startswith("#") or stripped.startswith("- "):
+                      continue
+                  matched = re.match(r"^( *)([A-Za-z0-9_.-]+):(?: +(.*))?$", line)
+                  if matched is None:
+                      continue
+                  indent = len(matched.group(1))
+                  while stack and stack[-1][0] >= indent:
+                      stack.pop()
+                  stack.append((indent, matched.group(2)))
+                  value = matched.group(3)
+                  if value is not None and value.strip():
+                      flattened[".".join(name for _, name in stack)] = value.strip()
+
+              return flattened
+
+
+          def resolve_trust_anchor(document):
+              """Decide whether one configuration document states the required trust anchor.
+
+              Parameters:
+                  document: The whole text of one application.yml, as read from disk.
+              Returns:
+                  A (accepted, detail) tuple. accepted is True when every sslrootcert
+                  declaration in the document states REQUIRED_DEFAULT, either directly or
+                  through one level of lower-case dotted property indirection whose own
+                  declaration carries that default. detail names what was read, so a rejection
+                  can say which of the two forms was attempted and where it stopped.
+              Raises:
+                  Nothing. A document that states nothing usable is REPORTED rather than raised
+                  on, so the caller adds the service name to one message.
+              """
+              flattened = scalar_paths(document)
+              declared = [
+                  (path, value)
+                  for path, value in flattened.items()
+                  if path.rsplit(".", 1)[-1] == "sslrootcert"
+              ]
+              if not declared:
+                  return (False, "no sslrootcert declaration was found at all")
+
+              for path, value in declared:
+                  if value == REQUIRED_DEFAULT:
+                      continue
+                  # Refactoring Rationale: this branch is the whole of the fix. The assertion
+                  #   here was a substring test for the direct form, which reference-service
+                  #   fails while being correct: it declares sslrootcert as a reference to
+                  #   carddemo.database.ssl.root-cert so that its Hikari map and the separate
+                  #   Flyway migration data source in its own DataSourceConfig cannot drift onto
+                  #   two literals, and that property carries the required default. Following one
+                  #   level of indirection reads the same fact the direct form states, and reads
+                  #   it from the document rather than from a list of services excused the check.
+                  indirect = INDIRECTION.match(value)
+                  if indirect is None:
+                      return (False, f"{path} declares {value}, which is neither form")
+                  target = indirect.group(1)
+                  if target not in flattened:
+                      return (False, f"{path} names {target}, which this document does not declare")
+                  if flattened[target] != REQUIRED_DEFAULT:
+                      return (False, f"{path} resolves through {target} to {flattened[target]}")
+
+              return (True, "; ".join(f"{path} -> {value}" for path, value in declared))
+
+
+          # Assumptions: the resolver is exercised against synthetic documents BEFORE it is
+          #   pointed at the repository, because a resolver that accepts everything would report
+          #   this contract as holding while it had stopped being checked at all. That failure
+          #   mode is specific to the change that introduced the resolver: the assertion it
+          #   replaced could only ever be too strict, whereas a parser can be too permissive. The
+          #   two rejecting cases are the ones that matter -- an indirection reaching a DIFFERENT
+          #   anchor, and one reaching a declaration with no default for the platform to override.
+          INDIRECT_DECLARATION = "      root-cert: " + REQUIRED_DEFAULT + "\n"
+          SELF_TEST = (
+              (
+                  "direct default is accepted",
+                  "spring:\n  datasource:\n    hikari:\n      data-source-properties:\n"
+                  + "        sslrootcert: " + REQUIRED_DEFAULT + "\n",
+                  True,
+              ),
+              (
+                  "one level of indirection to a correct default is accepted",
+                  "spring:\n  datasource:\n    hikari:\n      data-source-properties:\n"
+                  + "        sslrootcert: ${carddemo.database.ssl.root-cert}\n"
+                  + "carddemo:\n  database:\n    ssl:\n" + INDIRECT_DECLARATION,
+                  True,
+              ),
+              (
+                  "indirection to a DIFFERENT anchor is rejected",
+                  "spring:\n  datasource:\n    hikari:\n      data-source-properties:\n"
+                  + "        sslrootcert: ${carddemo.database.ssl.root-cert}\n"
+                  + "carddemo:\n  database:\n    ssl:\n"
+                  + "      root-cert: ${CARDDEMO_DB_SSL_ROOT_CERT:/etc/ssl/certs/other.pem}\n",
+                  False,
+              ),
+              (
+                  "indirection to a declaration with NO default is rejected",
+                  "spring:\n  datasource:\n    hikari:\n      data-source-properties:\n"
+                  + "        sslrootcert: ${carddemo.database.ssl.root-cert}\n"
+                  + "carddemo:\n  database:\n    ssl:\n"
+                  + "      root-cert: ${CARDDEMO_DB_SSL_ROOT_CERT}\n",
+                  False,
+              ),
+              (
+                  "indirection to a property the document does not declare is rejected",
+                  "spring:\n  datasource:\n    hikari:\n      data-source-properties:\n"
+                  + "        sslrootcert: ${carddemo.database.ssl.root-cert}\n",
+                  False,
+              ),
+              (
+                  "a direct value naming a different path is rejected",
+                  "spring:\n  datasource:\n    hikari:\n      data-source-properties:\n"
+                  + "        sslrootcert: /etc/ssl/certs/other.pem\n",
+                  False,
+              ),
+              (
+                  "a document declaring no sslrootcert at all is rejected",
+                  "spring:\n  datasource:\n    hikari:\n      data-source-properties:\n"
+                  + "        sslmode: verify-full\n",
+                  False,
+              ),
+          )
+
+          for label, synthetic, expected in SELF_TEST:
+              accepted, detail = resolve_trust_anchor(synthetic)
+              assert accepted is expected, (
+                  f"trust-anchor resolver self-test failed: {label}"
+                  f" (accepted={accepted}, detail={detail})"
+              )
+          print(f"Trust-anchor resolver self-test: PASS ({len(SELF_TEST)} cases)")
+
           for service in SERVICES:
               config = Path(f"services/{service}/src/main/resources/application.yml").read_text()
-              assert f"sslrootcert: ${{CARDDEMO_DB_SSL_ROOT_CERT:{SERVICE_ANCHOR}}}" in config, (
-                  f"{service}: application.yml must default sslrootcert to {SERVICE_ANCHOR}"
+              accepted, detail = resolve_trust_anchor(config)
+              assert accepted, (
+                  f"{service}: application.yml must resolve sslrootcert to {SERVICE_ANCHOR},"
+                  f" either as {REQUIRED_DEFAULT} or through one lower-case dotted property"
+                  f" whose own declaration carries that default. Read: {detail}"
               )
 
               dockerfile = Path(f"services/{service}/Dockerfile").read_text()

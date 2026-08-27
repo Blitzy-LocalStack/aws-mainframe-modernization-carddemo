@@ -10,7 +10,7 @@
  * <p>Refactoring Rationale: this section opened by declaring every inventory here a target contract
  * rather than a measurement, and recorded that {@code TimestampFormatter} was the only production
  * class existing anywhere in the shared kernel. The second half is long superseded -- the kernel
- * now holds production classes in every one of its ten subpackages -- and once it was, the
+ * now holds production classes in every one of its eleven subpackages -- and once it was, the
  * disclaimer did active harm: it instructed a reader to distrust an inventory that had become
  * accurate, so a genuine discrepancy in this file would have read as the expected condition rather
  * than as a defect.</p>

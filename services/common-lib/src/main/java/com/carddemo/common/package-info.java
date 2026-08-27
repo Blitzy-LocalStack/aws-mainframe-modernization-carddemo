@@ -75,19 +75,41 @@
  *       production classes: {@code OnlineWriteGate},
  *       {@code OnlineWritesDisabledException},
  *       {@code OnlineWriteGateInterceptor}, {@code OnlineWriteGateExempt}.</li>
+ *   <li><b>{@code config}</b> -- the startup contract a deployment is held to
+ *       before a service does any work: the environment variables its active
+ *       configuration reads, checked once the configuration is loaded and named
+ *       when absent, the refusal that carries them, and the database identity the
+ *       schema migrator assumes on the connections it creates objects through.
+ *       Five production classes:
+ *       {@code RequiredEnvironmentVariablePostProcessor},
+ *       {@code MissingEnvironmentVariablesException},
+ *       {@code FlywayOwnerRoleCallback},
+ *       {@code FlywayOwnerRoleDataSourceCustomizer},
+ *       {@code MigrationOwnerRole}.</li>
  * </ul>
  *
- * <p>Trade-offs: those ten subpackages are the whole of it. This package has no
- * application-layer subpackage at all -- no controller, service, repository,
- * domain, transfer-object or mapper package, and no configuration package
- * either. {@code MetricsConfig} consequently sits under {@code observability},
- * beside the concern it configures, rather than in a configuration package of
- * its own, so all ten subpackage names are contracts rather than nine contracts
- * and one bucket.
+ * <p>Trade-offs: those eleven subpackages are the whole of it. This package has
+ * no application-layer subpackage at all -- no controller, service, repository,
+ * domain, transfer-object or mapper package. {@code MetricsConfig} sits under
+ * {@code observability}, beside the concern it configures, rather than in
+ * {@code config}, so all eleven subpackage names are contracts rather than ten
+ * contracts and one bucket.
+ *
+ * <p>Refactoring Rationale: this paragraph said there was no configuration
+ * package either, and gave the reason above for MetricsConfig's placement. The
+ * reason is unchanged and that class has not moved; what changed is that a
+ * contract arrived which belongs to no concern in the module. The check that a
+ * deployment supplied the environment variables its configuration reads is not a
+ * money rule, a codec, a web filter or an observability decision, and it has to
+ * be settled before the application context refreshes, so there is no concern to
+ * sit beside. {@code config} is therefore named for that subject -- the startup
+ * contract -- and not for a mechanism: a class whose only claim to membership is
+ * a name ending in {@code Config} still does not belong in it, which is what
+ * keeps it from becoming the bucket this paragraph warned against.
  *
  * <p>Assumptions: the root holds exactly one production class,
  * {@code CardDemoCommonAutoConfiguration}, and it is here rather than in any of
- * the ten because it registers components from FOUR of them -- the correlation
+ * the eleven because it registers components from FOUR of them -- the correlation
  * filter and the cursor-token signer from {@code web}, the meter filter from
  * {@code observability}, the codec module from {@code money} and the error
  * advice from {@code error} -- so placing it in one would put that package in
@@ -103,10 +125,10 @@
  *
  * <h2>The closed inventory</h2>
  *
- * <p>The module holds <b>48 production classes</b> in a root and ten
- * subpackages, each carrying one charter file, for <b>59</b> compilation units. The
+ * <p>The module holds <b>53 production classes</b> in a root and eleven
+ * subpackages, each carrying one charter file, for <b>65</b> compilation units. The
  * table is the closed set: a class belonging to this module belongs to exactly one
- * of these eleven rows, and a proposed addition that fits none of them does not belong
+ * of these twelve rows, and a proposed addition that fits none of them does not belong
  * in the shared kernel at all. The set is deliberately FLAT: there is no nested
  * subpackage, and {@code SharedKernelInventoryTest} re-derives this table one level
  * deep, so a nested package would be reported as drift rather than folded silently
@@ -125,23 +147,34 @@
  * common.time                            1         1                   2
  * common.validation                      2         1                   3
  * common.control                         4         1                   5
+ * common.config                          5         1                   6
  * </pre>
  *
  * <p>Read down the table. Cross-check by production class:
- * 1 + 2 + 7 + 7 + 5 + 6 + 9 + 4 + 1 + 2 + 4 = 48, the root contributing one. Cross-check by
- * compilation unit: 2 + 3 + 8 + 8 + 6 + 7 + 10 + 5 + 2 + 3 + 5 = 59. Both totals agree,
- * and this file is one of the eleven charters. Each sum is kept whole on one line
+ * 1 + 2 + 7 + 7 + 5 + 6 + 9 + 4 + 1 + 2 + 4 + 5 = 53, the root contributing one. Cross-check by
+ * compilation unit: 2 + 3 + 8 + 8 + 6 + 7 + 10 + 5 + 2 + 3 + 5 + 6 = 65. Both totals agree,
+ * and this file is one of the twelve charters. Each sum is kept whole on one line
  * so that it can be checked by eye and matched by a search without a line break
  * splitting it.
  *
- * <p>Assumptions: the authoritative figures are <strong>48 production classes
- * across 10 subpackages and the root, in 59 compilation units, of which 11 are charters</strong>
+ * <p>Assumptions: the authoritative figures are <strong>53 production classes
+ * across 11 subpackages and the root, in 65 compilation units, of which 12 are charters</strong>
  * -- this file among them. They are counted subpackage by subpackage, and both
  * cross-checks above re-derive them independently, by class and by compilation
  * unit. The total and the breakdown are stated together for that reason: a bare
  * total invites a reader to trust it, whereas a breakdown lets a reader re-derive
- * it and reject any figure that does not add up. Any class count for this package
- * other than 47 fails both sums and is wrong.
+ * it and reject any figure that does not add up. Any figure for this module other
+ * than 53 production classes fails both sums and is wrong.
+ *
+ * <p>Refactoring Rationale: that last sentence read "any class count for this package
+ * other than 49", a figure which matched no revision of the table -- not the 44 it
+ * held before {@code control} and {@code config} arrived, and not the 50 it held
+ * after -- and whose subject was ambiguous between the module and the root package.
+ * It is restated against the measured module total rather than incremented, because
+ * incrementing a figure whose referent is unclear preserves the ambiguity and hides
+ * the correction in a diff that looks like arithmetic. The noun is now one this
+ * module's own drift test measures, so the sentence is checked from here on rather
+ * than merely consistent.
  *
  * <p>Refactoring Rationale: this table has now been wrong twice in the same way, and
  * the second time is why it is no longer maintained by hand. The first revision said
@@ -177,8 +210,8 @@
  * <h2>Where this inventory exceeds the plan, and why each addition is here</h2>
  *
  * <p>Assumptions: the migration plan's section 0.4.1.2 names <b>17</b> shared-kernel
- * production classes by path, and the closed inventory above admits <b>48</b>. The
- * difference is 31 deliberate additions rather than drift, and it is enumerated here
+ * production classes by path, and the closed inventory above admits <b>53</b>. The
+ * difference is 36 deliberate additions rather than drift, and it is enumerated here
  * because a count that exceeds the plan's without saying so reads as either an
  * oversight or an unrecorded scope change. Each addition below is in the shared
  * kernel for the same reason the plan's own 17 are: it carries a contract that two or
@@ -298,6 +331,38 @@
  *       consumer that owns that queue renders this answer while the layout stays
  *       described in the same place as the request fields, the framing and the
  *       diagnostic the two reference programs declare identically.</li>
+ *   <li>{@code config.RequiredEnvironmentVariablePostProcessor} -- refuses a start
+ *       whose configuration reads an environment variable nothing supplies, naming
+ *       every one of them and the property it feeds. It is shared because the defect
+ *       is shared: all eight services state their deployment inputs as bare
+ *       placeholders, Spring Boot binds an unresolvable one as literal text rather
+ *       than failing, and a per-service check would be eight lists to keep in step
+ *       with eight configuration files.</li>
+ *   <li>{@code config.MissingEnvironmentVariablesException} -- the refusal itself,
+ *       carrying the whole set in one message. It is shared for the same reason as
+ *       the check that raises it: an operator reading a failed deployment should meet
+ *       one sentence and one vocabulary whichever service failed.</li>
+ *   <li>{@code config.FlywayOwnerRoleCallback} -- assumes the owning role on every
+ *       connection the schema migrator opens, so that the objects a migration creates
+ *       belong to the role that owns the schema rather than to the identity that ran
+ *       the migration. It is shared because seven of the eight services migrate a
+ *       schema each under exactly this arrangement, and a per-service copy of a
+ *       statement that changes the current role would be seven places for one of them
+ *       to stop validating the role name it interpolates.</li>
+ *   <li>{@code config.FlywayOwnerRoleDataSourceCustomizer} -- puts that owning role in
+ *       force on the JDBC connection before the migration engine wraps it, which is
+ *       the only position from which the ownership survives: the engine records the
+ *       session's role when it wraps a connection and restores that recorded role
+ *       around every schema-history write, so a role assumed any later is undone
+ *       before the first object is created. It is shared for the same reason the
+ *       callback is, and it sits beside it so a reader meets both halves of one
+ *       control in one place.</li>
+ *   <li>{@code config.MigrationOwnerRole} -- the configured role name, validated
+ *       against a strict identifier allow-list and rendered once as the quoted
+ *       statement that assumes it. It exists because two collaborators need the same
+ *       value in the same two forms, and an allow-list standing between configuration
+ *       and a privileged statement is the last thing that should be restated in two
+ *       classes.</li>
  * </ul>
  *
  * <p>Trade-offs: the alternative to naming these 27 here was to leave the plan's 17
@@ -427,9 +492,9 @@
  * absence is a decision rather than an oversight, and it rests on two
  * independent grounds.
  *
- * <p>Assumptions: first, the count canon above admits exactly eleven charter
- * files, every one of them at this package or deeper. A twelfth would break the
- * 59-compilation-unit total, and authoring an artifact the migration plan does
+ * <p>Assumptions: first, the count canon above admits exactly twelve charter
+ * files, every one of them at this package or deeper. A thirteenth would break the
+ * 65-compilation-unit total, and authoring an artifact the migration plan does
  * not call for falls outside the scope this tree is held to. Second, the
  * ruleset's charter-presence check is a file-set check: it fires only for a
  * directory that contains a compilation unit the audit actually processed.
@@ -444,7 +509,7 @@
  * content would be a sentence pointing at this one, because a charter that
  * defers is worse than no charter: it has to be kept in step with the file it
  * defers to, and it invites the next author to add a third. The count canon
- * above is the arithmetic guard on that: eleven charters, not thirteen, so a later
+ * above is the arithmetic guard on that: twelve charters, not fourteen, so a later
  * addition at either directory shows up as a broken total rather than as a
  * judgement call.
  *
@@ -652,7 +717,7 @@
  * layer, its single-program integration layer, its golden-master end-to-end
  * layer, and its fixtures, goldens, helpers and mocks. This module's own test
  * tree is {@code services/common-lib/src/test}, and it holds the unit tests and
- * the architecture rules for the 48 production classes this charter enumerates.
+ * the architecture rules for the 53 production classes this charter enumerates.
  * Neither substitutes for the other, and work on one does not modify the other.
  *
  * <p>Assumptions: the oracle suite covers batch flows. Three of the contracts

@@ -19,7 +19,7 @@
 #   absent rather than restoring it.
 #
 # Parameters:
-#   None. This file declares no input. All thirteen module inputs are declared,
+#   None. This file declares no input. All fourteen module inputs are declared,
 #   typed, described and validated in variables.tf and are consumed by main.tf.
 #   Three outputs nevertheless originate in an input rather than in a created
 #   resource: vpc_cidr_block reads the address space back off aws_vpc.this so
@@ -281,12 +281,14 @@ output "nat_gateway_public_ips" {
 #   the subnet outputs above. Rejected because a consumer wanting one specific
 #   endpoint - observability attaching an alarm to a single service's path -
 #   would then depend on that service's position within
-#   var.interface_endpoint_services, and adding a further service would silently
+#   local.interface_endpoint_services, and adding a further service would silently
 #   renumber every position after it. Keying by the short service name lets a
 #   consumer ask for the endpoint it actually means, and it is why widening the
-#   set from eight names to ten changed nothing for any consumer of this output.
+#   set from eight names to ten changed nothing for any consumer of this output --
+#   and why splitting the ten across two inputs, the specified eight and the two
+#   approved additions, changed nothing either.
 output "interface_vpc_endpoint_ids" {
-  description = "Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as var.interface_endpoint_services is written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states, ssm, xray and cognito-idp - ten keys, the same ten that variable's exact-set validation admits. No consumer reads it today - neither a sibling module nor either environment root - and it is published because attaching a metric, an alarm or a narrower endpoint policy to one specific endpoint needs that endpoint's identity, which rediscovering by service name from a data source would duplicate. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC."
+  description = "Map from short AWS service name to that service's interface VPC endpoint identifier, keyed exactly as the two endpoint inputs are written: ecr.api, ecr.dkr, logs, secretsmanager, kms, sqs, states and ssm from var.interface_endpoint_services, plus cognito-idp and xray from var.approved_additional_interface_endpoint_services - ten keys, the eight of specification section 0.4.1.9 and the two approved additions, each input's exact-set validation admitting exactly its own half. No consumer reads it today - neither a sibling module nor either environment root - and it is published because attaching a metric, an alarm or a narrower endpoint policy to one specific endpoint needs that endpoint's identity, which rediscovering by service name from a data source would duplicate. Each endpoint places an ENI in the private application subnets, which is how a task reaches these services without egressing the VPC."
   value = {
     for service, endpoint in aws_vpc_endpoint.interface :
     service => endpoint.id

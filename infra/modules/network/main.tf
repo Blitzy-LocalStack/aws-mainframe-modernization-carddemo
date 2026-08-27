@@ -23,15 +23,20 @@
 #   that cannot exist.
 #
 # Parameters:
-#   All thirteen inputs are declared, typed, described and validated in
+#   All fourteen inputs are declared, typed, described and validated in
 #   variables.tf; this file only consumes them. name_prefix (string) and
 #   environment (string) compose every resource name. vpc_cidr (string),
 #   az_count (number) and subnet_newbits (number) drive the address arithmetic
-#   in locals. interface_endpoint_services (set(string)) drives the
-#   interface-endpoint for_each, and it is the ONLY way a dependency becomes
+#   in locals. interface_endpoint_services (set(string)) and
+#   approved_additional_interface_endpoint_services (set(string)) are unioned in
+#   locals into local.interface_endpoint_services, which drives the
+#   interface-endpoint for_each; that union is the ONLY way a dependency becomes
 #   reachable from the application tier -- the identity-provider egress input that
 #   used to open TCP 443 to any public destination is withdrawn, so this module
-#   declares no internet-egress rule at all. app_container_port (number) and
+#   declares no internet-egress rule at all. The two inputs are separate because
+#   the first is the eight services specification section 0.4.1.9 fixes and the
+#   second is the approved deviation from that number, so each count is asserted
+#   in its own right rather than only described. app_container_port (number) and
 #   database_port (number) are consumed by security-group rules and republished
 #   by outputs.tf so a root passes one value to both a rule and its listener.
 #   tags (map(string)) merges into every taggable resource.
@@ -53,7 +58,7 @@
 #   zones than az_count; the VPC carries a precondition so that surfaces as a
 #   targeted diagnostic rather than a slice error. Planning also fails when
 #   vpc_cidr is too small to carry 3 * az_count subnets at subnet_newbits, and
-#   when a name in interface_endpoint_services is not offered in the Region.
+#   when a name in either endpoint input is not offered in the Region.
 #   Applying can fail when the caller-supplied KMS key policy does not permit
 #   the regional CloudWatch Logs service to use the key; the kms module owns
 #   that policy and this module deliberately accepts only the key ARN.
@@ -201,6 +206,45 @@ locals {
   #       endpoint, which is the failure this arrangement exists to prevent; the exact-set
   #       validation on that variable is what keeps the name it must match from moving.
   identity_provider_endpoint_service = "cognito-idp"
+
+  # WHY : Assumptions: the endpoint inventory is composed HERE, once, from the two
+  #       inputs that declare it, and every consumer in this file and in outputs.tf
+  #       reads this local rather than either variable. The two are separate inputs
+  #       because they carry different claims -- var.interface_endpoint_services is
+  #       the exact eight specification section 0.4.1.9 enumerates, and
+  #       var.approved_additional_interface_endpoint_services is the approved
+  #       deviation from that number, ratified in
+  #       docs/adr/ADR-008-security-and-identity.md with the cost each addition
+  #       carries -- and they are unioned back together at this single point because
+  #       every endpoint needs IDENTICAL treatment: the same private DNS, the same
+  #       subnets, the same security group, the same account-scoped policy, and the
+  #       same key in the published identifier map. Unioning once is what keeps the
+  #       split invisible to every consumer while leaving both counts assertable.
+  #       Refactoring Rationale: this file read var.interface_endpoint_services
+  #       directly when that one input carried all ten names, which left the
+  #       specification's eight asserted nowhere -- the two additions were argued in
+  #       prose and no validation, gate or generated document could tell eight from
+  #       ten. The provisioned set is unchanged; what changed is that the deviation is
+  #       now a declaration rather than a comment.
+  #       Alternatives Considered: a single input holding ten names plus a comment
+  #       naming which two were additions. Rejected because that is exactly the shape
+  #       that was delivered, and an eleventh endpoint added to it would have read as
+  #       one more entry in a list that already differed from the specification.
+  #       Assumptions: setunion DEDUPLICATES, so a name appearing in both inputs
+  #       yields one endpoint rather than a duplicate resource address. That cannot
+  #       happen while both defaults hold -- the two exact-set validations are
+  #       disjoint by construction -- and the union is nonetheless the safe operator
+  #       for the same reason infra/modules/ecr uses it for its own two inventories.
+  #       Trade-offs: the local shares its name with one of the variables it reads,
+  #       so a reader has to notice whether an expression says local. or var.. That is
+  #       accepted because the name states what the value IS, and the two consumers
+  #       that must not read a variable directly -- the endpoint for_each below and the
+  #       derived endpoint-policy action list -- are the two places the distinction is
+  #       load-bearing.
+  interface_endpoint_services = setunion(
+    var.interface_endpoint_services,
+    var.approved_additional_interface_endpoint_services,
+  )
 
   # WHY : Assumptions: min prevents slice itself from failing before the VPC's
   #       precondition can emit the targeted insufficient-zone diagnostic.
@@ -1067,7 +1111,7 @@ data "aws_iam_policy_document" "interface_endpoint" {
 
     # WHY : Refactoring Rationale: this list was `["*"]` and is now one
     #       service-prefix wildcard per endpointed service, DERIVED from
-    #       var.interface_endpoint_services rather than written out. Two reasons,
+    #       local.interface_endpoint_services rather than written out. Two reasons,
     #       and the second is why it is derived rather than literal.
     #       First, `actions = ["*"]` beside `resources = ["*"]` is the
     #       full-administrative-privilege shape, and the repository's material
@@ -1082,6 +1126,12 @@ data "aws_iam_policy_document" "interface_endpoint" {
     #       with it, and an endpoint removed takes its prefix away, with no second
     #       edit to remember and no possibility of a policy that permits a service
     #       no endpoint serves.
+    #       Assumptions: the collection read is the UNION local rather than either
+    #       input, so the two approved additions bring their own prefixes too --
+    #       cognito-idp and xray. Reading var.interface_endpoint_services here
+    #       instead would produce a document permitting only the specification's
+    #       eight, and the two additions would have working endpoints whose policy
+    #       denied every call they exist to carry.
     #       Assumptions: the split on "." collapses ecr.api and ecr.dkr onto the one
     #       ecr prefix, and toset removes the duplicate, so the set yields nine
     #       prefixes for ten endpoints. That is correct rather than a coincidence
@@ -1097,7 +1147,7 @@ data "aws_iam_policy_document" "interface_endpoint" {
     #       gate-shaped one.
     actions = [
       for service in toset([
-        for name in var.interface_endpoint_services : split(".", name)[0]
+        for name in local.interface_endpoint_services : split(".", name)[0]
       ]) : "${service}:*"
     ]
 
@@ -1134,7 +1184,9 @@ data "aws_iam_policy_document" "interface_endpoint" {
   }
 }
 
-# WHY : Assumptions: each of the ten services in the set has a named consumer in
+# WHY : Assumptions: each of the ten services in the UNION -- the eight of
+#       specification section 0.4.1.9 and the two approved additions -- has a named
+#       consumer in
 #       this system, so the set is exact rather than a convenient round number,
 #       and since the application group carries no internet-egress rule at all a
 #       service ABSENT from this set is not routed through NAT -- it is dropped at
@@ -1146,20 +1198,30 @@ data "aws_iam_policy_document" "interface_endpoint" {
 #       inquiry queues. states is called by reporting-service to start an
 #       on-demand batch execution. ssm is read by the batch tasks for the
 #       read-only flag that brackets the batch window.
-# WHY : Assumptions: the ninth and tenth names are NOT symmetrical, and stating that is the
-#       point of this paragraph. cognito-idp carries the identity-provider calls every
+# WHY : Assumptions: the ninth and tenth names come from a DIFFERENT input, and stating
+#       that is the point of this paragraph. Both are approved additions beyond the
+#       eight specification section 0.4.1.9 enumerates, declared by
+#       var.approved_additional_interface_endpoint_services and ratified in
+#       docs/adr/ADR-008-security-and-identity.md, and both are load-bearing rather
+#       than speculative. cognito-idp carries the identity-provider calls every
 #       service makes -- issuer discovery and the JSON web key set at start-up, and
 #       auth-service's user-pool operations -- so it sits on a start-up path like the first
-#       eight. xray has NO consumer today. services/common-lib pulls
-#       spring-boot-starter-opentelemetry, so spans ARE created and their trace and span
-#       identifiers DO reach the logs through CorrelationIdFilter, but no OTLP exporter
-#       target is configured anywhere in the tree and the collector sidecar that was to
-#       receive them is withdrawn from infra/modules/ecs-service -- so no span is exported.
-#       The endpoint is kept because it is the private path span export will need, and the
-#       absent exporter is registered as an UNRESOLVED gap against the cross-cutting
-#       tracing requirement of AAP sections 0.1.1.2 and 0.9.4 Phase F rather than described
-#       as a delivered capability. Claiming otherwise here would put a working trace path
-#       in the one file a reader checks to find out whether one exists.
+#       eight. xray carries the trace export of the collector sidecar
+#       infra/modules/ecs-service attaches to every task: that sidecar is essential, its
+#       traces pipeline exports through the awsxray exporter, and each application
+#       container is pointed at its loopback OTLP receiver, so spans are created,
+#       collected and exported on this path. Without the endpoint every export attempt
+#       is dropped at the application security group, because this tier has no public
+#       egress rule to fall back on.
+#       Refactoring Rationale: this paragraph recorded xray as having NO consumer, on
+#       the premise that the collector sidecar was withdrawn from
+#       infra/modules/ecs-service and that no OTLP exporter target was configured
+#       anywhere. Both halves have lapsed -- the sidecar is composed with
+#       essential = true and the task definition sets OTEL_TRACES_EXPORTER=otlp
+#       against its loopback receiver -- and the correction matters in this file above
+#       all others: an endpoint recorded as paid-for and unexercised is the entry a
+#       later reviewer removes, and removing it disables trace export for every
+#       workload while every gate stays green.
 # WHY : Refactoring Rationale: cognito-idp was WITHDRAWN from this set for a period on a
 #       finding that was right about the mechanism, and the finding is recorded here
 #       because what answers it sits a few lines below rather than at the endpoint itself.
@@ -1180,13 +1242,17 @@ data "aws_iam_policy_document" "interface_endpoint" {
 #       signed administrative calls, and adds one statement admitting exactly the five
 #       unauthenticated operations by name with no principal condition.
 #       Alternatives Considered: a per-endpoint boolean so a root could disable
-#       one. Rejected because NINE of the ten are on a start-up or transaction
-#       path, so disabling any of those nine substitutes a public path for a
-#       private one silently; xray is the single exception and is covered by the
-#       gap recorded above. variables.tf validates the set as exact instead.
+#       one. Rejected because ALL ten are on a start-up, transaction or telemetry
+#       path, so disabling any of them substitutes a dropped call for a private one
+#       silently -- there is no public fallback in this tier to degrade onto.
+#       variables.tf validates both halves of the set as exact instead.
 #       Trade-offs: interface endpoints are charged per hour per endpoint per
 #       availability zone plus per GB processed, so ten endpoints across three zones fix
-#       the hourly term at thirty endpoint-zone-hours. The per-GB part is largely an offset rather
+#       the hourly term at thirty endpoint-zone-hours: 8 x 3 = 24 for the services
+#       specification section 0.4.1.9 enumerates, plus 2 x 3 = 6 for the two approved
+#       additions. Those six are the quantified price of the approval recorded in
+#       docs/adr/ADR-008-security-and-identity.md, and they buy the removal of an open
+#       443 egress rule from a tier holding cardholder data. The per-GB part is largely an offset rather
 #       than an addition - this traffic stops traversing the NAT gateways, so it
 #       no longer accrues NAT data-processing charges.
 # WHY : Refactoring Rationale: this document exists because ONE shared endpoint policy
@@ -1249,7 +1315,16 @@ data "aws_iam_policy_document" "identity_provider_endpoint" {
 }
 
 resource "aws_vpc_endpoint" "interface" {
-  for_each = var.interface_endpoint_services
+  # WHY : Assumptions: the collection iterated is the UNION local, so one resource
+  #       creates every endpoint in the inventory -- the eight of specification
+  #       section 0.4.1.9 and the two approved additions alike -- and each gets
+  #       identical private DNS, subnets, security group and tagging. Iterating one
+  #       input and adding a second resource for the other was the alternative, and
+  #       it was rejected because it would give the two additions their own
+  #       resource address, their own arguments to keep in step and their own
+  #       drift-prone copy of this block for no gain: the deviation is a matter of
+  #       WHICH names are approved, not of how an approved endpoint is built.
+  for_each = local.interface_endpoint_services
 
   vpc_id = aws_vpc.this.id
 

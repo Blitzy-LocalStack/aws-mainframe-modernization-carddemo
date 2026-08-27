@@ -637,7 +637,16 @@ present ones.
   Rationale: the last two were added to this list rather than left implicit. Tracing
   and identity were the two managed dependencies the endpoint set originally omitted,
   and an enumeration that stops before them is exactly the reading under which the
-  omission looked deliberate. The target egress
+  omission looked deliberate. Those two are also the reason the interface-endpoint
+  count is **ten and not eight**: `interface_endpoint_services` holds the exact eight
+  AAP §0.4.1.9 enumerates and `approved_additional_interface_endpoint_services` holds
+  the two approved additions, the trace-export target and the identity provider, so the
+  provisioned set is **8 specified + 2 approved = 10** and each half is validated as an
+  exact set. The approval, the refused alternative — eight endpoints plus an open egress
+  rule — and the per-availability-zone cost are in
+  [`../adr/ADR-008-security-and-identity.md`](../adr/ADR-008-security-and-identity.md)
+  §"Formal approval: two interface endpoints beyond the specification's eight".
+  The target egress
   path is drawn dashed and scoped: address translation from the private application
   subnets only, never from the data subnets. The network module currently has no
   resource graph, so these are intended absences and paths rather than deployed ones.
@@ -691,6 +700,20 @@ present ones.
   does assume a role by OIDC with no stored credential, so the edge is a real CI path;
   what remains unproven is that it has ever run against a live account, and that is the
   narrower claim this bullet now makes.
+- Assumptions: **the registry node stands for ELEVEN repositories, not ten, and the
+  extra one is approved rather than accidental.** Ten hold the images this repository
+  builds — the eight services, the browser SPA and the ETL — which is the count AAP
+  §0.4.1.6 fixes. The eleventh mirrors a pinned third-party telemetry collector image
+  that this repository does not build, and it exists because the collector runs as an
+  essential sidecar on every task while the application tier has no public egress and
+  Amazon ECR Public is fronted by no interface endpoint — so a task pulling it from the
+  public registry could not start at all. **Ten deployables plus one approved mirror =
+  eleven**, ratified in
+  [`../adr/ADR-002-compute-platform.md`](../adr/ADR-002-compute-platform.md) §"4. One
+  third-party image is mirrored into the private registry, and the registry therefore
+  holds eleven repositories" with the alternatives refused and the recurring cost. The two are declared as separate Terraform inputs in
+  [`../../infra/modules/ecr`](../../infra/modules/ecr) so the specified ten stays
+  assertable on its own, and `.github/workflows/infra-ci.yml` gates both counts.
 
 
 

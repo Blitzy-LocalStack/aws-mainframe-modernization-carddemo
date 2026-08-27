@@ -86,7 +86,9 @@ import org.testcontainers.utility.MountableFile;
  * deployed identity could have issued it. The migrator holds no privilege of its own -- the bootstrap
  * makes it a member of the owner {@code WITH INHERIT FALSE, SET TRUE} -- so the grant below can only
  * succeed by way of the {@code SET ROLE carddemo_account_owner;} statement the module's own
- * {@code spring.flyway.init-sqls} carries, which is precisely the deployed mechanism.
+ * {@code carddemo.database.flyway.owner-role} names, common-lib's
+ * {@code FlywayOwnerRoleDataSourceCustomizer} issues before Flyway wraps a connection and its
+ * {@code FlywayOwnerRoleCallback} re-asserts, which is precisely the deployed mechanism.
  *
  * <p>A test class accepts no parameter, yields no value and raises nothing, so this block carries no
  * parameter, return or exception at-clause. Every member below carries its own.
@@ -276,7 +278,7 @@ class BatchAccountWriteGrantIT {
      * <p>Assumptions: the history row and the table's owner are both read, because either alone would
      * leave the assertion incomplete. A recorded migration says a statement ran; the owner says WHO ran
      * it, and the grant is legal only because that identity owns the object. Reading the owner is also
-     * what would catch the {@code SET ROLE} in {@code spring.flyway.init-sqls} being lost, which would
+     * what would catch the callback's {@code SET ROLE} being lost, which would
      * leave every default-privilege grant in the bootstrap inert.</p>
      *
      * <p>This test takes no parameter and returns no value.</p>

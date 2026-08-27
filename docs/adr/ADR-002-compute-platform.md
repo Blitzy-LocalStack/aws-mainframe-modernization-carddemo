@@ -560,18 +560,57 @@ and is created only when a load balancer is attached, which is the same conditio
 that creates the service at all.
 
 Assumptions: the image's own `HEALTHCHECK` is **not** an ECS health signal, and
-reading it as one mistakes the mechanism. ECS acts on a **task-definition**
-`healthCheck`, and this module deliberately declares none — the rationale is
-recorded at the container definition itself: the command a container health check
-runs must exist inside the image, only each Dockerfile knows what its pinned base
-image ships, and a headless Corretto runtime carries no `curl`. So the authored
-`HEALTHCHECK` instructions — for example
-[`services/batch-service/Dockerfile`](../../services/batch-service/Dockerfile),
-`HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3` against
-`http://127.0.0.1:8080/actuator/health` — are **image metadata**. They are honoured
-by a container runtime that reads them, which is what makes them useful for a local
-`docker run` and for any registry or scanner that reports image health, and they are
-**not** part of ECS's replacement decision.
+reading it as one mistakes the mechanism. ECS evaluates only the **task-definition**
+`healthCheck`; it never reads the instruction baked into an image. The seven
+long-lived service images each carry one anyway — verbatim, from
+[`services/auth-service/Dockerfile`](../../services/auth-service/Dockerfile):
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/usr/bin/curl", "--fail", "--silent", "--show-error", "--insecure", \
+         "--max-time", "4", "--output", "/dev/null", \
+         "https://127.0.0.1:8080/actuator/health"]
+```
+
+and the other six repeat it, `reporting-service` differing only in a
+`--start-period=60s` that matches its longer start-up. Those instructions are
+**image metadata**: they are honoured by a container runtime that reads them, which
+is what makes them useful for a local `docker run` or compose file and for a
+registry or scanner that reports image health, and they are no part of ECS's
+replacement decision.
+
+Assumptions: the **batch image carries no `HEALTHCHECK` at all**, and that absence
+is deliberate rather than an omission. It is a one-shot job — it runs a step and
+exits, in the hundreds of milliseconds for a no-work invocation — so a probe with
+any start period at all can never observe it, and there is nothing for one to add:
+completion is signalled by the **task's exit status**, which is what the
+`ecs:runTask.sync` integration in fact 3 above consumes as the state's result. An
+image probe there would be a second verdict on a container that has already
+finished.
+
+Assumptions: whether a workload also gets a *task-definition* check is the calling
+root's decision, not this module's.
+[`infra/modules/ecs-service/main.tf`](../../infra/modules/ecs-service/main.tf)
+declares a container-level `healthCheck` exactly when `container_health_check_command`
+is supplied and `null` otherwise, and it composes no command of its own — the
+command must exist inside the image, and only the caller that chose the image knows
+what that image ships and which scheme its endpoint answers on. Neither mechanism
+substitutes for the other: an image instruction is never an ECS signal, and a
+task-definition check on a container that exits on purpose reports on a lifetime it
+does not have.
+
+Refactoring Rationale: this passage previously stated that the module "deliberately
+declares none", and cited
+`services/batch-service/Dockerfile` carrying
+`HEALTHCHECK … --start-period=30s …` against `http://127.0.0.1:8080/actuator/health`
+as its example. Both halves were wrong and each was wrong in a way that would have
+been acted on: the module does declare a container health check when the caller
+supplies the command, and the batch Dockerfile no longer carries the instruction —
+nor did it ever carry that command string, whose scheme and start period matched no
+file in the tree. An ADR that cites an instruction which does not exist invites a
+reader to "restore" it onto the one image for which a probe is meaningless, so the
+citation here is copied from a file that does carry it and the batch case is stated
+as the absence it is.
 
 Assumptions: the two offline workloads therefore have no health-driven replacement
 at all, and need none. They are not load-balanced, so there is no target group to
@@ -899,10 +938,14 @@ deployed environment.
 ## Additional Decisions Recorded Here
 
 AAP §0.5.1.13 assigns two further decisions to this record by name, and §0.6.1.1
-closes its resilience discussion by directing the reader here. A third is
+closes its resilience discussion by directing the reader here. **Two** more are
 recorded below as well: the dependency-compatibility decision behind the
-`spring-cloud-aws.version` pin, which belongs with the other two because it is
-the same kind of choice — a version fact that is invisible in a green build.
+`spring-cloud-aws.version` pin, which belongs with the first two because it is
+the same kind of choice — a version fact that is invisible in a green build — and
+the **approval of the one third-party image mirrored into the private registry**,
+which belongs here because it is the container-registry inventory this record owns
+and because it takes the provisioned repository count past the number AAP §0.4.1.6
+fixes. **Four** decisions in total.
 Each is recorded in its own right, because each is a non-obvious choice with an
 alternative that looks reasonable until the fact against it is known.
 
@@ -1235,6 +1278,85 @@ the pin in [`services/pom.xml`](../../services/pom.xml) names both tests beside
 it so whoever raises the Boot version finds the obligation at the point of the
 edit.
 
+### 4. One third-party image is mirrored into the private registry, and the registry therefore holds eleven repositories
+
+**Decision: [`infra/modules/ecr`](../../infra/modules/ecr) provisions
+`aws-otel-collector` as a private mirror alongside the ten deployables, so the
+provisioned inventory is ten deployables plus one approved third-party mirror =
+**eleven** repositories. That exceeds the ten AAP §0.4.1.6 fixes, and this section is
+the ratification that deviation needs.**
+
+**What the mirror is.** One repository, `<name_prefix>-<environment>/aws-otel-collector`,
+holding the AWS Distro for OpenTelemetry collector image that
+[`infra/modules/ecs-service`](../../infra/modules/ecs-service) attaches to every task
+as a sidecar with `essential = true`. It is not a deployable: this repository builds no
+source into it, ships no Dockerfile for it, and
+[`.github/workflows/deploy.yml`](../../.github/workflows/deploy.yml) populates it by
+mirroring a pinned upstream digest rather than by building. It is declared by its own
+input, `third_party_mirror_repository_names`, precisely so that
+`repository_names` can remain the exact ten §0.4.1.6 states and stay assertable as
+such.
+
+**Why the collector cannot simply be pulled from `public.ecr.aws`.** Three facts
+compose, and the third is the one that decides it. `infra/modules/network` enumerates
+the application tier's egress — exactly four rules: to the load balancer on 443, to
+Aurora on the database port, to the endpoint ENIs on 443, and to the S3 gateway prefix
+list on 443 — so there is no rule permitting a public destination. The interface
+endpoints it does create front `ecr.api` and `ecr.dkr`, which serve **private** Amazon
+ECR; Amazon **ECR Public** is a different service and is fronted by neither. So a task
+definition naming `public.ecr.aws/aws-observability/aws-otel-collector` has no route to
+that registry at all: the pull fails with `CannotPullContainerError` and no
+configuration change inside the VPC can fix it. Because the sidecar is `essential`, the
+task is stopped rather than degraded — the failure is not "no telemetry", it is **no
+task runs**.
+
+**Alternatives refused.**
+
+| Alternative | Why it was refused |
+|---|---|
+| Pull the collector from `public.ecr.aws` and add an egress rule for it | Requires an outbound 443 rule to a public destination from a tier holding cardholder data. That is the rule [ADR-008](ADR-008-security-and-identity.md) withdrew as a security finding, and `.github/workflows/infra-ci.yml` now fails any egress rule naming an open destination. It also contradicts AAP §0.4.1.9's own security-group contract, which permits only load-balancer-to-application, application-to-Aurora and application-to-endpoint. One repository is a far smaller deviation than reopening public egress |
+| Disable the sidecar and keep the registry at ten | Loses the metrics and traces AAP §§0.2.1.4 and 0.9.3 name as cross-cutting deliverables. Without the collector the estate publishes meters nothing collects and creates spans nothing exports, so this trades a countable deviation for an unmet requirement. It was tried in an earlier revision and is the reason several records in this tree carried a "sidecar withdrawn" premise that had to be corrected |
+| An ECR pull-through cache rule against the upstream registry | Attractive because it needs no explicit mirror step, and refused on privilege. A pull-through cache creates the backing repository on first pull, so the pulling identity needs `ecr:CreateRepository` (and `ecr:BatchImportUpstreamImage`) in the registry — a grant to create arbitrary repositories, held by every task execution role, in place of a read grant on one known repository. That is materially broader than the thing it saves, and it also moves the upstream dependency from build time to task start time, where a failure stops a deployment rather than a pipeline |
+| Bake the collector into each service image | Removes the repository and adds the collector's bytes to all ten images, its CVEs to all ten scan results, and its lifecycle to all ten rebuild decisions. A sidecar exists to be replaced independently of the workload; this alternative deletes that property to save one repository |
+
+**The quantified recurring cost.** Amazon ECR charges for **storage per GB-month**
+plus data transfer, and basic scanning is charged **per image scanned on push**. The
+collector image is roughly **0.2 GB**, and `image_tag_mutability` is `IMMUTABLE` with a
+lifecycle policy retaining a bounded number of tagged images, so the stored footprint
+is that image times the number of retained versions rather than an unbounded history.
+At the `us-east-1` list rate of **USD 0.10 per GB-month**, one retained version is
+about **USD 0.02 per month** and, say, five retained versions about **USD 0.10 per
+month**, per environment. Scan-on-push is `true` on every repository in this module,
+and basic scanning at **USD 0.09 per image scan** adds about **USD 0.09 per mirrored
+push** — a cost incurred when the pinned upstream digest is bumped, not continuously.
+Trade-offs: the total is a rounding error against the endpoint and task charges in
+[§Cost Implications](#cost-implications), and it is stated anyway, because the reason
+to record it is that the deviation is countable, not that it is expensive. The
+comparison that matters is not cost against cost: it is **one cheap repository against
+an open egress path**.
+
+**How the approval is enforced.**
+[`infra/modules/ecr/variables.tf`](../../infra/modules/ecr/variables.tf) validates
+`repository_names` as exactly the ten deployables, and validates
+`third_party_mirror_repository_names` against the approved name itself — a
+`setsubtract` against `["aws-otel-collector"]` rather than a bound on how many entries
+it holds, so that name or nothing is admitted and a substituted image fails at `plan`.
+`.github/workflows/infra-ci.yml` asserts the ten, asserts the mirror default and its
+validation are the one approved name, states the arithmetic 10 + 1 = 11, requires the
+mirror name to be absent from `repository_names`, and pins `main.tf`'s projection to the
+verbatim union of exactly those two inputs. An unreviewed eleventh artifact repository
+therefore fails the build rather than arriving as an extra name in a list.
+
+Refactoring Rationale: this decision was previously argued only inside the module's own
+comments, and the module's structure — two inputs, one union — was correct while its
+prose still asserted that "the mirror set is EMPTY today, so this expression resolves to
+exactly the ten asserted deployables". Both environment roots wire the mirror, so that
+sentence described ten repositories beside an expression building eleven. The
+discrepancy mattered in one specific direction: a reader resolving it by deleting the
+mirror leaves every task's essential sidecar unpullable and no task able to start. The
+count is therefore ratified here, in the record AAP §0.5.1.13 assigns the container
+decisions to, rather than explained away where it is implemented.
+
 
 ## Consequences
 
@@ -1243,7 +1365,11 @@ edit.
 Ten container images replace the load library as the unit of deployment: the
 eight services, the user interface and the data-migration ETL. Each has its own
 repository, and each is built by the pipeline and pushed under a short-lived
-federated role rather than a stored credential. **Nine** of the ten are then
+federated role rather than a stored credential. The registry holds **eleven**
+repositories rather than ten, because one further repository mirrors a third-party
+image this repository does not build — see
+[4. One third-party image is mirrored into the private registry](#4-one-third-party-image-is-mirrored-into-the-private-registry-and-the-registry-therefore-holds-eleven-repositories),
+which is the approval for exceeding the fixed ten. **Nine** of the ten deployables are then
 deployed by replacing tasks rather than by rewriting a shared location; the
 user-interface image is the exception, because the SPA reaches a browser as
 static objects synced to the CloudFront-fronted bucket — which is why

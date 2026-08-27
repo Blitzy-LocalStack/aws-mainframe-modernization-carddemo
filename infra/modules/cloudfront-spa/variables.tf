@@ -134,7 +134,7 @@
 # -----------------------------------------------------------------------------
 
 variable "name_prefix" {
-  description = "Name prefix shared by every resource this module creates, so the SPA bucket, response-header policy, origin access control and distribution group together in the console and in cost reports."
+  description = "Name prefix shared by every resource this module creates, so the SPA bucket, response-header policy, origin access control and distribution group together in the console and in cost reports. THIS module imposes 1 to 20 characters of lower-case letters, digits and interior hyphens, beginning and ending with a letter or digit; the environment roots forward one prefix to sixteen modules and so enforce the narrower INTERSECTION of all of them."
   type        = string
   default     = "carddemo"
 
@@ -577,7 +577,7 @@ variable "acm_certificate_arn" {
 }
 
 variable "aliases" {
-  description = "Domain names the distribution answers on; REQUIRED and non-empty, and every name must be covered by the certificate in acm_certificate_arn."
+  description = "Domain names the distribution answers on; REQUIRED and non-empty, and every name must be covered by the certificate in acm_certificate_arn. Each dot-separated label is limited to 63 characters and each complete entry to 253, the limits DNS itself imposes; a leading wildcard marker is not measured as a label but does count toward the total."
   type        = list(string)
   nullable    = false
 
@@ -629,6 +629,38 @@ variable "aliases" {
       can(regex("^(\\*\\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", lower(alias)))
     ])
     error_message = "Each aliases entry must be a bare domain name, optionally with a leading wildcard label -- app.example.com or *.example.com. A scheme, a port, a path or a trailing dot is refused by CloudFront at apply."
+  }
+
+  # WHY : ⚠️ Refactoring Rationale: the shape rule above constrains each entry's
+  #       characters and separators and imposed no length, so a 64-character label
+  #       and a 254-character complete name both passed here and were left to
+  #       CloudFront to refuse partway through an apply, reported against the
+  #       distribution rather than against this input. The environment roots carry
+  #       the same two rules; they are repeated here so a caller invoking this
+  #       module directly -- which is how it is validated and how a future root
+  #       would use it -- gets the same refusal at the same point rather than
+  #       depending on a root to have thought of it.
+  #       Assumptions: DNS caps a single label at 63 octets and a complete name at
+  #       253, and an alternate domain name is an ordinary DNS name that must also
+  #       appear in a certificate subject, so both consumers apply those limits.
+  #       Assumptions: a leading `*.` is the wildcard marker rather than a label, so
+  #       it is trimmed before each label is measured and deliberately still counted
+  #       in the total -- those two characters are transmitted as part of the name.
+  #       Trade-offs: the two rules are separate blocks so the diagnostic names which
+  #       limit was exceeded. One over-long label and an over-long complete name are
+  #       different edits, and a combined condition would report them identically.
+  validation {
+    condition = alltrue(flatten([
+      for alias in var.aliases : [
+        for label in split(".", trimprefix(alias, "*.")) : length(label) <= 63
+      ]
+    ]))
+    error_message = "Every dot-separated label in every aliases entry must be at most 63 characters, the maximum length DNS allows for a single label. A leading \"*.\" is the wildcard marker rather than a label and is not measured; shorten the offending label."
+  }
+
+  validation {
+    condition     = alltrue([for alias in var.aliases : length(alias) <= 253])
+    error_message = "Every aliases entry must be at most 253 characters in total, the maximum length DNS allows for a complete name. A leading \"*.\" counts toward that total because those characters are part of the name the distribution serves."
   }
 
 }

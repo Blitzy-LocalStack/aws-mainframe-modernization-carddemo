@@ -319,10 +319,10 @@ missing from the tree listing below, so a reader could not have derived the righ
 from this document either. The listing is now re-measured against the module by the same
 test, name by name.
 
-<!-- source-inventory: 48 production classes + 11 charters = 59 compilation units -->
-**Eleven packages** — a root and ten flat subpackages — each with one
+<!-- source-inventory: 53 production classes + 12 charters = 65 compilation units -->
+**Twelve packages** — a root and eleven flat subpackages — each with one
 `package-info.java` under `src/main/java` (see §8, they are mandatory), holding
-**48** production classes for **59** compilation units. That census is machine-checked the
+**53** production classes for **65** compilation units. That census is machine-checked the
 same way the test census in §10.1 is: `ServiceReadmeInventoryTest` parses the
 `source-inventory` comment below and re-measures all three figures against this module's own
 tree, so a class added without a listing edit fails the build instead of ageing quietly in
@@ -357,8 +357,11 @@ step silently. Each caption is now derivable from the listing directly beneath i
 derivable from `find src/main/java -name '*.java'` and its `src/test/java` counterpart, so a
 reader who doubts a number can settle it in one command rather than by trusting this paragraph.
 
-⚠ Assumptions: the test-side caption is **63 `*Test` + 1 `*IT`**, so this module carries 64 test
-classes. Two earlier drafts of this paragraph stated 56 (55 plus one) and then 61 plus one; each
+⚠ Assumptions: the test-side caption is **66 `*Test` + 1 `*IT`**, so this module carries 67 test
+classes. This sentence had itself fallen one behind the caption it restates — it read 63 and 64
+against a tree holding 64 and 65 — which is the drift the paragraph goes on to warn about, arriving
+in the paragraph that warns about it; it is re-derived here from the two commands named below rather
+than advanced by the one class this pass added. Two earlier drafts of this paragraph stated 56 (55 plus one) and then 61 plus one; each
 was measured before the cases that overtook it were added, and neither is a figure to carry
 forward, because the `test-inventory` marker in §10.1 is the copy `ServiceReadmeInventoryTest`
 re-measures and a second spelling of the same census in prose is exactly what the withdrawn
@@ -371,14 +374,14 @@ reads.
 The set is deliberately flat: there is no nested subpackage, and `SharedKernelInventoryTest`
 re-derives the root charter's inventory table from the directory one level deep, so a nested
 package would be reported as drift rather than folded into its parent's row. `src/test/java`
-holds **thirteen** package directories, each with its own charter — the eleven that mirror
+holds **fourteen** package directories, each with its own charter — the twelve that mirror
 `src/main/java` plus `architecture` and `profile`, which have no production counterpart.
 
-<!-- source-inventory: 48 production types + 11 charters in 11 packages -->
+<!-- source-inventory: 53 production types + 12 charters in 12 packages -->
 <!-- source-listing:begin -->
 
 ```text
-src/main/java/com/carddemo/common/          11 packages · 48 production types
+src/main/java/com/carddemo/common/          12 packages · 53 production types
   package-info.java
   CardDemoCommonAutoConfiguration.java
   money/          package-info.java · Money.java · MoneyModule.java
@@ -408,13 +411,19 @@ src/main/java/com/carddemo/common/          11 packages · 48 production types
   control/        package-info.java · OnlineWriteGate.java
                   OnlineWriteGateExempt.java · OnlineWriteGateInterceptor.java
                   OnlineWritesDisabledException.java
+  config/         package-info.java · MissingEnvironmentVariablesException.java
+                  RequiredEnvironmentVariablePostProcessor.java
+                  FlywayOwnerRoleCallback.java
+                  FlywayOwnerRoleDataSourceCustomizer.java
+                  MigrationOwnerRole.java
 
 src/main/resources/
   carddemo-common-defaults.yml
   META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports
+  META-INF/spring.factories
   META-INF/services/tools.jackson.databind.JacksonModule
 
-src/test/java/com/carddemo/common/           13 packages · 63 *Test + 1 *IT
+src/test/java/com/carddemo/common/           14 packages · 66 *Test + 1 *IT
   package-info.java · CardDemoCommonAutoConfigurationIT.java
   architecture/   package-info.java · LayeringRulesTest.java            ← pinned, §7
                   ApplicationContextWiringContractTest.java
@@ -464,6 +473,10 @@ src/test/java/com/carddemo/common/           13 packages · 63 *Test + 1 *IT
                   FieldValidationFlagTest.java
   control/        package-info.java · OnlineWriteGateTest.java
                   OnlineWriteGateInterceptorTest.java
+  config/         package-info.java
+                  RequiredEnvironmentVariablePostProcessorTest.java
+                  FlywayOwnerRoleCallbackTest.java
+                  FlywayOwnerRoleDataSourceCustomizerTest.java
   profile/        package-info.java · ProfileConfiguration.java
                   ProfileConfigurationTest.java
 ```
@@ -487,9 +500,15 @@ block as a restatement whose authority lies elsewhere, and to change it only by
 re-deriving it: `find src/main/java/com/carddemo/common -name '*.java' \!
 -name package-info.java | wc -l` for the production count, the same walk without
 the exclusion for compilation units, and the §12 census for the two test counts.
-Assumptions: the enumerated file names are now complete, verified by set-comparing
-every name in this block against the two source trees — 101 names listed, 101 on
-disk, none missing and none stale. Eight files had been absent from it:
+Assumptions: the enumerated file names are now complete, and the completeness is
+machine-checked rather than attested — `SharedKernelInventoryTest` set-compares every name in
+this block against the two source trees on each build, so a file added without a listing edit
+fails there. The figure this sentence used to carry, 101 names on each side, was a snapshot of
+one such comparison and had drifted to describe no tree at all: the block now lists **144**
+`.java` names, which is what `find src/main/java src/test/java -name '*.java' | wc -l` reports,
+plus the four `src/main/resources` entries the block also names. It is re-derived here rather
+than incremented, for the reason the paragraph above gives: an attested count and a checked
+listing answer different questions, and only the second one stays true. Eight files had been absent from it:
 `ApprovedOriginPolicy` and `RequestBodySizeFilter` under main, and
 `ApiErrorWireShapeTest`, `ApplicationContextWiringContractTest`,
 `ApprovedOriginPolicyTest`, `CrossSchemaPrivilegeContractTest`,
@@ -531,32 +550,36 @@ its regeneration command beside it can only ever be out of date, never misleadin
 what it is. Assumptions: a reader who measures a different total has added or removed
 tests, which is expected drift -- §2's commands are the authority that cannot go stale, and
 the last re-measurement of this table found each row exactly as printed and the total at
-1427:
+1474:
 
 | Package | Classes | Executions |
 |---|---|---|
 | `codec` | `CopybookLayoutTest` 150 · `FixedWidthCodecTest` 150 · `CsvAuthCodecTest` 126 · `PackedDecimalCodecTest` 106 · `ZonedDecimalCodecTest` 62 · `InquiryRequestCodecTest` 16 · `AuthorizationDisclosurePolicyTest` 13 · `DateInquiryReplyCodecTest` 7 | **630** |
 | `validation` | `DateEditValidatorTest` 93 across 8 `@Nested` groups · `FieldValidationFlagTest` 29 | **122** |
 | `error` | `GlobalExceptionHandlerTest` 71 · `ApiErrorTest` 36 · `AbendDetailTest` 21 · `GlobalExceptionHandlerPathMaskingTest` 20 · `ApiErrorSecurityHandlersTest` 9 · `ProtocolRefusalRenderingTest` 9 · `AbsentAndUnconvertibleValueTest` 8 across 1 `@Nested` group · `RejectedParameterOrderingTest` 5 across 1 `@Nested` group · `ApiErrorWireShapeTest` 4 | **183** |
-| `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `InternalServiceTokenTest` 14 · `CardNumberMaskerTest` 13 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **141** |
-| `money` | `MoneyTest` 31 · `MoneyModuleTest` 10 | **41** |
+| `security` | `OpaqueIdentifierTest` 30 · `HtmlTextEncoderTest` 24 · `InternalServiceTokenTest` 18 · `SealedSelectorTest` 18 · `ApprovedOriginPolicyTest` 15 · `CardNumberMaskerTest` 13 · `CognitoAccessTokenValidatorTest` 11 · `MaskedCardNumberTest` 9 · `JwtRoleConverterTest` 7 | **145** |
+| `money` | `MoneyTest` 34 · `MoneyModuleTest` 10 | **44** |
 | `web` | `PageResponseTest` 17 · `CursorTokenTest` 16 · `RequestBodySizeFilterTest` 14 · `CorrelationIdFilterTest` 9 · `RejectedRequestErrorReportValveTest` 8 | **64** |
 | `messaging` | `MessagingCorrelationIdTest` 16 · `RethrowingDigestErrorHandlerTest` 14 · `MessageExpiryTest` 11 · `QueueDestinationTest` 11 · `QueueClientBudgetTest` 8 · `MessageSinkSuppressionTest` 6 | **66** |
 | `observability` | `FailureSummaryTest` 17 · `MetricsConfigTest` 12 · `ThrowableDigestTest` 11 · `StructuredLoggingDefaultsTest` 8 · `SensitiveLoggingAndJsonStrictnessDefaultsTest` 7 · `LogSafeTextTest` 5 | **60** |
-| `architecture` | `LayeringRulesTest` 10 · `PublishedContractClosureTest` 8 · `SharedKernelInventoryTest` 12 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 5 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 6 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 3 across 1 `@Nested` group · `DiagnosticRenderingRulesTest` 3 · `ReleasedMigrationImmutabilityTest` 2 · `RuntimeDeletePrivilegeContractTest` 2 | **62** |
+| `architecture` | `LayeringRulesTest` 10 · `PublishedContractClosureTest` 8 · `SharedKernelInventoryTest` 12 across 1 `@Nested` group · `RuntimeConfigurationContractTest` 5 · `PackageCharterInventoryTest` 4 across 1 `@Nested` group · `ServiceCatalogInventoryTest` 4 across 1 `@Nested` group · `ServiceReadmeInventoryTest` 6 across 1 `@Nested` group · `ApplicationContextWiringContractTest` 3 · `CrossSchemaPrivilegeContractTest` 5 across 1 `@Nested` group · `DiagnosticRenderingRulesTest` 3 · `ReleasedMigrationImmutabilityTest` 2 · `RuntimeDeletePrivilegeContractTest` 2 | **64** |
 | `control` | `OnlineWriteGateTest` 16 across 5 `@Nested` groups · `OnlineWriteGateInterceptorTest` 12 across 5 `@Nested` groups | **28** |
 | `time` | `TimestampFormatterTest` 24 | **24** |
 | `profile` | `ProfileConfigurationTest` 14 | **14** |
-| | **module total** | **1427** |
+| `config` | `RequiredEnvironmentVariablePostProcessorTest` 11 · `FlywayOwnerRoleDataSourceCustomizerTest` 11 · `FlywayOwnerRoleCallbackTest` 8 | **30** |
+| | **module total** | **1474** |
 
 Three reconciliation notes, because each looks like a discrepancy until named.
-`DateEditValidatorTest`, both `control` classes, two of the `error` classes and five
-of the `architecture` classes report `Tests run: 0` against their own class names and
+`DateEditValidatorTest`, both `control` classes, two of the `error` classes, six
+of the `architecture` classes, `ProfileConfigurationTest`,
+`RequiredEnvironmentVariablePostProcessorTest`, `FlywayOwnerRoleCallbackTest` and
+`FlywayOwnerRoleDataSourceCustomizerTest` report
+`Tests run: 0` against their own class names and
 report their executions under `@Nested` or `@DisplayName` labels instead, so a reader
 grepping the console output for a class name finds a zero. The table above is
 therefore read from `target/surefire-reports/*.xml`, where each case still carries the
-suite it belongs to, and the console total agrees with it: 1248 executions report
-under a class name and 179 under a display name, summing to 1427.
+suite it belongs to, and the console total agrees with it: 1263 executions report
+under a class name and 211 under a display name, summing to 1474.
 
 **These figures had drifted, and one class was missing from the table entirely.**
 `SensitiveLoggingAndJsonStrictnessDefaultsTest` was absent from the `observability`
@@ -596,7 +619,51 @@ read 1355 -- account for that movement, which is stated rather than smoothed ove
 the reason the paragraph above gives: the table and the total are now read from one source,
 so they can only disagree if that source is not consulted.
 
-The current run measures **1427**, and the movement from the preceding **1422** sits in THREE rows:
+An intermediate pass measured **1463**, and the movement from the **1455** before it sat in ONE row and
+was entirely new work: `config` moved from 11 to **19**, the eight added cases being
+`FlywayOwnerRoleCallbackTest`, which holds the migration owner-role callback the seven migrating
+services inherit -- which events it acts on, that its statement may run inside the migration's own
+transaction, the exact quoted `SET ROLE` it issues, the refusal when the server rejects it, the
+identifier allow-list that stands between a configuration value and a privileged statement, and the
+registration verdicts for an absent, a valid, an emptied and an unacceptable role name. No other row
+moved: the eleven remaining rows were re-read from `target/surefire-reports/*.xml` in the same pass
+and each was found exactly as printed.
+
+The current run measures **1474**, and the movement from that **1463** sits in the SAME row, for a
+reason worth stating rather than absorbing: the callback above turned out not to be sufficient on its
+own. Flyway records a session's role when it wraps a connection and restores that recorded role around
+every schema-history write, so a role the callback assumes is undone before `flyway_schema_history` is
+created -- measured as `permission denied for schema account` in the account context's ownership suite.
+`config` therefore moves from 19 to **30**, the eleven added cases being
+`FlywayOwnerRoleDataSourceCustomizerTest`, which holds the half of the control that acts on the JDBC
+connection before the engine wraps it: that the configured DataSource is replaced, the quoted
+`SET ROLE` issued once per connection handed out, the credentialed overload covered as well as the
+plain one, the fail-closed path that closes an un-elevated connection rather than returning it, the
+idempotence of a second application, the refusal of a configuration in which Flyway would elevate the
+application's own pool, the acceptance of a DataSource merely distinct from it, the refusal of a
+configuration with no DataSource, the blank-value opt-out over three spellings, the allow-list, the
+JDBC wrapper protocol, and the registration verdicts. No other row moved: the eleven remaining rows
+were re-read from `target/surefire-reports/*.xml` in the same pass and each was found exactly as
+printed. Assumptions: the console split moves with the total -- 1263 executions still report under a
+class name and 211 rather than 200 under a display name, because this class carries a class-level
+`@DisplayName` like its siblings.
+
+The measurement before this one measured **1455**, and its movement from the preceding **1427** sat in FOUR rows, of
+which one is new work and three are drift the published figures had already absorbed. **The new work
+is one row that did not exist before**: `config` arrives at **11**, contributed entirely by
+`RequiredEnvironmentVariablePostProcessorTest`, which holds the startup environment check the eight
+services inherit -- that an absent variable is named with the property it feeds, that a defaulted
+placeholder and a lower-case dotted property reference are not findings, and that the check is
+discovered by Spring Boot and ordered after configuration data is loaded. **The other three rows had
+drifted**: `money` arrives at **44** (`MoneyTest` 31 to 34), `security` at **145**
+(`InternalServiceTokenTest` 14 to 18) and `architecture` at **64**
+(`CrossSchemaPrivilegeContractTest` 3 to 5). The two parts are stated separately because they are
+different kinds of change, and the drifted three are corrected rather than left: rows that do not sum
+to the total beside them make the total unusable as a check, which is the failure the paragraphs below
+record twice already. Assumptions: the drifted rows were re-read from `target/surefire-reports/*.xml`
+in the same pass as the new one, so the twelve rows and the total come from one measurement rather than
+from an addition to a figure nobody re-derived. ⚠️ The measurement before this one moved from **1422**
+and sat in THREE rows:
 `error` arrives at **183** (`GlobalExceptionHandlerTest` 69 to 71), `security` at **141**
 (`InternalServiceTokenTest` 12 to 14) and `observability` at **60**
 (`StructuredLoggingDefaultsTest` 7 to 8). Every other row is unchanged and was re-read from
@@ -643,10 +710,10 @@ the table never gained. A total maintained as "the previous total plus what I be
 reproduces exactly that error, which is why this one is read from the report files -- the same
 argument the paragraph above makes, reached a second time by a second route.
 
-`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1427: it is an
+`CardDemoCommonAutoConfigurationIT` contributes **nothing** to the 1463: it is an
 `*IT`, so Failsafe runs it at `verify` and Surefire does not run it at `test`
 (§2.3); it reports its own **13** executions under Failsafe instead, which is why a
-`verify` console shows 1427 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
+`verify` console shows 1463 and 13 as two separate totals. And a full `mvn -f services/pom.xml clean test` reports
 `LayeringRulesTest` **nine** times rather than once — once through this module's own
 `default-test` execution, and once in each of the eight service modules through the
 inherited `architecture-rules` execution that scans this module's test artifact. Only
@@ -657,7 +724,7 @@ module.
 > not copied from a plan — the tree from `find`, the counts from Surefire XML, and both
 > re-measured together rather than adjusted. Both trees are complete as listed: every
 > `.java` on disk appears in the tree above and nothing appears there that is not on disk —
-> eleven main packages with eleven charters, thirteen test packages with thirteen charters,
+> twelve main packages with twelve charters, fourteen test packages with fourteen charters,
 > and
 > `LayeringRulesTest` present in the `architecture` package under the filename §7
 > pins. It is annotated with a pointer to §7 because its filename is a build
@@ -1817,8 +1884,8 @@ need justifying.
 
 ### 10.1 What each suite must cover
 
-<!-- test-inventory: 63 tests + 1 integration tests -->
-**64** test classes: **63** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
+<!-- test-inventory: 66 tests + 1 integration tests -->
+**67** test classes: **66** matching `*Test`, run by Surefire, and **1** matching `*IT`, run by
 Failsafe. That census is machine-checked — `ServiceReadmeInventoryTest` in this module parses the
 comment above and re-measures both figures against this module's own test tree, so the count fails
 the build when it drifts rather than ageing quietly in prose.

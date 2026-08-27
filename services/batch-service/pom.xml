@@ -200,8 +200,9 @@
     </dependency>
 
     <!-- Trade-offs: an embedded servlet container is carried solely while
-               the argument-driven job is running so the actuator can answer the
-               image health probe. A marker-file or process-only shell probe was
+               the argument-driven job is running so the actuator can answer a
+               health read taken inside the task. A marker-file or process-only
+               shell probe was
                evaluated and rejected because it cannot report an unreachable
                datasource, while the actuator database indicator can. The cost
                is a listener in an otherwise one-shot process; BatchApplication
@@ -211,8 +212,8 @@
                LOOPBACK address, not to every interface. The bind is declared at
                the server.address key of
                services/batch-service/src/main/resources/application.yml, which
-               records why: the probe is the listener's only client and reaches
-               it from inside the task's own network namespace, whereas an
+               records why: every client of this listener is inside the task's
+               own network namespace, whereas an
                all-interfaces bind would also expose it on the task's elastic
                network interface for the duration of every run. Naming the
                dependency here without naming that bind would leave a reader of
@@ -234,9 +235,11 @@
                publishes no business or administrative route, application.yml
                exposes health only with details disabled, and the edge publishes
                no batch route. Adding authentication solely to a liveness probe
-               would require the container HEALTHCHECK to hold a credential,
-               violating the image's credential-free contract without protecting
-               any operation that changes state. -->
+               would require whatever reads it inside the task to hold a
+               credential, violating the image's credential-free contract without
+               protecting any operation that changes state. The image declares no
+               HEALTHCHECK, so the reader in question is an operator or a
+               task-definition command rather than the engine. -->
 
     <!-- ====================================================================
          PERSISTENCE
@@ -585,8 +588,8 @@
          No API documentation starter and no security starter.
            Assumptions: this module publishes no business route, so there is no
            contract for one to serve and no filter chain for the other to
-           configure. Its only listener answers the actuator health probe on the
-           loopback address.
+           configure. Its only listener answers the actuator health endpoint on
+           the loopback address.
          ==================================================================== -->
 
   </dependencies>

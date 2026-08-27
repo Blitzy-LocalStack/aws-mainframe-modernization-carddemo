@@ -255,22 +255,22 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds 48 production classes and 11 package charter files,
- * for 59 compilation units in total. This package contributes 2 of those
+ * <p>The shared kernel holds 53 production classes and 12 package charter files,
+ * for 65 compilation units in total. This package contributes 2 of those
  * production classes -- {@code DateEditValidator} and {@code FieldValidationFlag},
  * both present in this directory -- and 1 of those charters. The arithmetic is
  * recorded so that a class absent from the module is distinguishable from one the
  * contract never admitted:
  *
  * <pre>
- * root 1 + money 2 + codec 7 + error 7 + web 6 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 = 48
+ * root 1 + money 2 + codec 7 + error 7 + web 6 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 + config 5 = 53
  * </pre>
  *
  * <p>Cross-check by compilation unit, counting one charter per package plus that
  * package's production classes:
  *
  * <pre>
- * root 2 + money 3 + codec 8 + error 8 + web 7 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 = 59
+ * root 2 + money 3 + codec 8 + error 8 + web 7 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 + config 6 = 65
  * </pre>
  *
  * <p>The root contributes its charter and the one auto-configuration class, and the
@@ -278,10 +278,10 @@
  * stood here -- "39 production classes plus 11 charters is 50" -- and it is deleted
  * rather than corrected: nothing re-derived it, and it was the figure that drifted
  * while both labelled sums beside it stayed right. Both remaining sums agree, and
- * this file is one of the eleven charters.
+ * this file is one of the twelve charters.
  *
- * <p>Assumptions: the authoritative totals are <strong>48 production classes and
- * 59 compilation units, 11 of them charters</strong>. The total is always stated
+ * <p>Assumptions: the authoritative totals are <strong>53 production classes and
+ * 65 compilation units, 12 of them charters</strong>. The total is always stated
  * beside a labelled sum that re-derives it, which is why both are kept here instead
  * of the total alone: a figure that does not reproduce both sums above is rejected on
  * sight rather than adopted.

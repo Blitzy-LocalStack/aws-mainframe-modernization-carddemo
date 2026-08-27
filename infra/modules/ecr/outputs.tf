@@ -5,8 +5,10 @@
 #   The entire public contract of the reusable `ecr` module. This directory is
 #   never applied on its own -- it is consumed as
 #   `source = "../../modules/ecr"` by the infra/envs/dev and infra/envs/prod
-#   roots -- so everything a caller can see of the ten container repositories
-#   provisioned in infra/modules/ecr/main.tf is what the four blocks below
+#   roots -- so everything a caller can see of the ELEVEN container repositories
+#   provisioned in infra/modules/ecr/main.tf -- the ten deployables specification
+#   section 0.4.1.6 fixes plus the one approved third-party mirror ratified in
+#   docs/adr/ADR-002-compute-platform.md -- is what the four blocks below
 #   publish, and nothing else.
 #
 #   Every value here is an attribute the registry COMPUTES at apply time,
@@ -32,12 +34,22 @@
 #   and one holding a mirrored upstream image.
 #
 #   Assumptions: the distinction matters to a reader of `repository_urls`
-#   specifically, because .github/workflows/deploy.yml waits for a vulnerability scan
-#   of the release tag it pushed rather than of every key this map publishes. The
-#   mirrored image carries its own upstream tag, not that release tag, so it is
-#   mirrored by its own step and is not a key the scan loop can wait on -- which is
-#   why the mirror step is separate from the build-and-push loop rather than one more
-#   iteration of it.
+#   specifically, because the two kinds of repository carry DIFFERENT TAG
+#   CONVENTIONS. Every deployable is pushed under the release tag
+#   .github/workflows/deploy.yml chooses per run; the mirrored image carries the
+#   collector's own upstream release tag, because the artifact is not built here and
+#   tagging it with a CardDemo commit would claim a provenance it does not have. That
+#   is why the mirror has its own step rather than one more iteration of the
+#   build-and-push loop, and it is why any consumer that iterates the KEYS of this
+#   map must select the tag per key.
+#   Refactoring Rationale: this paragraph said the mirror "is not a key the scan loop
+#   can wait on", and the deployment workflow's vulnerability gate had been written to
+#   match -- one tag for every key it iterated. That combination is a defect, not a
+#   contract: the gate iterates this map, so it asked the registry for the mirror at a
+#   release tag that is never pushed, read the empty result as a missing scan and
+#   refused every deployment. The gate now selects the tag per repository and waits on
+#   the mirror at its own upstream tag, and .github/workflows/infra-ci.yml asserts
+#   that branch is present, so the mirror is scanned like everything else here.
 #
 # Parameters:
 #   None. This file declares no `variable` block and accepts nothing; the
@@ -49,8 +61,14 @@
 #   .github/workflows/infra-ci.yml slices this inventory on by name. What it reads instead are the attributes
 #   of `aws_ecr_repository.this`, the resource infra/modules/ecr/main.tf
 #   creates once per entry in `local.repository_names` -- the union of the ten
-#   asserted deployables with the mirror input, which is empty, so ten entries
-#   today and never fewer. Recorded explicitly rather than omitted, so a
+#   asserted deployables with the one approved mirror, so ELEVEN entries and
+#   never fewer.
+#   Refactoring Rationale: this said the mirror input was empty, so the union
+#   resolved to ten. That held while nothing was mirrored; it is false now that
+#   both environment roots pass aws-otel-collector, and a comment describing ten
+#   maps beside a resource that creates eleven is the discrepancy a reader would
+#   resolve by deleting the mirror -- which leaves every task's essential
+#   collector sidecar unpullable. Recorded explicitly rather than omitted, so a
 #   reader can tell "this file has no inputs" apart from "this file's inputs
 #   went undocumented".
 #
@@ -61,7 +79,7 @@
 #                      namespaced name the registry actually stores
 #   repository_arns ... map, keyed by logical artifact name, of the ARN an
 #                      IAM policy statement is scoped to
-#   registry_id ....... string, the one registry all ten repositories live in
+#   registry_id ....... string, the one registry all eleven repositories live in
 #
 #   These four NAMES are a one-way contract rather than an implementation
 #   detail. Both environment roots transcribe them, so renaming one here
@@ -76,7 +94,7 @@
 #   - An output naming a key absent from `aws_ecr_repository.this` would fail
 #     at plan time with an invalid-index error. That is precisely why all three
 #     maps below are PROJECTED from `aws_ecr_repository.this` with a `for`
-#     expression rather than listing the ten artifacts a second time: a key
+#     expression rather than listing the eleven repositories a second time: a key
 #     present in an output and absent from the resource cannot be written at
 #     all, so the failure class is removed instead of guarded against.
 #   - `registry_id` would fail at plan time with an index-out-of-range error
@@ -85,13 +103,13 @@
 #     exactly TEN before any resource is touched, and the mirror input that
 #     main.tf unions with it can only ever ADD to that collection. The dependency
 #     is recorded on that output.
-#     Refactoring Rationale: this number was reconciled upwards to eleven while a
-#     third-party mirror was defaulted into the provisioned set, then back to ten
-#     when that default was emptied. It is stated as an assertion about
-#     var.repository_names rather than as a total precisely so that a future
-#     mirror cannot make it stale again: the proof offered here is
-#     non-emptiness, and a union with a possibly-empty second set preserves it
-#     either way.
+#     Refactoring Rationale: this number has been reconciled in both directions
+#     as the mirror input was defaulted in and emptied again, and the provisioned
+#     total is eleven today. It is deliberately stated as an assertion about
+#     var.repository_names rather than as a total, so that neither a mirror added
+#     nor a mirror withdrawn can make it stale: the proof offered here is
+#     non-emptiness of the deployable set, and a union with a second set
+#     preserves it whatever that set holds.
 #
 # WHY (non-obvious design decisions):
 #   - Refactoring Rationale: the baseline had no machine-readable inventory of
@@ -105,7 +123,7 @@
 #     ranking and enable state, and the nearest thing to a listing was
 #     `LIST   GROUP(CARDDEMO)` at app/jcl/CBADMCDJ.jcl:L159, which echoed the
 #     installed definitions into a job spool for a person to read. These
-#     outputs are what replaces that spool listing: the ten locations are
+#     outputs are what replaces that spool listing: all eleven locations are
 #     enumerable from `terraform output` and from a reviewed plan, in a form a
 #     pipeline consumes directly.
 #   - Assumptions: the key set of all three maps is exactly `each.key` from
@@ -127,8 +145,9 @@
 # identifies, and it is the form the deployment workflow and the ecs-service
 # module look a repository up by.
 # Assumptions: the keys are exactly the keys of `local.repository_names` -- the
-# ten asserted deployables today, and whatever a mirror would add if one were
-# ever supplied -- because each map is projected from the very collection
+# ten asserted deployables plus the one approved mirror, eleven keys today, and
+# whatever a reviewed change to either input makes it -- because each map is
+# projected from the very collection
 # main.tf's `for_each` iterates rather than from a second list written here.
 # That is what makes the key sets of the resource and of these outputs
 # incapable of drifting apart, and it is deliberately stated against the local
@@ -234,7 +253,7 @@ output "registry_id" {
   #       from anything it uploads, and the deployment workflow verifies its
   #       identity without echoing the account into its log. A consumer of
   #       this output inherits that obligation.
-  #       Alternatives Considered: `one(distinct([...]))` over all ten
+  #       Alternatives Considered: `one(distinct([...]))` over all eleven
   #       repositories, which would additionally ASSERT that they share one
   #       registry. Rejected because the attribute is unknown at plan time, so
   #       distinctness cannot be decided until after apply -- the assertion
@@ -243,7 +262,7 @@ output "registry_id" {
   #       unknown-value propagation.
   #       Assumptions: every repository here reports the same registry, so any
   #       one of them answers for all -- a registry is scoped per account and
-  #       per region, and all ten are created through the single provider
+  #       per region, and all eleven are created through the single provider
   #       configuration the calling root supplies. Index zero of the
   #       key-sorted list is taken because `values` orders by key, which makes
   #       the choice deterministic rather than incidental. It is safe only
@@ -274,7 +293,7 @@ output "registry_id" {
 # rejected, because an unused output is still a public surface a consumer can
 # come to depend on and this file cannot then be narrowed without a breaking
 # change. A per-repository map of registry identifiers would repeat one value
-# ten times, since all ten repositories share a single registry. A flattened
+# eleven times, since all eleven repositories share a single registry. A flattened
 # list of addresses would reintroduce exactly the positional indexing the map
 # shape above exists to prevent. And a convenience map of complete image URIs
 # with a tag already appended would put image tagging in this module, whereas

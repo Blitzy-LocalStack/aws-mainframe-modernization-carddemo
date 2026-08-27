@@ -1280,12 +1280,70 @@ The controls that **are authored** are narrower and measurable:
      A threat model that lists the controls it has and omits the edge it has least control
      over reads as coverage rather than as the exception it was.
 
-4. **The nginx document route has `access_log off`.** Deep-link and refresh paths
-   therefore do not enter the container access log. The `/assets/` location logs
-   only content-hashed filenames, and `/health` is separately suppressed for
-   volume. The error log remains available and is classified as sensitive because
-   failure diagnostics can include a URI; this document does not claim it is an
-   identifier-free stream.
+4. **The nginx document route has `access_log off` at BOTH locations a document
+   request can be finally handled in** — `location /` and the exact-match
+   `location = /index.html` — and the second one is what actually suppresses a deep
+   link. The fallback's last `try_files` parameter is a URI, so nginx performs an
+   internal redirect, location matching runs **again** for `/index.html`, and the
+   access-log decision is taken from the configuration of the location that finally
+   handled the request while the logged request line is still the original one. A
+   declaration at `location /` alone therefore sits where the request arrives and not
+   where it is logged. What **is** still logged, deliberately: `/assets/`, whose names
+   are content-hashed build output; `/config.json`; and the 404s produced by the
+   root-level dotted-name location and the `@not_found` handler, which no client route
+   can reach — no route of this application is a single root segment carrying a dot, and
+   a route cannot produce a 404 while the entry document exists — so those records
+   remain the honest-404 signal a status-code monitor watches. `/healthz` is separately
+   suppressed for volume, and the same trade is now accepted for the document: a
+   **direct** request for `/index.html` or for the site root is not logged either,
+   because the internal redirect reaches that block as an ordinary request for the same
+   URI and nginx has no per-request predicate that could separate the two. The error log
+   remains available and is classified as sensitive because failure diagnostics can
+   include a URI; this document does not claim it is an identifier-free stream.
+
+   Suppressing the document request line is necessary and **not sufficient**, because
+   the combined log format carries `$http_referer` and the records that deliberately
+   remain — every `/assets/` bundle and `/config.json`, all of which the browser requests
+   *from* the document it has just loaded — would otherwise carry the deep-link URL in
+   that field. The second half of the control is therefore the response header
+   `Referrer-Policy: strict-origin`, declared at every `add_header` site in
+   [`ui/nginx.conf`](../../ui/nginx.conf) and set to the same value on the CloudFront
+   response-headers policy in
+   [`infra/modules/cloudfront-spa/main.tf`](../../infra/modules/cloudfront-spa/main.tf),
+   whose `override = true` makes the edge value the one a viewer actually receives.
+   `strict-origin` sends the origin alone — scheme, host and port — on every request,
+   same-origin included, so a subresource request can no longer name the route that
+   issued it. The previous value, `strict-origin-when-cross-origin`, is the browser
+   default and sends the **full URL** same-origin; that is what put `/cards/<selector>`
+   into the referrer field of eighteen bundle requests and one `/config.json` request on
+   every load.
+
+   - Refactoring Rationale: this item claimed that deep-link and refresh paths do not
+     enter the container access log while only `location /` carried the directive, so it
+     was false for exactly the requests it was about. A QA run against a running
+     container requested `/cards/qaOpaqueSelector_ABC123` and
+     `/authorizations/v2.QAOPAQUE.PAYLOAD` and found both, request line intact, in the
+     container log. The claim is not merely re-worded: the missing declaration was added
+     to the exact-match block in [`ui/nginx.conf`](../../ui/nginx.conf), and the
+     assertion in [Reproducing the measurements](#reproducing-the-measurements) — which
+     read only the fallback block and therefore passed throughout — now reads both, so
+     the document and the server cannot diverge here again without a failure.
+   - Refactoring Rationale: the request-line half above was re-verified by replaying the
+     QA reproduction with curl, which sends no `Referer`, and it passed. Driving the same
+     two deep links through a real browser against the rebuilt image then found both
+     paths again in the same access log — in the `Referer` field of the bundle and
+     `/config.json` records that the suppression deliberately keeps — so the claim was
+     still false for the requests it is about, through a channel a curl reproduction
+     cannot observe. Assumptions: the value of this control is that no client route
+     identifier reaches the access log, not that a particular directive is present.
+     Alternatives Considered: dropping `$http_referer` from the log format, which cannot
+     be expressed here because [`ui/nginx.conf`](../../ui/nginx.conf) is a server-level
+     snippet installed into `conf.d` while `log_format` is an `http`-level directive; and
+     turning logging off for `/assets/` and `/config.json` as well, which would delete
+     the delivery record an operator routinely reads. Trade-offs: a same-origin referrer
+     no longer identifies which route requested a bundle, so an asset failure is traced
+     from the content-hashed bundle name instead — the stronger identifier of the two,
+     and the one that does not disclose a selector.
 5. **Framework value logging is held down.** Auth pins both
    `org.springframework.security` and `org.hibernate.orm.jdbc.bind` to `WARN`.
    Card and transaction base profiles pin bind logging to `WARN`; both development
@@ -2067,6 +2125,28 @@ assert "version: ${carddemo.version}" in shared_defaults
 nginx = Path("ui/nginx.conf").read_text()
 history = braced_block(nginx, "    location / {")
 assert "access_log off;" in history
+
+# Refactoring Rationale: this pair used to be the fallback assertion alone, and that
+# single assertion passed while a deep link was logged on every refresh. The fallback's
+# try_files names a URI, so nginx internally redirects to /index.html, location matching
+# runs again, and the entry is written from the exact-match block below with the ORIGINAL
+# request line -- so the property this script exists to defend lives in a block it never
+# read. Both are asserted now, because suppressing at either one alone is silently
+# ineffective for the requests the document's claim is about.
+document = braced_block(nginx, "    location = /index.html {")
+assert "access_log off;" in document
+
+# Refactoring Rationale: asserting the two access_log directives alone left the control
+# half-asserted. The request line was suppressed while the same path still arrived in the
+# Referer field of every subresource record the suppression deliberately keeps, so the
+# header that closes that channel is asserted here too -- at every add_header site, not
+# just one, because a single site reverting to the browser default re-opens it for the
+# responses that site serves. The paired CloudFront value is asserted because that policy
+# sets override = true and therefore decides what a real viewer receives.
+assert nginx.count('add_header Referrer-Policy "strict-origin" always;') == 6
+assert 'Referrer-Policy "strict-origin-when-cross-origin"' not in nginx
+cloudfront_spa = Path("infra/modules/cloudfront-spa/main.tf").read_text()
+assert 'referrer_policy = "strict-origin"' in cloudfront_spa
 
 card_dev = Path(
     "services/card-service/src/main/resources/application-dev.yml"

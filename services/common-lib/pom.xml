@@ -331,6 +331,71 @@
     </dependency>
 
     <!--
+     `FlywayOwnerRoleCallback` implements Flyway's own `Callback` interface, so
+     the four types it names — `Callback`, `Context`, `Event` and
+     `FlywayException` — have to be on this module's compile classpath, as does
+     `FluentConfiguration`, which `FlywayOwnerRoleDataSourceCustomizer` reads the
+     migration DataSource from. `flyway-core` supplies all five, and it is the
+     seven migrating services that activate migration, each of which already
+     names the starter for itself.
+
+     Assumptions: no `<version>` is declared. The aggregator's
+     `dependencyManagement` pins `flyway-core` to the single `flyway.version`
+     property, so this module resolves the version every service resolves and
+     cannot drift from the engine whose callback contract it implements.
+
+     Trade-offs: this dependency IS optional, unlike the SSM client above, and
+     the two decisions differ because the failure modes differ. An absent write
+     gate would be silently fail-open, so its client is mandatory; an absent
+     Flyway is not a safety question at all — the auto-configuration that
+     registers the callback is conditional on `Callback` being on the classpath
+     and on the owner-role property being set, so the reporting context, which
+     runs no migration and declares no Flyway, gets a skipped configuration
+     rather than a missing class. Marking it optional is what keeps a migration
+     engine off the classpath of a consumer that does not migrate.
+    -->
+    <dependency>
+      <groupId>org.flywaydb</groupId>
+      <artifactId>flyway-core</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <!--
+     `FlywayOwnerRoleDataSourceCustomizer` implements
+     `org.springframework.boot.flyway.autoconfigure.FlywayConfigurationCustomizer`,
+     which is Spring Boot's own hook rather than Flyway's, and which ships in
+     `spring-boot-flyway` — not in `flyway-core` above and not in
+     `spring-boot-autoconfigure`, because Boot 4 splits its Flyway support into
+     its own module.
+
+     Refactoring Rationale: the customizer exists because a Flyway `Callback`
+     cannot assume the owner role early enough. `PostgreSQLConnection` captures
+     the session's role when Flyway wraps a connection, and its schema-history
+     writes restore that captured role, so a callback-assumed role is reverted
+     before `flyway_schema_history` is created. Boot's customizer hook is the one
+     supported place to replace the DataSource Flyway will use, which is where
+     the deprecated `initSql` effectively acted, so the type declaring that hook
+     has to be on the compile classpath.
+
+     Assumptions: no `<version>` is declared. The Spring Boot BOM the aggregator
+     imports pins it to the same release as every other Boot artifact, so this
+     module cannot resolve a customizer contract from one Boot version while a
+     service resolves its auto-configuration from another.
+
+     Trade-offs: this is a second optional Flyway-related dependency where one
+     would be tidier, and the split is deliberate rather than accidental — the
+     callback contract belongs to the engine and the customizer contract belongs
+     to Boot, so a consumer holding one but not the other is a real
+     configuration. Both are `optional`, so the reporting context, which migrates
+     nothing, gets neither.
+    -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-flyway</artifactId>
+      <optional>true</optional>
+    </dependency>
+
+    <!--
      `MoneyModule` is a Jackson module: it is what makes money serialise as
      a JSON string, so that no client parses an exact fixed point amount
      into an IEEE 754 double and loses cents at the boundary the user
@@ -779,10 +844,19 @@
  redelivery into a dead letter queue plus per state orchestration retry,
  neither of which is a library concern at all.
 
- NO AWS SDK, no JPA, no JDBC driver, no Flyway, no actuator, and no cache or
- streaming client.
+ NO JPA, no JDBC driver, no actuator, and no cache or streaming client.
  Assumptions: this module owns no schema, no entity and no transport; the
- eight services own those, one schema each. Keeping the AWS SDK off the
+ eight services own those, one schema each.
+ Refactoring Rationale: this sentence read "NO AWS SDK, no JPA, no JDBC
+ driver, no Flyway, no actuator", and two of those five became untrue as
+ shared controls arrived. The SSM client above is declared non-optionally for
+ the write gate, and `flyway-core` plus `spring-boot-flyway` are declared
+ optionally for the owner-role controls. Both are named in their own blocks with the reason they are here,
+ so the list is narrowed to what remains absent rather than left asserting an
+ absence the file itself contradicts. Note what is still true of Flyway: this
+ module carries no migration, no `db/migration` directory and no schema — it
+ contributes one callback and one configuration customizer to whichever engine a
+ consuming service runs. Keeping the AWS SDK off the
  shared kernel's classpath is what makes the layering rule structural rather
  than aspirational, because `LayeringRulesTest` forbids AWS SDK and web
  types inside any `..domain..` package and a rule is far easier to hold when

@@ -58,19 +58,36 @@ batch-app/markers/*
 /reports/
 # Report and scan directories the migration workflows create IN THE WORKSPACE:
 # .github/workflows/services-ci.yml creates data-migration-reports/ before the ETL
-# pytest run, and .github/workflows/infra-ci.yml creates infra-reports/ and
-# secret-scan/ before the policy and secret scans. Running those documented commands
-# locally therefore leaves three untracked directories behind.
+# pytest run, .github/workflows/infra-ci.yml creates infra-reports/ and
+# secret-scan/ before the policy and secret scans, and .github/workflows/ui-ci.yml
+# creates ui-reports/ before the Vitest run that writes vitest.xml into it. Running
+# those documented commands locally therefore leaves four untracked directories behind.
 # Assumptions: each holds only generated output, so no rule here can mask a source
 #   file -- the same narrowness the block above states.
 # WHY : secret-scan/ is the consequential one. The workflow populates it by COPYING
 #   every tracked non-reference file into it, so an accidental `git add .` would
-#   commit a second copy of the entire migration tree under a new path. The other two
+#   commit a second copy of the entire migration tree under a new path. The other three
 #   would commit machine-specific JUnit, SARIF and policy-scan output whose contents
 #   change on every run.
+# WHY : Refactoring Rationale: ui-reports/ was the one directory of the four this block
+#   did not name, and its absence was not visible from here -- the rule set read as
+#   complete. `git check-ignore -v ui-reports/vitest.xml` exited 1, so a developer who
+#   ran the workflow's own JUnit command locally was left with a stageable directory
+#   holding a one-megabyte report whose every `testsuite` element carries the RUNNER's
+#   hostname, a wall-clock timestamp and a per-test duration: values that differ on
+#   every machine and every run, so the file is worthless in history and noisy in every
+#   later diff.
+#   Assumptions: the anchored form is used, as for the other three, because each
+#   directory is created at the repository ROOT -- ui-ci.yml writes ../ui-reports from
+#   its `ui` working directory -- so an unanchored rule would additionally ignore any
+#   same-named directory nested anywhere in the tree.
+#   Trade-offs: the rule is asserted in CI rather than trusted, by the check-ignore step
+#   in ui-ci.yml's build job, so deleting this line fails a run instead of quietly
+#   restoring the committable state it was added to remove.
 /data-migration-reports/
 /infra-reports/
 /secret-scan/
+/ui-reports/
 # gcov artifacts from the GnuCOBOL-transpiled C (--coverage build).
 # Assumptions: kept global rather than scoped to /build/, so a manual gcov run in a
 #   source tree is covered too. The mutable per-run test workspace and its loaded VSAM

@@ -3,13 +3,13 @@
 --   test-harness-schemas-and-foreign-tables.sql
 -- -----------------------------------------------------------------------------
 -- Purpose:
---   Bootstraps the four FOREIGN PostgreSQL schemas -- ledger, account, reference
---   and card -- and the nine foreign tables that the batch-service
---   integration-test suite reads and writes, so that a throwaway Testcontainers
---   database reaches the state a provisioned environment is already in before
---   any service migration runs. The fifth schema this module connects to,
---   `batch`, is created by Flyway rather than here, for the ownership reason
---   recorded in Section 1.
+--   Bootstraps this module's schema-owning ROLE, the four FOREIGN PostgreSQL
+--   schemas -- ledger, account, reference and card -- and the nine foreign tables
+--   that the batch-service integration-test suite reads and writes, so that a
+--   throwaway Testcontainers database reaches the state a provisioned environment
+--   is already in before any service migration runs. The fifth schema this module
+--   connects to, `batch`, is created by Flyway rather than here, for the ownership
+--   reason recorded in Section 1.
 --
 --   THIS FILE IS A TEST HARNESS, NOT A FLYWAY MIGRATION. It carries no `V<n>__`
 --   version prefix, it does not live under `db/migration`, and it must NEVER be
@@ -23,11 +23,10 @@
 --   Flyway rather than adding a migration to that set.
 --
 --   Execution mechanism: a Testcontainers init script, run once at container
---   start and therefore strictly BEFORE Flyway opens its first connection. Five
---   test classes supply it the same way -- the three of
---   com.carddemo.batch.repository (BatchRunRepositoryIT, CrossSchemaFeedRepositoryIT
---   and PostingUnitOfWorkIT) and two of com.carddemo.batch.job
---   (CombineTransactionsJobTest and PreflightDailyTransactionsJobTest) -- through
+--   start and therefore strictly BEFORE Flyway opens its first connection. Every
+--   test class in this module that starts a PostgreSQL container supplies it the
+--   same way -- fifteen of them, the eleven of com.carddemo.batch.repository and
+--   the four of com.carddemo.batch.job -- through
 --   `new PostgreSQLContainer(image).withInitScript(HARNESS_SCRIPT)` where
 --   HARNESS_SCRIPT is the classpath-relative path
 --   db/testharness/test-harness-schemas-and-foreign-tables.sql; a `jdbc:tc:` URL
@@ -36,23 +35,26 @@
 --   this file's location, so renaming or moving the file breaks the reference with
 --   no compiler to catch it: the container simply starts without schemas and every
 --   repository test fails on an unrelated-looking undefined-table error. Two of
---   the five therefore assert the post-state below before asserting anything else
+--   them therefore assert the post-state below before asserting anything else
 --   -- CrossSchemaFeedRepositoryIT reads information_schema.tables for the four
 --   schemas and their nine tables, and BatchRunRepositoryIT reads pg_namespace for
 --   the same four plus the owner of `batch` -- so a broken reference is reported as
 --   a missing schema at the point it occurs rather than as a query failure much
---   later. A sixth class, com.carddemo.batch.dto.DisclosureGroupSeedParityTest,
+--   later. A sixteenth class, com.carddemo.batch.dto.DisclosureGroupSeedParityTest,
 --   reads this file's BYTES off the classpath instead of running it, to compare the
 --   seeded disclosure rows against the reference data.
 --
 -- Inputs and preconditions:
 --   A reachable PostgreSQL database, empty or already carrying the objects
---   below, and a connecting role permitted to CREATE SCHEMA in it. No
---   parameter, variable, credential or endpoint is read or embedded: the script
---   is a closed set of literals, which is what makes it safe to run unattended
---   at container start.
+--   below, and a connecting role permitted to CREATE SCHEMA and CREATE ROLE in
+--   it -- the Testcontainers-generated superuser satisfies both. No parameter,
+--   variable, credential or endpoint is read or embedded: the script is a closed
+--   set of literals apart from the database's own name, which Section 0 discovers
+--   at run time because Testcontainers generates it.
 --
 -- Post-state established:
+--   carddemo_batch_owner                   role exists, NOLOGIN, holding CREATE
+--                                          on the current database
 --   (batch)                                NOT created here -- Flyway creates it,
 --                                          owned by carddemo_batch_owner
 --   ledger.transactions                    13 columns, primary key on
@@ -129,6 +131,52 @@
 
 
 -- -----------------------------------------------------------------------------
+-- Section 0 of 5 -- the schema's owning role
+-- -----------------------------------------------------------------------------
+
+-- Refactoring Rationale: these two statements were the first two entries of
+--       `spring.flyway.init-sqls` in application-test.yml, beside the `SET ROLE`
+--       they prepared for. That key maps to Flyway's `initSql`, which Flyway 13
+--       deprecates -- the engine printed a removal notice on every connection it
+--       opened -- so the `SET ROLE` half moved to common-lib's
+--       FlywayOwnerRoleDataSourceCustomizer, which assumes the role on each
+--       connection before Flyway wraps it, with FlywayOwnerRoleCallback
+--       re-asserting it; both read carddemo.database.flyway.owner-role.
+--       The creation half could not move with it and must not: a production
+--       component that CREATES a role is a privilege-escalation seam, and role
+--       definitions belong to data-migration/sql/V0__schemas_and_roles.sql alone.
+--       It comes here instead, to the mechanism this file already is -- state a
+--       provisioned environment holds before Flyway runs -- and it is numbered
+--       Section 0 because it must precede everything else that follows.
+-- Assumptions: the role is NOLOGIN and carries no password, exactly as V0
+--       declares it. Nothing ever connects AS this role; a session becomes it
+--       through `SET ROLE`, which is what makes a passwordless role safe to
+--       create here and is why the deployed arrangement works the same way.
+-- Assumptions: the block is idempotent because a reused container must not fail
+--       on an existing role, and because every one of this module's fifteen
+--       container-starting test classes supplies this same script.
+-- Assumptions: the grant names its target through `format` with `%I` over
+--       `current_database()` rather than a literal, because Testcontainers
+--       generates the database name and no fixed value would match it. CREATE on
+--       the database is required and is NOT implied by role creation: a fresh role
+--       holds only the PUBLIC grants, CONNECT and TEMPORARY, so without it the
+--       `CREATE SCHEMA batch` that Flyway issues under `create-schemas: true`
+--       fails the moment the `SET ROLE` takes effect.
+-- Trade-offs: the connecting user is a superuser and could assume this role with
+--       no grant at all, which makes the GRANT look superfluous. It is kept
+--       because the grant is what the OWNER needs in order to create the schema,
+--       not what the connecting user needs in order to become it -- and `SET ROLE`
+--       drops the superuser attribute for the remainder of the session.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'carddemo_batch_owner') THEN
+        CREATE ROLE carddemo_batch_owner NOLOGIN;
+    END IF;
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO carddemo_batch_owner', current_database());
+END $$;
+
+
+-- -----------------------------------------------------------------------------
 -- Section 1 of 5 -- schemas
 -- -----------------------------------------------------------------------------
 
@@ -199,10 +247,14 @@ CREATE SCHEMA IF NOT EXISTS card;
 --       ownership, and it was measured against PostgreSQL 17.10 rather than
 --       reasoned about. An init script runs as the container's own generated
 --       superuser, so the schema it creates is owned by that user. Flyway then
---       connects and its `init-sqls` -- application-test.yml, the two statements
---       under that key -- create the NOLOGIN role `carddemo_batch_owner`, grant it
---       CREATE on the container's database and `SET ROLE` to it, which drops the
---       superuser attribute for the rest of the session. The very next statement,
+--       connects and assumes the NOLOGIN role `carddemo_batch_owner` -- created by
+--       Section 0 of this file and assumed by common-lib's
+--       FlywayOwnerRoleDataSourceCustomizer, re-asserted by
+--       FlywayOwnerRoleCallback, under carddemo.database.flyway.owner-role --
+--       which drops the superuser
+--       attribute for the rest of the session. (When this was measured both halves
+--       lived in the test profile's `init-sqls`; the mechanism moved, the ownership
+--       it produces did not.) The very next statement,
 --       `CREATE TABLE batch.batch_run`, then fails with SQLSTATE 42501
 --       `permission denied for schema batch`: the assumed role holds CREATE on the
 --       DATABASE but not on a schema somebody else owns. Every integration test in
@@ -221,20 +273,27 @@ CREATE SCHEMA IF NOT EXISTS card;
 --       on the CREATING role and is inert otherwise, which is why the ownership is
 --       the property that has to match and not merely the schema's existence.
 -- WHY : Alternatives Considered: three ways to keep the statement were
---       evaluated and all three were rejected. (a) Creating the role here and
---       writing `CREATE SCHEMA IF NOT EXISTS batch AUTHORIZATION
---       carddemo_batch_owner`, mirroring V0 literally. Rejected because it would
---       put role creation into a file whose closing note states that no role is
---       created and no privilege granted anywhere in it, and it would duplicate
---       the role definition that already lives in the test profile's `init-sqls`,
---       giving two places to keep one role's attributes in step. (b) Granting
---       CREATE on `batch` to the migration role from here. Rejected for the same
---       reason and because it would leave the schema owned by the wrong role, so
---       the default-privilege clauses above would still not apply. (c) Overriding
---       `init-sqls` in the test profile so that no role is assumed at all.
+--       evaluated and all three were rejected. (a) Writing
+--       `CREATE SCHEMA IF NOT EXISTS batch AUTHORIZATION carddemo_batch_owner`
+--       here, mirroring V0 literally. Rejected because Flyway's own
+--       `create-schemas: true` already produces exactly that ownership while the
+--       assumed role is in force, so the statement would add a second author for
+--       one schema and put this file in the business of provisioning the schema
+--       this module owns. (b) Granting CREATE on `batch` to the migration role
+--       from here. Rejected because it would leave the schema owned by the wrong
+--       role, so the default-privilege clauses above would still not apply.
+--       (c) Configuring no owner role under test so that none is assumed at all.
 --       Rejected because the ownership split is the mechanism the deployed
 --       configuration depends on, and a suite that stopped exercising it would
 --       leave it asserted by nothing.
+--       Refactoring Rationale: (a) additionally read "Rejected because it would
+--       put role creation into a file whose closing note states that no role is
+--       created ... and it would duplicate the role definition that already lives
+--       in the test profile's `init-sqls`". Both halves of that objection are now
+--       obsolete rather than merely restated: this file DOES create the role, in
+--       Section 0, because `init-sqls` was Flyway's deprecated `initSql` and had
+--       to go, and the definition therefore lives in exactly one place under test.
+--       What (a) is rejected for now is the schema, not the role.
 -- WHY : Assumptions: V1__batch.sql is the sole owner of every object in
 --       `batch` -- batch.batch_run at its L271, the six Spring Batch
 --       JobRepository tables at L664-L729 and their three sequences at

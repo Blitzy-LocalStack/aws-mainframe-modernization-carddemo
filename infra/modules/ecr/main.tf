@@ -47,9 +47,10 @@
 #   live in infra/modules/ecr/variables.tf with their type, default,
 #   nullability and `description`. The ones read here, and what each decides:
 #     repository_names ............ which artifacts get a repository
-#     third_party_mirror_repository_names . any mirrored third-party image,
-#                                   unioned with the deployables above; empty
-#                                   today, because nothing is mirrored in
+#     third_party_mirror_repository_names . the mirrored third-party image,
+#                                   unioned with the deployables above; holds
+#                                   exactly aws-otel-collector, the one mirror
+#                                   approved in docs/adr/ADR-002-compute-platform.md
 #     name_prefix, environment .... the two segments of the composed name
 #     image_tag_mutability ........ whether a pushed tag may be repointed
 #     scan_on_push ................ registry-side vulnerability scanning
@@ -189,19 +190,34 @@ locals {
   #       intersection outright. Not added, because the failure it would catch is
   #       already visible where it matters -- a mirror that collides adds no
   #       repository to `terraform plan`, which is the diff a reviewer reads before
-  #       the one mirror this module admits is approved -- and a third assertion
-  #       over an input that is empty today buys a guarantee nothing is currently
-  #       positioned to violate.
-  #       Assumptions: the mirror set is EMPTY today, so this expression resolves
-  #       to exactly the ten asserted deployables and ten repositories are created
-  #       -- the count section 0.4.1.6 states. The union is nonetheless kept rather
-  #       than reduced to var.repository_names, because collapsing it would delete
-  #       the separation that lets the ten be asserted at all and would leave a
-  #       future mirror nowhere to go but back inside the fixed count.
-  #       Trade-offs: setunion over an empty set is a no-op, so this line reads as
-  #       machinery for something that is not there. Accepted for that reason: the
-  #       alternative pays for today's brevity with tomorrow's re-derivation of why
-  #       a cached third-party image may not simply join the deployable list.
+  #       the one mirror this module admits is approved -- and the mirror input's
+  #       own validation now admits ONLY the single approved name, which is a
+  #       stronger bound than an intersection test over an open set would be.
+  #       Assumptions: this expression resolves to ELEVEN repositories, and stating
+  #       the arithmetic plainly is the point of this block. var.repository_names is
+  #       the exact ten deployables AAP section 0.4.1.6 fixes and
+  #       var.third_party_mirror_repository_names is the one approved mirror,
+  #       aws-otel-collector, which both environment roots pass; the two are
+  #       disjoint by construction, so the union is 10 + 1 = 11 and eleven
+  #       repositories are created. That EXCEEDS the ten section 0.4.1.6 states and
+  #       is a ratified deviation, not an accident: the approval, the alternatives
+  #       refused and the recurring cost are recorded in
+  #       docs/adr/ADR-002-compute-platform.md, and the ten deployables remain
+  #       separately assertable here and in .github/workflows/infra-ci.yml precisely
+  #       so that the specification's count stays readable from one declaration.
+  #       Refactoring Rationale: this block asserted that the mirror set was EMPTY
+  #       today, so that the union resolved to exactly ten. That was true when the
+  #       mirror input defaulted to none and no root passed it; it is false now that
+  #       both infra/envs/dev and infra/envs/prod wire aws-otel-collector, and a
+  #       comment describing ten repositories beside an expression that builds
+  #       eleven is exactly the discrepancy a reader would resolve in the wrong
+  #       direction -- by deleting the mirror, which leaves every task's essential
+  #       collector sidecar unpullable and no task able to start.
+  #       Trade-offs: the union is kept rather than folded into one input, which
+  #       costs a second collection to read. Accepted, because folding it would
+  #       delete the separation that lets the ten be asserted at all and would put a
+  #       third-party image inside a count the plan fixes for artifacts this
+  #       repository builds.
   repository_names = {
     for name in setunion(var.repository_names, var.third_party_mirror_repository_names) :
     name => "${var.name_prefix}-${var.environment}/${name}"

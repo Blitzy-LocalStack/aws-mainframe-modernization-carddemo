@@ -599,8 +599,8 @@
  *
  * <h2>The count canon</h2>
  *
- * <p>The shared kernel holds <b>48 production classes</b> and <b>11</b> package
- * charter files, for <b>59</b> compilation units in total.
+ * <p>The shared kernel holds <b>53 production classes</b> and <b>12</b> package
+ * charter files, for <b>62</b> compilation units in total.
  *
  * <p>Refactoring Rationale: the per-package TABLE that stood here is gone, and its
  * removal is the point rather than an economy. It was a second copy of the table in
@@ -615,21 +615,21 @@
  * <p>Cross-check by production class:
  *
  * <pre>
- * root 1 + money 2 + codec 7 + error 7 + web 6 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 = 48
+ * root 1 + money 2 + codec 7 + error 7 + web 6 + security 9 + observability 4 + time 1 + validation 2 + messaging 5 + control 4 + config 5 = 53
  * </pre>
  *
  * <p>Cross-check by compilation unit:
  *
  * <pre>
- * root 2 + money 3 + codec 8 + error 8 + web 7 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 = 59
+ * root 2 + money 3 + codec 8 + error 8 + web 7 + security 10 + observability 5 + time 2 + validation 3 + messaging 6 + control 5 + config 6 = 65
  * </pre>
  *
- * <p>Both sums agree, and this file is one of the eleven charters. Each sum is kept
+ * <p>Both sums agree, and this file is one of the twelve charters. Each sum is kept
  * whole on one line, and each addend is labelled with the package it counts, so
  * that a single wrong figure is locatable rather than merely detectable.
  *
- * <p>Assumptions: the authoritative figures are <strong>48 production classes
- * across 10 subpackages and the root, in 59 compilation units, of which 11 are charters</strong>.
+ * <p>Assumptions: the authoritative figures are <strong>53 production classes
+ * across 11 subpackages and the root, in 65 compilation units, of which 12 are charters</strong>.
  * Both cross-checks above re-derive them independently, by class and by
  * compilation unit, so any other class count fails both sums and is wrong.
  *

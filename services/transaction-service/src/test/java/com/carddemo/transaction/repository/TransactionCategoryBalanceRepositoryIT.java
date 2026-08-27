@@ -344,6 +344,16 @@ class TransactionCategoryBalanceRepositoryIT {
     //       about the engine they prove a shared schema against.
     private static final String POSTGRES_IMAGE =
             "postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193";
+    /**
+     * Class-path location of the harness that creates the schema's owning role in the container.
+     *
+     * <p>Assumptions: the role is a NOLOGIN role {@code data-migration/sql/V0__schemas_and_roles.sql} names and no container has, so it has
+     * to exist before Flyway opens a connection and assumes it. A Testcontainers init script runs once
+     * at container start, which is strictly earlier than Flyway's first connection; the alternative
+     * this replaces -- creating the role from {@code spring.flyway.init-sqls} -- carried Flyway's
+     * deprecated {@code initSql} setting and its per-connection removal notice.</p>
+     */
+    private static final String OWNER_ROLE_SCRIPT = "db/testharness/test-harness-owner-role.sql";
 
     // Assumptions: the type comes from org.testcontainers.postgresql and NOT from
     //   org.testcontainers.containers. Testcontainers 2.0.5 ships both and only the legacy one is
@@ -360,7 +370,8 @@ class TransactionCategoryBalanceRepositoryIT {
     //       second failure mode is the worse of the two, because it passes.
     @Container
     @ServiceConnection
-    static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(POSTGRES_IMAGE);
+    static final PostgreSQLContainer POSTGRES =
+            new PostgreSQLContainer(POSTGRES_IMAGE).withInitScript(OWNER_ROLE_SCRIPT);
 
     // Assumptions: the account component of the seeded key, read from one-based bytes 1 to 11 of the
     //   single record of src/test/resources/fixtures/happy_path/tcatbal.txt, which hold 00000000007.

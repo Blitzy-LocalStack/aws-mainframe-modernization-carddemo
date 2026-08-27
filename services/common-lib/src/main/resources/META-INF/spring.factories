@@ -1,0 +1,31 @@
+#
+# CardDemo migration | services/common-lib/src/main/resources/META-INF/spring.factories
+#
+# Purpose: registers the startup contract the shared kernel enforces before any service context
+#       refreshes -- the check that every environment-variable placeholder the active configuration
+#       reads can actually be resolved -- so that a deployment missing a variable is refused with that
+#       variable's name instead of failing later in a component that has never heard of it.
+#
+# WHY : Assumptions: an environment post-processor is discovered through THIS file and not through the
+#       META-INF/spring/*.imports mechanism beside it. The .imports form is read by
+#       ImportCandidates and serves auto-configuration classes only; Spring Boot 4.1 loads
+#       environment post-processors in SpringFactoriesEnvironmentPostProcessorsFactory, which calls
+#       SpringFactoriesLoader.load(org.springframework.boot.EnvironmentPostProcessor.class, ...) --
+#       and SpringFactoriesLoader reads META-INF/spring.factories. A registration written in the
+#       .imports style would be a file nothing reads, so the check would be compiled, tested and never
+#       invoked, which is the silent failure mode the sibling imports file was itself written to cure.
+#
+# WHY : Assumptions: the key is the CURRENT interface, org.springframework.boot.EnvironmentPostProcessor.
+#       Spring Boot 4.1 still loads the deprecated org.springframework.boot.env.EnvironmentPostProcessor
+#       key for compatibility, so both spellings work today; naming the deprecated one would tie this
+#       registration to a removal already announced.
+#
+# WHY : Trade-offs: this is the second registration resource the module carries, where its charters
+#       describe a library as something that contributes types rather than resources. The departure is
+#       accepted for the same reason the auto-configuration import was: there is no mechanism by which
+#       a library contributes a startup check to a consumer that has not been told to look for one, and
+#       a check each service had to remember to declare is a check a service can omit -- which is
+#       exactly how eight services came to share one unnamed failure.
+#
+org.springframework.boot.EnvironmentPostProcessor=\
+com.carddemo.common.config.RequiredEnvironmentVariablePostProcessor

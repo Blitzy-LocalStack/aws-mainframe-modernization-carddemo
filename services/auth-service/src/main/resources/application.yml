@@ -467,35 +467,19 @@ spring:
     user: ${SPRING_FLYWAY_USER}
     password: ${SPRING_FLYWAY_PASSWORD}
 
-    # Assumptions: this is the other half of the ownership split, and without it
-    #   the migration credential alone achieves nothing. V0 grants
-    #   carddemo_auth_migrator its owner WITH INHERIT FALSE, so a session
-    #   authenticated as the migrator holds NO privilege at all until it assumes
-    #   the owner explicitly. Flyway runs every string here on each connection it
-    #   opens, before any migration statement, so every object V1 creates is owned
-    #   by carddemo_auth_owner rather than by the credential that connected.
-    # Trade-offs: INHERIT FALSE plus an explicit SET ROLE is more moving parts
-    #   than granting the migrator ownership directly, and it buys two properties
-    #   that arrangement cannot have. A stolen migrator credential used without
-    #   this statement can read and write nothing, and every
-    #   ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_auth_owner clause in the
-    #   bootstrap SQL fires -- those clauses are keyed on the CREATING role, so a
-    #   migration that created tables as the migrator would leave them all inert
-    #   and the runtime role would receive no grants on the tables it must read.
-    # Alternatives Considered: ALTER ROLE carddemo_auth_migrator SET role,
-    #   which is a per-role server-side default and needs nothing in this file.
-    #   Rejected because it makes a privilege decision invisible at the point it
-    #   takes effect: a reader of this configuration would see a migration running
-    #   as the migrator and have no way to learn that the server silently
-    #   substitutes another identity.
-    init-sqls:
-    # Assumptions: the statement is TERMINATED. Spring Boot joins this list with a
-    #   newline and hands Flyway one script, so an unterminated statement is
-    #   concatenated with whatever follows it -- measured against PostgreSQL 17 as
-    #   `syntax error at or near "SET"` when a second entry was added under the test
-    #   profile. One entry cannot hit that today; the semicolon is what keeps a second
-    #   entry from breaking the first.
-      - "SET ROLE carddemo_auth_owner;"
+    # Refactoring Rationale: `init-sqls` stood here with the single entry
+    #   `SET ROLE carddemo_auth_owner;`, and the decision it carried now lives at
+    #   carddemo.database.flyway.owner-role at the foot of this file, where the
+    #   reasoning that used to sit above this key has moved with it. Spring Boot
+    #   maps `spring.flyway.init-sqls` onto Flyway's `initSql` setting, which
+    #   Flyway 13 deprecates: the engine printed a removal notice on every
+    #   connection it opened, 70 of them in one reactor build across the seven
+    #   migrating services. The replacement is a Callback bean contributed by
+    #   common-lib that issues the same statement on the same connections, so the
+    #   ownership arrangement is unchanged. What the move buys beyond silencing the
+    #   notice: the role name is validated against an identifier allow-list and
+    #   quoted before it reaches SET ROLE, which a YAML string spliced into a
+    #   script could not be.
 
 
   security:
@@ -700,6 +684,50 @@ logging:
     org.hibernate.orm.jdbc.bind: WARN
 
 carddemo:
+  database:
+    flyway:
+      # Assumptions: this is the other half of the ownership split, and without it
+      #   the migration credential alone achieves nothing. V0 grants
+      #   carddemo_auth_migrator its owner WITH INHERIT FALSE, so a session
+      #   authenticated as the migrator holds NO privilege at all until it assumes
+      #   the owner explicitly. common-lib's FlywayOwnerRoleDataSourceCustomizer
+      #   assumes this role on every connection Flyway is handed, and its
+      #   FlywayOwnerRoleCallback re-asserts it on connect and before each
+      #   migration, so
+      #   every object V1 creates is owned by carddemo_auth_owner rather than by the
+      #   credential that connected.
+      # Trade-offs: INHERIT FALSE plus an explicit SET ROLE is more moving parts
+      #   than granting the migrator ownership directly, and it buys two properties
+      #   that arrangement cannot have. A stolen migrator credential used without
+      #   this statement can read and write nothing, and every
+      #   ALTER DEFAULT PRIVILEGES FOR ROLE carddemo_auth_owner clause in the
+      #   bootstrap SQL fires -- those clauses are keyed on the CREATING role, so a
+      #   migration that created tables as the migrator would leave them all inert
+      #   and the runtime role would receive no grants on the tables it must read.
+      # Alternatives Considered: ALTER ROLE carddemo_auth_migrator SET role,
+      #   which is a per-role server-side default and needs nothing in this file.
+      #   Rejected because it makes a privilege decision invisible at the point it
+      #   takes effect: a reader of this configuration would see a migration running
+      #   as the migrator and have no way to learn that the server silently
+      #   substitutes another identity.
+      # Assumptions: the value is a bare role name, NOT a statement. Both shared
+      #   components read it through one allow-list, MigrationOwnerRole, which holds
+      #   it to a lower-case identifier and quotes it, so a semicolon, a second
+      #   statement or a quoting character is refused at startup rather than reaching
+      #   the server -- which is why the terminating semicolon the removed
+      #   list entry needed is absent here and must not be reintroduced.
+      # Refactoring Rationale: this comment named the callback alone as the
+      #   mechanism, which was measured to be insufficient. Flyway records a
+      #   session's role when it wraps a connection and restores that recorded role
+      #   around every schema-history write, so a role the callback assumes is undone
+      #   before flyway_schema_history is created -- observed as
+      #   'permission denied for schema <name>' with SQLSTATE 42501. The customizer
+      #   named above acts where the removed spring.flyway.init-sqls acted, on the
+      #   JDBC connection ahead of that wrapper, which is why the ownership now
+      #   holds. This property is unchanged; only what reads it has grown a second
+      #   half.
+      owner-role: carddemo_auth_owner
+
   auth:
     cognito:
       # Alternatives Considered: declaring them as extra children of

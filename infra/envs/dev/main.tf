@@ -114,14 +114,43 @@ locals {
   #       edge take their certificates from two separate required inputs.
   alb_certificate_arn = var.alb_certificate_arn
   jdbc_url            = "jdbc:postgresql://${module.aurora.writer_endpoint}:${module.aurora.port}/${module.aurora.database_name}"
-  # WHY : Assumptions: the SPA's public origin is its FIRST alias, not the
+  # WHY : Assumptions: the SPA's public origin is one of its aliases, not the
   #       distribution's generated cloudfront.net name. cloudfront-spa requires a
   #       certificate and a non-empty alias list in every environment, so viewers
   #       always arrive on an alias and the generated name serves nothing. Reading
   #       the alias also keeps this value out of the distribution's dependency
   #       chain, so the API's CORS configuration -- which is what consumes it --
   #       does not have to wait on, or depend on, the distribution being created.
-  spa_origin = "https://${var.cloudfront_aliases[0]}"
+  # WHY : ⚠️ Refactoring Rationale: this read `var.cloudfront_aliases[0]` and the note
+  #       above it asserted that the public origin is the FIRST alias. Position is not
+  #       the property that matters here, and index 0 can hold a value this origin
+  #       must never carry: `cloudfront_aliases` admits a leading `*.` wildcard label
+  #       because a wildcard certificate legitimately serves one, so
+  #       `["*.example.test"]` and any wildcard-first ordering were accepted by this
+  #       root and then refused by infra/modules/api-gateway-http, whose
+  #       spa_cors_allow_origins validation requires an EXACT origin. That refusal is
+  #       a security control and is left exactly as it is -- a wildcard Origin makes
+  #       the API callable from any page, and a browser ignores a wildcard on a
+  #       credentialed request anyway -- so the defect was on this side: a
+  #       configuration this root declared valid could not plan, and whether it
+  #       planned depended on the ORDER of a list whose order means nothing to
+  #       CloudFront. The selection is now the first NON-wildcard alias, which makes
+  #       every ordering root validation accepts compose, and `cloudfront_aliases`
+  #       carries a companion rule requiring at least one exact alias so the filtered
+  #       list this indexes can never be empty.
+  #       Assumptions: the only wildcard form the alias validation admits is a single
+  #       leading `*.` label, so testing that prefix recognises every wildcard an
+  #       accepted list can hold; a name containing `*` anywhere else never reaches
+  #       this expression.
+  #       Trade-offs: with several exact aliases the first one wins and the others are
+  #       not advertised as CORS origins. Accepted deliberately -- the browser sends
+  #       one Origin and the SPA is served from one canonical host, and widening this
+  #       to every exact alias would publish origins nothing is served from, which is
+  #       the permissiveness the module's exact-origin rule exists to bound. A
+  #       deployment that genuinely serves the SPA from two hosts changes this local
+  #       and the API's allow-list together, which is the correct shape for that
+  #       change.
+  spa_origin = "https://${[for alias in var.cloudfront_aliases : alias if !startswith(alias, "*.")][0]}"
 
   # WHY : Assumptions: these seven contexts are the complete synchronous edge
   #       surface. Batch and data migration have task definitions but no
@@ -389,28 +418,45 @@ locals {
 
   # WHY : Assumptions: the command each workload's container health check runs is
   #       declared HERE, beside the image each workload uses, because only the image
-  #       knows what it ships and the two schemes in this estate differ. Every entry
-  #       reproduces that workload's own Dockerfile HEALTHCHECK exactly: the seven
-  #       Java services answer HTTPS behind a per-task self-signed leaf, so the probe
-  #       passes --insecure, while batch answers plain HTTP. ECS monitors ONLY the
+  #       knows what it ships. Every entry reproduces that service's own Dockerfile
+  #       HEALTHCHECK exactly: all seven Java services answer HTTPS behind a per-task
+  #       self-signed leaf, so the probe passes --insecure. ECS monitors ONLY the
   #       command in the task definition and never reads the image's HEALTHCHECK
-  #       instruction, so without this the eight probes those images carry were never
+  #       instruction, so without this the probes those images carry were never
   #       evaluated in the deployed estate.
-  # WHY : Assumptions: data-migration is deliberately ABSENT, so the module receives
-  #       null for it and declares no check. Its own Dockerfile records that its probe
-  #       is a structural import test rather than a liveness claim and that
-  #       orchestration judges the one-shot task by terminal state and exit code, so a
-  #       health check would add a second verdict on a container that has already
-  #       finished by the time one could be useful.
+  # WHY : Refactoring Rationale: this map excluded data-migration by name and so gave
+  #       the one-shot BATCH task an in-container probe too, while the paragraph above
+  #       claimed every entry mirrored that workload's own HEALTHCHECK. Neither claim
+  #       survives: services/batch-service/Dockerfile no longer declares one, because a
+  #       clean preflight-daily-transactions job exits in hundreds of milliseconds --
+  #       before any probe cadence can open -- so the instruction reported a container
+  #       that had correctly finished as never healthy, and the ECS entry composed here
+  #       carried that same unattainable verdict into the deployed task definition.
+  #       Selecting on workload.online rather than excluding names one at a time is
+  #       what keeps both offline workloads, and any offline workload added later, out
+  #       of the map by construction rather than by a list somebody must remember to
+  #       extend.
+  # WHY : Assumptions: both offline workloads are therefore ABSENT and the module
+  #       receives null for each, declaring no check. Orchestration already judges a
+  #       one-shot task by its terminal state and exit code -- the verdict
+  #       ecs:runTask.sync returns to the state machine -- so a probe would add a
+  #       second verdict on a container that has already finished by the time one could
+  #       be useful. With only online workloads left in the map, the protocol and
+  #       --insecure conditionals this expression used to carry are gone as well: they
+  #       had exactly one reachable branch, and a reader cannot tell dead logic from a
+  #       case that is merely rare.
+  # WHY : Trade-offs: nothing observes an offline task's liveness mid-run. Accepted,
+  #       because a batch step that hangs is bounded by its state's own TimeoutSeconds
+  #       in the state machine, whose catch handler notifies and fails the chain -- a
+  #       bound a health check cannot supply for a process that is meant to end.
   container_health_check_commands = {
     for name, workload in local.workloads :
-    name => concat(
-      ["/usr/bin/curl", "--fail", "--silent", "--show-error"],
-      workload.online ? ["--insecure"] : [],
-      ["--max-time", "4", "--output", "/dev/null"],
-      ["${workload.online ? "https" : "http"}://127.0.0.1:${module.network.app_container_port}${local.health_check_path}"],
-    )
-    if name != "data-migration"
+    name => [
+      "/usr/bin/curl", "--fail", "--silent", "--show-error", "--insecure",
+      "--max-time", "4", "--output", "/dev/null",
+      "https://127.0.0.1:${module.network.app_container_port}${local.health_check_path}",
+    ]
+    if workload.online
   }
 
   # WHY : Assumptions: the NINE login identities in V0's service_roles array -- the
@@ -5135,9 +5181,11 @@ module "ecs_service" {
   min_capacity         = var.ecs_desired_count
   max_capacity         = max(var.ecs_desired_count, var.ecs_desired_count * 2)
   health_check_path    = local.health_check_path
-  # WHY : Assumptions: looked up with a null default rather than indexed, because
-  #       data-migration is intentionally absent from the map and the module reads null
-  #       as "this workload has no in-container probe".
+  # WHY : Assumptions: looked up with a null default rather than indexed, because both
+  #       OFFLINE workloads -- batch and data-migration -- are intentionally absent from
+  #       the map and the module reads null as "this workload has no in-container
+  #       probe". Indexing would fail the plan for the two workloads whose completion
+  #       is judged by exit code instead.
   container_health_check_command = lookup(local.container_health_check_commands, each.key, null)
   target_protocol                = "HTTPS"
   log_retention_in_days          = var.log_retention_days

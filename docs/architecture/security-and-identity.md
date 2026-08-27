@@ -1619,8 +1619,11 @@ subnet tiers, and it is authored:
 [`infra/modules/network/main.tf`](../../infra/modules/network/main.tf) declares
 `aws_subnet.public`, `aws_subnet.private_app` and `aws_subnet.isolated_data`,
 `aws_nat_gateway.this` for address-translation egress, `aws_vpc_endpoint.interface`
-over the eight-service set AAP §0.4.1.9 states (`ecr.api`, `ecr.dkr`, `logs`,
-`secretsmanager`, `kms`, `sqs`, `states`, `ssm`), `aws_vpc_endpoint.s3` for the object-store gateway
+over the union of the eight-service set AAP §0.4.1.9 states (`ecr.api`, `ecr.dkr`,
+`logs`, `secretsmanager`, `kms`, `sqs`, `states`, `ssm`) and the two approved
+additions (`cognito-idp`, `xray`) — ten endpoints, and the approval is
+[ADR-008](../adr/ADR-008-security-and-identity.md) §"Formal approval: two interface
+endpoints beyond the specification's eight" — `aws_vpc_endpoint.s3` for the object-store gateway
 endpoint, and the **four** security groups `alb`, `app`, `data` and `vpc_endpoints`.
 Both environment roots instantiate the module. What remains true is only the
 deployment boundary: these are declared resources, not provisioned ones.
@@ -1730,48 +1733,80 @@ graph TB
 ### Target endpoints: AWS API traffic stays inside the network
 
 Ten **interface endpoints** are provisioned from a fixed, validated inventory rather
-than from a free-form caller list: the `interface_endpoint_services` input exists, but
-its validation admits only the architecture's exact ten services, so a root may
-neither shorten nor extend the set. The all-or-none endpoint contract and the reason
-for it are recorded at
-[`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf)
-L300–L355:
+than from a free-form caller list, and the inventory is declared as **two exact sets**
+so that both counts are assertable: `interface_endpoint_services` is the **eight**
+services AAP §0.4.1.9 enumerates, `approved_additional_interface_endpoint_services` is
+the **two** approved additions beyond them, each input's validation admits only its own
+exact set, and `main.tf` creates endpoints over the union — so a root may neither
+shorten nor extend either half. The all-or-none endpoint contract and the reason for it
+are recorded at
+[`infra/modules/network/variables.tf`](../../infra/modules/network/variables.tf) beside
+the two inputs:
 
-| Endpoint | Why it exists |
-|---|---|
-| `ecr.api` | Authorises an image pull |
-| `ecr.dkr` | Transfers the image layers — omitting either one leaves a task unable to start |
-| `logs` | Container and state-machine logging |
-| `secretsmanager` | How a service reads the generated database credential that is deliberately absent from this repository |
-| `kms` | Required transitively by all of the above, each of which reads or writes ciphertext under a customer-managed key |
-| `sqs` | The authorization and inquiry queues |
-| `states` | How the reporting service starts an on-demand execution and how a batch task reports back |
-| `ssm` | The parameters that replace the JCL `DD` statements, including the read-only flag the batch window sets |
+| Endpoint | Set | Why it exists |
+|---|---|---|
+| `ecr.api` | §0.4.1.9's eight | Authorises an image pull |
+| `ecr.dkr` | §0.4.1.9's eight | Transfers the image layers — omitting either one leaves a task unable to start |
+| `logs` | §0.4.1.9's eight | Container and state-machine logging |
+| `secretsmanager` | §0.4.1.9's eight | How a service reads the generated database credential that is deliberately absent from this repository |
+| `kms` | §0.4.1.9's eight | Required transitively by all of the above, each of which reads or writes ciphertext under a customer-managed key |
+| `sqs` | §0.4.1.9's eight | The authorization and inquiry queues |
+| `states` | §0.4.1.9's eight | How the reporting service starts an on-demand execution and how a batch task reports back |
+| `ssm` | §0.4.1.9's eight | The parameters that replace the JCL `DD` statements, including the read-only flag the batch window sets |
+| `cognito-idp` | **approved addition** | The issuer document and JSON web key set every request-serving service fetches at start-up and on refresh, and the user-pool operations `auth-service` performs behind sign-on, the new-password challenge, refresh, revoke and sign-out |
+| `xray` | **approved addition** | The trace export of the AWS Distro for OpenTelemetry collector sidecar `infra/modules/ecs-service` attaches to every task with `essential = true`, whose traces pipeline exports through the `awsxray` exporter |
 
-Refactoring Rationale: this table briefly carried two further rows, `xray` and
-`cognito-idp`, and both are **withdrawn** along with the endpoints themselves. AAP
-§0.4.1.9 states the endpoint set exactly, and the eight above are it, so a ninth or
-tenth entry is a topology change against a frozen number rather than the correction
-of an omission. `xray` had one consumer, the per-task telemetry collector sidecar,
-and that sidecar is withdrawn from `infra/modules/ecs-service` — it is not in the
-AAP either, and it was forcing both this endpoint and an eleventh ECR repository
-against the ten of AAP §0.4.1.6. `cognito-idp` is withdrawn for a second and
-independent reason: it did not work. `infra/modules/network` attaches ONE shared
-endpoint policy to every endpoint in the set and that policy is scoped to principals
-in this account, while the identity calls on this path are unauthenticated by
-construction — discovery, the JSON web key set, and the sign-on, challenge-response
-and refresh operations a client performs before it holds any credential. They arrive
-with no principal for the condition to satisfy and are implicitly denied, so the
-endpoint replaced a working public path with a silently failing private one whose
-symptom is every sign-on refused. Giving it its own action-scoped policy was
-considered and declined on the count rather than the mechanism.
+**The two additions are formally approved, and the record is
+[`docs/adr/ADR-008-security-and-identity.md`](../adr/ADR-008-security-and-identity.md)
+§"Formal approval: two interface endpoints beyond the specification's eight".** It
+carries the functional need for each, the alternative that was refused, and the
+arithmetic: an interface endpoint is billed per endpoint per availability zone per
+hour, this network spans three zones, so §0.4.1.9's eight cost 8 × 3 = **24
+endpoint-zone-hours** per hour and the two additions cost 2 × 3 = **6**, for **30** in
+total — about **USD 0.06 per hour, USD 44 per month per environment** at the
+`us-east-1` list rate of USD 0.01 per endpoint-zone-hour. That six is the price of
+removing an open egress path rather than an incidental addition.
 
-How in-task issuer resolution is served instead: `infra/modules/network` exposes
-`identity_provider_egress_cidrs`, an **opt-in, empty-by-default** egress rule to a
-reviewed exact destination set on 443. With the default, no such rule exists and no
-destination outside the VPC is reachable from the application tier; token validation
-then rests on the API Gateway Cognito JWT authorizer AAP §0.4.1.9 places at the edge,
-which reaches the provider natively because it is not in the VPC.
+**The refused alternative was the specification's eight plus internet egress.** It is
+refused because the application tier has **no** public egress: `main.tf` instantiates
+exactly four application-tier egress rules — to the load balancer on 443, to Aurora on
+the database port, to the endpoint ENIs on 443, and to the S3 gateway prefix list on
+443. So a dependency with no endpoint is not routed out through NAT; it is dropped at
+the security group. Without `cognito-idp` every sign-on fails, which fails the AAP
+§0.9.1 acceptance criterion directly; without `xray` every span is discarded.
+Restoring an open rule instead would contradict the same §0.4.1.9 whose security-group
+contract permits only load-balancer-to-application on 8080, application-to-Aurora on
+5432 and application-to-endpoint on 443.
+
+Assumptions: `cognito-idp` needs its **own** endpoint policy, and this is the detail a
+reader is most likely to miss. `infra/modules/network` attaches one shared,
+account-scoped endpoint policy to the other nine endpoints, while the identity calls
+on this path are unauthenticated by construction — discovery, the JSON web key set,
+and the sign-on, challenge-response, refresh, revoke and sign-out operations a client
+performs before it holds any credential. Those arrive with no principal for the
+condition to satisfy and were implicitly denied, so the endpoint at first replaced a
+working public path with a silently failing private one whose symptom was every sign-on
+refused. `main.tf` now attaches an additional statement on this one endpoint admitting
+exactly `InitiateAuth`, `RespondToAuthChallenge`, `GetTokensFromRefreshToken`,
+`RevokeToken` and `GlobalSignOut` by name, with no principal condition.
+
+⚠️ Refactoring Rationale: this section previously declared both `xray` and
+`cognito-idp` **withdrawn** along with their endpoints, on the reading that §0.4.1.9
+fixes the set exactly at eight, and it described the identity path as served instead by
+an opt-in `identity_provider_egress_cidrs` egress rule that was empty by default. Every
+part of that has lapsed and is corrected here rather than carried forward. Both
+endpoints are in the module — in the default **and** the exact-set validation of the
+additions input. The `identity_provider_egress_cidrs` input **does not exist**: it was
+withdrawn as a security finding because it defaulted to `0.0.0.0/0`, its withdrawal note
+stands in its place in `variables.tf`, and `.github/workflows/infra-ci.yml` now fails
+any egress rule naming an open destination. The telemetry collector sidecar is **not**
+withdrawn from `infra/modules/ecs-service`: it is composed on every task with
+`essential = true`, which is what gives `xray` its consumer and what makes the one
+approved third-party ECR mirror necessary — ratified in
+[`docs/adr/ADR-002-compute-platform.md`](../adr/ADR-002-compute-platform.md). And the
+count is not decided by dropping endpoints: the deviation is ratified, both halves are
+gated in CI, and the number the reader should carry away is **8 specified + 2 approved
+= 10**.
 
 Object storage is reached through a **gateway endpoint** instead, created
 unconditionally rather than configured. The same fixed-topology rationale at
@@ -1783,7 +1818,8 @@ one.
 
 Both resources are declared in
 [`infra/modules/network/main.tf`](../../infra/modules/network/main.tf) —
-`aws_vpc_endpoint.interface` over the eight-service set and `aws_vpc_endpoint.s3` for
+`aws_vpc_endpoint.interface` over the union of the two endpoint sets and
+`aws_vpc_endpoint.s3` for
 the gateway — and both environment roots instantiate the module, so the intended
 consequence that **service-to-AWS-API traffic does not leave the private network** is
 expressed in the resource graph rather than only in the input surface. It becomes an

@@ -1199,39 +1199,38 @@ considered and rejected for the same reason — a class that configures nothing
 tells a reader the opposite of the truth.
 
 The actuator health endpoint **is** exposed, health-only and with details
-disabled, solely so the container health check has a probe target. Trade-offs: that
-is also why the web starter is on the classpath at all, and it carries an embedded
-listener into an otherwise one-shot process. A marker-file or process-only probe
-was evaluated and rejected because it cannot report an unreachable datasource,
-while the database-aware health indicator can. The listener cannot keep a finished
-task alive, because the entry point closes the context and exits with the
-translated job status.
+disabled, so that a long accrual or posting pass stays interrogable while it runs.
+Trade-offs: that is also why the web starter is on the classpath at all, and it
+carries an embedded listener into an otherwise one-shot process. A marker-file or
+process-only probe was evaluated and rejected because it cannot report an
+unreachable datasource, while the database-aware health indicator can. The listener
+cannot keep a finished task alive, because the entry point closes the context and
+exits with the translated job status.
 
-Assumptions: **the container health state is not a verdict on the run, and a
-finished container reports `unhealthy` no matter how the run went.** Success is
-decided from the process exit status alone — the state machine reads
-`$.Tasks[0].Containers[0].ExitCode`, and ECS reads a container health check from the
-task definition rather than from this image's `HEALTHCHECK` directive — so nothing
-in the pipeline is gated on what `docker inspect` reports. Docker itself sets a
-stopped container's health to `unhealthy` unconditionally, which was measured on
-Docker 29.7.0 against a control container whose probe was `/bin/true`: it read
-`healthy` with four successful probes and a failing streak of zero while running,
-and flipped to `unhealthy` the moment it exited zero. Refactoring Rationale: the
-directive's four timings were `--interval=30s --timeout=5s --start-period=30s
---retries=3`, which could not probe this image at all — the whole life of a
-completed run is about fifteen to twenty seconds, so the start period outlived the
-container and no probe was ever scheduled. A finished run was therefore recorded
-`unhealthy` with `failing_streak=0` and an EMPTY health log, and a streak of zero
-beside an unhealthy verdict is the signature of a probe that never ran rather than
-one that failed. `--start-interval=2s` sets the cadence during the start period and
-`--interval` is down to five seconds for engines that predate that flag, so a
-completed run now shows five health-log entries and reaches `healthy` about twelve
-seconds in. Trade-offs: what remains is the terminal `unhealthy`, which only
-removing the directive would change; that was rejected because the service-image
-contract requires a health check and the RUNNING state it reports is genuinely
-useful on a long accrual or posting pass, where a hung datasource surfaces as a
-failing probe minutes before the step times out. **To read a stopped task, read the
-exit status and the final `event=batch.job.outcome` record, not the health value.**
+Assumptions: **this image declares no `HEALTHCHECK`, and success is decided from the
+process exit status alone.** The state machine reads
+`$.Tasks[0].Containers[0].ExitCode`; ECS reads a container health check from the
+task definition, which `infra/modules/ecs-service` emits only when its
+`container_health_check_command` input is non-null and no batch invocation sets it;
+and this task attaches to no load balancer, so no target group probes it either.
+Refactoring Rationale: a directive did stand in the Dockerfile, probing
+`http://127.0.0.1:8080/actuator/health` every five seconds after a ten-second start
+period, and it is REMOVED rather than retimed again. A clean
+`--job=preflight-daily-transactions` completes and exits in roughly 280
+milliseconds, so the container is gone before the start period opens: a finished run
+was recorded never-healthy with an EMPTY health log and `failing_streak=0`, and a
+streak of zero beside an unhealthy verdict is the signature of a probe that never
+ran rather than one that failed. No cadence repairs that, because the condition a
+probe would have to observe is a process that has correctly FINISHED. Docker also
+sets a stopped container's health to `unhealthy` unconditionally, measured on Docker
+29.7.0 against a control container whose probe was `/bin/true`: it read `healthy`
+with four successful probes and a failing streak of zero while running, and flipped
+to `unhealthy` the moment it exited zero. Trade-offs: what the removal costs is the
+running-state reading `docker inspect` gave on a long pass; that is accepted because
+nothing in the pipeline consumed it, and the endpoint itself is retained, so the same
+reading is available to an operator inside the task's network namespace or to a
+task-definition health check should one ever be configured. **To read a stopped task,
+read the exit status and the final `event=batch.job.outcome` record.**
 
 Assumptions: a local `docker run` of this image against a development PostgreSQL
 needs the development trust anchor mounted and named —
@@ -1795,7 +1794,7 @@ abbreviation is not an accepted variant.
 | The `'DEFAULT'` seed is one row per type-and-category pair, space-padded to ten characters, and its absence abends | Assumptions: | `app/cbl/CBACT04C.cbl:437` and `:443-460`; width at `app/cpy/CVTRA02Y.cpy:6` | §4.5 |
 | Interest reads the cross-reference by account id through an alternate index while posting reads it by card number | Assumptions: | `app/jcl/INTCALC.jcl:31-32` against `app/jcl/POSTTRAN.jcl:32-33` | §4.11 |
 | There is no administrative trigger endpoint, so no API-documentation class, no security class, and no contract directory ship | Alternatives Considered: | `services/batch-service/pom.xml`; no controller or contract exists under `src` | §9.1 |
-| The web starter is carried solely to serve the actuator health probe | Trade-offs: | `services/batch-service/Dockerfile` health check | §9.1 |
+| The web starter is carried solely to serve the actuator health endpoint, and this image declares no `HEALTHCHECK` at all | Trade-offs: | `services/batch-service/pom.xml` web starter; `services/batch-service/Dockerfile`, the rationale above `ENTRYPOINT` | §9.1 |
 | The PostgreSQL companion artifact is mandatory, because the starter alone fails at **runtime** | Assumptions: | `services/batch-service/pom.xml`, the two Flyway coordinates | §5.4 |
 | The control break's account update also zeroes both cycle buckets — a billing-cycle reset | Assumptions: | `app/cbl/CBACT04C.cbl:352-354` | §4.8 |
 | The rate gate compares numerically rather than by equality, because scale makes a zero rate unequal to zero | Assumptions: | `app/cbl/CBACT04C.cbl:214` | §4.4 |

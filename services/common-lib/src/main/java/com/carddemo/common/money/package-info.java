@@ -228,8 +228,8 @@
  * no fourth file here and none is to be added: the arithmetic contract and its wire-format
  * companion are the whole of the concern, and a third type would be either a second money
  * representation or a concern belonging to another package. Across {@code com.carddemo.common} as a
- * whole the module holds seven production classes in {@code codec}, four in {@code control}, seven in
- * {@code error}, five in {@code messaging}, two in {@code money}, four in {@code observability},
+ * whole the module holds seven production classes in {@code codec}, five in {@code config}, four in
+ * {@code control}, seven in {@code error}, five in {@code messaging}, two in {@code money}, four in {@code observability},
  * nine in {@code security}, one in {@code time}, two in {@code validation} and six in
  * {@code web}, the package root contributing one -- the auto-configuration class that registers this package's codec
  * module, and the {@code Clock}, the cursor-token signer, the correlation filter, the meter filter
@@ -238,11 +238,11 @@
  * read back by the drift test named below:</p>
  *
  * <pre>
- * production classes:  1 + 7 + 4 + 7 + 5 + 2 + 4 + 9 + 1 + 2 + 6 = 48
- * compilation units:   48 production + 11 package descriptors = 59
+ * production classes:  1 + 7 + 3 + 4 + 7 + 5 + 2 + 4 + 9 + 1 + 2 + 8 = 53
+ * compilation units:   53 production + 12 package descriptors = 65
  * </pre>
  *
- * <p>The eleven descriptors are one for the package root and one for each of its ten subpackages.
+ * <p>The twelve descriptors are one for the package root and one for each of its eleven subpackages.
  * The figures are recorded so that a class absent from the module stays distinguishable from one
  * the module never held.</p>
  *

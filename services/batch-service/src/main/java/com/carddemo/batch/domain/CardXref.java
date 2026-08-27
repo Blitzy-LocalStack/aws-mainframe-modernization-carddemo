@@ -292,7 +292,8 @@ import org.hibernate.type.SqlTypes;
  * starter, opens no listener and returns nothing over a network", and therefore that no value on
  * this type leaves the process. Both {@code spring-boot-starter-actuator} and
  * {@code spring-boot-starter-web} are now declared in {@code services/batch-service/pom.xml}, so
- * the module does start a servlet container in order to answer the image health probe. The
+ * the module does start a servlet container in order to answer a health read taken inside the
+ * task. The
  * conclusion the premise supported has been withdrawn with it: this type renders no card number in
  * its diagnostic string, which {@link #toString()} records, and the reason is no longer that a
  * rendering cannot escape but that a rendering is not needed.</p>

@@ -135,7 +135,7 @@
 # -----------------------------------------------------------------------------
 
 variable "name_prefix" {
-  description = "Leading token of the bucket name, which main.tf composes as <name_prefix>-datasets-<environment>-<account-id>-<region>. This is what distinguishes the CardDemo dataset bucket from every other bucket in the account, and it is also the stem the module derives its resource names and tags from."
+  description = "Leading token of the bucket name, which main.tf composes as <name_prefix>-datasets-<environment>-<account-id>-<region>. This is what distinguishes the CardDemo dataset bucket from every other bucket in the account, and it is also the stem the module derives its resource names and tags from. THIS module imposes 1 to 12 characters of lower-case letters, digits and hyphens, beginning with a letter and ending with a letter or digit -- it is the source of the twelve-character ceiling the environment roots enforce as part of the narrower INTERSECTION they forward to sixteen modules."
   type        = string
   default     = "carddemo"
 

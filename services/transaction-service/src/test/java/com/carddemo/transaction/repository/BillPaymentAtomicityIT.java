@@ -194,11 +194,23 @@ class BillPaymentAtomicityIT {
      */
     private static final String HARNESS_SCRIPT = "db/testharness/test-harness-account-schema.sql";
 
+    /**
+     * Class-path location of the harness that creates the schema's owning role in the container.
+     *
+     * <p>Assumptions: the role is a NOLOGIN role {@code data-migration/sql/V0__schemas_and_roles.sql} names and no container has, so it has
+     * to exist before Flyway opens a connection and assumes it. A Testcontainers init script runs once
+     * at container start, which is strictly earlier than Flyway's first connection; the alternative
+     * this replaces -- creating the role from {@code spring.flyway.init-sqls} -- carried Flyway's
+     * deprecated {@code initSql} setting and its per-connection removal notice.</p>
+     */
+    private static final String OWNER_ROLE_SCRIPT = "db/testharness/test-harness-owner-role.sql";
+
     /** The container the assertions run against, started once for this class. */
     @Container
     @ServiceConnection
     static final PostgreSQLContainer POSTGRES =
-            new PostgreSQLContainer(POSTGRES_IMAGE).withInitScript(HARNESS_SCRIPT);
+            new PostgreSQLContainer(POSTGRES_IMAGE)
+                    .withInitScripts(HARNESS_SCRIPT, OWNER_ROLE_SCRIPT);
 
     /** The account that pays, seeded with a payable balance and a version of zero. */
     private static final String PAYING_ACCOUNT_ID = "00000000011";

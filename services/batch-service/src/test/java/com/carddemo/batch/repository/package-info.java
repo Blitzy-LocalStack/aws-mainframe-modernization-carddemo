@@ -323,16 +323,16 @@
  *
  * <p>Assumptions: the script deliberately does NOT create {@code batch}, and its own opening section
  * records the measurement behind that. An init script runs as the container's superuser, so a
- * {@code batch} schema created there is owned by that user, and the test profile's Flyway
- * {@code init-sqls} then assumes a NOLOGIN role which is refused CREATE on a schema it does not own with
- * SQLSTATE 42501. Letting Flyway create it under that role instead -- which is why that profile sets
+ * {@code batch} schema created there is owned by that user, and Flyway then assumes a NOLOGIN role
+ * which is refused CREATE on a schema it does not own with SQLSTATE 42501. Letting Flyway create it under that role instead -- which is why that profile sets
  * {@code create-schemas} true rather than false -- reproduces the deployed ownership exactly.</p>
  *
  * <h2>Ruling four: three harness facts that decide test technique</h2>
  *
  * <p>Alternatives Considered: proving the reference schema read-only by writing to it and asserting the
  * privilege error. Impossible here, and the reason is a property of the harness rather than a matter of
- * taste: the script creates no role and issues no {@code GRANT}, so these tests connect as the container's
+ * taste: the script assumes no role -- its Section 0 creates the migration owner and grants it CREATE on
+ * the database, then leaves the session as it found it -- so these tests connect as the container's
  * superuser and every table is writable at test time. The read-only property is therefore carried at
  * COMPILE time instead -- the disclosure-group interface extends the narrow
  * {@code org.springframework.data.repository.Repository} base rather than a CRUD base, so a save or a

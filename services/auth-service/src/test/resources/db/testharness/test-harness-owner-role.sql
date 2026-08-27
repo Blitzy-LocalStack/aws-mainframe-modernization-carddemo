@@ -1,0 +1,86 @@
+-- =============================================================================
+-- services/auth-service/src/test/resources/db/testharness/
+--   test-harness-owner-role.sql
+-- -----------------------------------------------------------------------------
+-- Purpose:
+--   Creates the NOLOGIN role `carddemo_auth_owner` and grants it CREATE on the
+--   throwaway database, so that Flyway can assume it and create this module's
+--   schema, its history table and every V1 object as that role -- exactly as it
+--   does in a provisioned environment. Without this script the shared
+--   owner-role callback issues `SET ROLE carddemo_auth_owner` against a container
+--   that has never heard of the role, and every context load fails with
+--   `role "carddemo_auth_owner" does not exist`.
+--
+--   THIS FILE IS A TEST HARNESS, NOT A FLYWAY MIGRATION. It carries no `V<n>__`
+--   version prefix, it does not live under `db/migration`, and it must NEVER be
+--   added to `spring.flyway.locations`. Keeping it outside that property is the
+--   point: the set of migrations Flyway applies under test is exactly the set it
+--   applies in production, and this script supplies only what a provisioned
+--   environment supplies AHEAD of Flyway. There, the role is created by
+--   data-migration/sql/V0__schemas_and_roles.sql, which owns every role
+--   definition in the system; this file is its test-scoped stand-in and copies
+--   nothing else from it.
+--
+--   Execution mechanism: a Testcontainers init script, run once at container
+--   start and therefore strictly BEFORE Flyway opens its first connection. The
+--   caller supplies it as
+--   `new PostgreSQLContainer(image).withInitScript(OWNER_ROLE_SCRIPT)`, or as one
+--   entry of `withInitScripts(...)` where the class also needs a foreign-schema
+--   harness. That path is fixed by this file's location, so renaming or moving
+--   the file breaks the reference with no compiler to catch it: the container
+--   starts without the role and the failure names the role rather than the move.
+--
+-- Inputs and preconditions:
+--   A reachable PostgreSQL database whose connecting user may create a role --
+--   the Testcontainers-generated superuser satisfies this. No parameter is read
+--   and no value is templated: the database name is discovered at run time.
+--
+-- Outputs and post-state:
+--   The role `carddemo_auth_owner` exists, holds NOLOGIN, and holds CREATE on the
+--   current database. Nothing else changes: no schema, no table, no grant on any
+--   object, and no other role.
+--
+-- Refactoring Rationale:
+--   These two statements previously lived in this module's test profile, under
+--   `spring.flyway.init-sqls`, beside the `SET ROLE` they prepared for. That key
+--   maps to Flyway's `initSql`, which Flyway 13 deprecates -- it printed a
+--   removal notice on every connection Flyway opened -- so the `SET ROLE` half
+--   moved to a Callback bean in common-lib, driven by
+--   carddemo.database.flyway.owner-role. The creation half could not move with it
+--   and must not: a production component that CREATES a role is a
+--   privilege-escalation seam, and role definitions belong to V0 alone. It comes
+--   here instead, to the mechanism this repository already uses for state a
+--   provisioned environment has before Flyway runs.
+--   Alternatives Considered: (a) leaving creation in `init-sqls` and moving only
+--   the `SET ROLE`, rejected because the deprecation notice is emitted for the
+--   presence of the setting, so a build would still carry it; (b) a test-scoped
+--   Flyway callback that creates the role, rejected because two callbacks on the
+--   same event are ordered by callback NAME, which would make the role's
+--   existence depend on a string comparison; (c) pointing the owner-role property
+--   at the container's own superuser so no role is needed, rejected because the
+--   ownership assertions in this module's integration tests read the owner BY
+--   NAME and would then assert nothing.
+-- =============================================================================
+
+-- Assumptions: the block is idempotent, and it has to be. A container's init
+--   script runs once, but the same script is supplied by several test classes and
+--   a re-run against a reused database must not fail on an existing role. The
+--   role test and the grant are both re-runnable.
+-- Assumptions: the grant names its target through `format` with `%I` over
+--   `current_database()` rather than a literal, because Testcontainers generates
+--   the database name per run and no fixed value would match it. CREATE on the
+--   database is required and is NOT implied by role creation: a fresh role holds
+--   only the PUBLIC grants, CONNECT and TEMPORARY, so without it `CREATE SCHEMA`
+--   fails the moment the `SET ROLE` takes effect.
+-- Trade-offs: the connecting user is a superuser and could assume this role with
+--   no grant at all, which makes the GRANT look superfluous. It is kept because
+--   the grant is what the OWNER needs in order to create the schema, not what the
+--   connecting user needs in order to become it -- and `SET ROLE` drops the
+--   superuser attribute for the remainder of the session.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'carddemo_auth_owner') THEN
+        CREATE ROLE carddemo_auth_owner NOLOGIN;
+    END IF;
+    EXECUTE format('GRANT CREATE ON DATABASE %I TO carddemo_auth_owner', current_database());
+END $$;
