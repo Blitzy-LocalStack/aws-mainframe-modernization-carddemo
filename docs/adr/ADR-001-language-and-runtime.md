@@ -646,7 +646,7 @@ code, and the distinction is the whole of its framing. Three facts discharge it,
 and none of them is a judgement about the programs.
 
 First, the migration serves the repository's own declared purpose. The
-maintainers publish, at [`README.md`](../../README.md) **L393–L400**, an
+maintainers publish, at [`README.md`](../../README.md) **L423–L430**, an
 invitation to "raise issues, create code, and submit merge requests for
 enhancements to help build this application as a resource for programmers
 wanting to understand and modernize their mainframes." An additive migration
@@ -704,7 +704,7 @@ reads go to the writer through read-only views, so a replica would add cost and
 replica-lag semantics for no parity benefit).
 
 Separately, the maintainers publish their **own** roadmap at
-[`README.md`](../../README.md) **L377–L389** — a Db2 rewards extension with
+[`README.md`](../../README.md) **L407–L419** — a Db2 rewards extension with
 stored procedures, functions and dynamic SQL; IMS DC; FTP and SFTP integration;
 Web Service connectivity; and exposure of transactions for distributed
 application integration. Those are their published plans for the baseline, and

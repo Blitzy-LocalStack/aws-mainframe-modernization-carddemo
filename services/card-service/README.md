@@ -73,7 +73,7 @@ against the source branch, not estimated.
 | `app/cbl/CBACT02C.cbl` | 178 | Sequential card-file reader, read-path specification | `repository/CardRepository.java` |
 
 The three online programs are reached through three CICS transactions. These rows
-are reproduced from the transaction inventory in the root `README.md:295-297`.
+are reproduced from the transaction inventory in the root `README.md:276-278`.
 
 | Transaction | Mapset | Program | Function |
 |---|---|---|---|

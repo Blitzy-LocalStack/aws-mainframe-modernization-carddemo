@@ -128,7 +128,7 @@ them is what makes the additive claim above checkable rather than asserted: `REA
 migration, every table derived below included, is a new file in a new tree. The
 current `.gitignore` contains the migration's build-output, state, plan-file and
 environment patterns, and the root `README.md` and `CONTRIBUTING.md` updates are
-authored — a "Linux and AWS Migration" section in the former and a "Code
+authored — a "Cloud Migration to AWS" section in the former and a "Code
 documentation and explainability" section in the latter. Refactoring Rationale: this
 sentence previously reported both as unauthored, which was true when written; all
 three of the repository's pre-existing files that this migration modifies are now in

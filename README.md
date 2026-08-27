@@ -8,7 +8,6 @@ CardDemo is a comprehensive mainframe application that simulates a credit card m
 
 ## Table of Contents
 - [Description](#description)
-- [Linux and AWS Migration](#linux-and-aws-migration)
 - [Technologies](#technologies)
 - [Optional Features](#optional-features)
 - [Installation](#installation)
@@ -19,6 +18,7 @@ CardDemo is a comprehensive mainframe application that simulates a credit card m
   - [Application Inventory](#application-inventory)
   - [Application Screens](#application-screens)
 - [Technical Highlights](#technical-highlights)
+- [Cloud Migration to AWS](#cloud-migration-to-aws)
 - [Support](#support)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
@@ -37,25 +37,6 @@ CardDemo is a mainframe application designed to test and showcase AWS and partne
 - Test creation and automation
 
 The application intentionally incorporates various coding styles and patterns to exercise analysis, transformation, and migration tooling across different mainframe programming paradigms.
-
-## Linux and AWS Migration
-
-An additive migration is being developed beside the unchanged mainframe
-baseline. The new trees contain Java service modules, a React SPA, Python
-data-migration support, Terraform infrastructure, CI/CD workflows, architecture
-records, and operator runbooks.
-
-- Start with [MIGRATION_README.md](MIGRATION_README.md) for build, deploy, run,
-  data-migration, validation, and rollback commands.
-- Review [the architecture documentation](docs/architecture/) and
-  [the nine ADRs](docs/adr/README.md) for service boundaries and frozen
-  technology decisions.
-- Follow [the code documentation standard](docs/CODE_DOCUMENTATION_STANDARD.md)
-  for every migration-owned source or configuration change.
-
-Assumptions: `app/**`, `tests/**`, `scripts/**`, `samples/**`, and the existing
-COBOL test workflow remain reference-only. The target implementation encodes
-their contracts without editing them.
 
 ## Technologies
 
@@ -369,6 +350,55 @@ Admin users can perform the following functions:
 |:----------|:----------------|:-------------------|
 | **Base Application** | Customer<br>Account<br>Card<br>Transaction<br>Bill Payment<br>Statement/Report | COBOL<br>CICS<br>JCL (Batch)<br>VSAM (KSDS with AIX) |
 | **Optional Features** | Authorization<br>Fraud<br>Transaction Type (Extension) | DB2<br>MQ<br>IMS DB<br>JCL Utilities<br>Complex data formats<br>Various dataset types<br>Advanced copybook structures |
+
+## Cloud Migration to AWS
+
+This repository also contains a complete migration of CardDemo to a microservices architecture running on Linux and AWS. The migrated system was added **alongside** the mainframe application rather than replacing it: `app/`, `tests/`, `scripts/` and `samples/` are unchanged, and the COBOL application remains fully runnable exactly as documented in the sections above.
+
+Start with **[MIGRATION_README.md](MIGRATION_README.md)** — the single entry point for the migrated system, covering build, deploy, run, migrate data, validate and roll back. This section orients and links; that guide instructs. Refactoring Rationale: the commands live in that one file rather than being repeated here, because a single source of truth cannot desynchronise from itself, whereas build and deploy steps copied into a second place drift apart as soon as one copy changes.
+
+The migrated stack sits beside the COBOL rather than in place of it: `app/**` is the behavioural specification that the migration encodes, and the existing test suite under `tests/` is the golden-master gate that proves functional parity.
+
+Alternatives Considered: replacing the baseline in place. Rejected because editing or deleting it would remove the only reference behaviour available to verify the migrated services against, which would leave functional parity unprovable.
+
+Trade-offs: the repository is larger and carries two parallel toolchains — GnuCOBOL for the baseline, and a JVM, Node, Python and Terraform stack for the migration. That cost is accepted in exchange for a byte-identical, still-runnable mainframe application.
+
+Assumptions: the existing test suite is green today and defines the reference behaviour, so it is left untouched down to its pinned dependency versions; re-pinning it would invalidate the very oracle the migration is measured against.
+
+The migration adds the trees below. `app/`, `tests/`, `scripts/` and `samples/` are absent from this table because none of them changed.
+
+| Path | Contents |
+|:-----|:---------|
+| [services/](services/) | Java 21 / Spring Boot Maven aggregator: a shared-kernel library plus **eight** microservices |
+| [ui/](ui/) | React 19 and TypeScript single-page application replacing the BMS 3270 screens |
+| [data-migration/](data-migration/) | Python ETL that reads the exported flat files and loads the relational schemas |
+| [infra/](infra/) | Terraform: a state bootstrap, **sixteen** reusable modules, and `dev` and `prod` environment roots |
+| [docs/adr/](docs/adr/) | One architecture decision record per critical decision |
+| [docs/architecture/](docs/architecture/) | Target architecture diagrams, service catalog, data-model and schema mapping, batch orchestration, messaging contracts, security, observability, and the COBOL-to-service traceability matrix |
+| [docs/runbooks/](docs/runbooks/) | Deploy, teardown, data-migration and batch-operations procedures with exact commands |
+| [config/checkstyle/](config/checkstyle/) | Documentation-gate rules for the Java build |
+| [.github/workflows/](.github/workflows/) | Build, test, lint and deploy pipelines for the new trees, added alongside the existing COBOL test workflow |
+
+Each mainframe platform primitive maps to one managed AWS equivalent:
+
+- **Language and runtime**: Java 21 (LTS) with Spring Boot, containerised
+- **Compute**: Amazon ECS on Fargate; batch steps run as Fargate tasks
+- **Data**: Aurora PostgreSQL, one schema per bounded context, replacing VSAM, Db2 and IMS record storage; versioned Amazon S3 for dataset generations
+- **Messaging**: Amazon SQS, FIFO where message ordering matters, replacing the IBM MQ request/reply queues
+- **Batch orchestration**: AWS Step Functions driven by Amazon EventBridge Scheduler, replacing JCL and JES2
+- **API and identity**: Amazon API Gateway with an Amazon Cognito JWT authorizer, replacing CICS sign-on and terminal transactions
+- **Front end**: the single-page application served from Amazon S3 behind Amazon CloudFront
+- **Infrastructure as code**: Terraform
+
+The services are organised into eight bounded contexts — **auth**, **account**, **card**, **transaction**, **reference**, **batch**, **authorization** and **reporting**. [docs/architecture/service-catalog.md](docs/architecture/service-catalog.md) gives each context's responsibilities, the data it owns and its synchronous and asynchronous dependencies.
+
+Every migrated program is mapped to its target service in [docs/architecture/cobol-to-service-traceability.md](docs/architecture/cobol-to-service-traceability.md). The migration targets **functional parity** with the business rules the COBOL already implements, and the existing COBOL test suite under `tests/` is retained unchanged as the parity oracle. Where migrated behaviour differs from the baseline intentionally, the difference is recorded in that traceability matrix rather than introduced silently.
+
+Each critical decision has its own record — **nine** in all, indexed under [docs/adr/](docs/adr/) — language and runtime, compute platform, datastore targets, messaging, batch orchestration, API and user-interface strategy, service boundaries, security and identity, and the infrastructure-as-code tool — capturing the options considered, the rationale, the cost implications and the risks.
+
+Newly authored code in the migration trees is governed by the documentation convention in [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/CODE_DOCUMENTATION_STANDARD.md](docs/CODE_DOCUMENTATION_STANDARD.md), which require every non-obvious decision to record why it was taken. The COBOL under `app/` is reference-only: the migration reads it as its specification and does not modify it.
+
+**Note**: the infrastructure code is authored and statically validated — formatting, graph validation, a plan, HCL lint and a policy scan — but provisioning a live AWS environment, and the cost that provisioning incurs, is an operator action described in [docs/runbooks/deploy.md](docs/runbooks/deploy.md). No AWS environment has been provisioned from this repository, so no endpoint, account identifier or cost figure is reported here.
 
 ## Support
 

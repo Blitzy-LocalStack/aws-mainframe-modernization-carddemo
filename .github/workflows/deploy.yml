@@ -6,8 +6,12 @@
 #   ECR repositories, build and push the ten immutable images this repository
 #   builds, mirror the one pinned third-party telemetry image it does not, apply
 #   the reviewed complete Terraform plan, and publish the SPA bundle. It never
-#   tears down an environment, never applies infra/bootstrap, and never performs
-#   blue-green or canary traffic shifting.
+#   tears down an environment, never applies infra/bootstrap, never runs a test
+#   suite -- the three checking workflows own that and this one ships what they
+#   passed -- and never performs blue-green or canary traffic shifting. Roll-forward
+#   is a rolling ECS service deployment carrying an updated image tag; teardown is
+#   an operator action in docs/runbooks/teardown.md, taken in the reverse order with
+#   bootstrap last.
 #   Assumptions: ten built plus one mirrored is eleven repositories and ten
 #   Dockerfiles, and the asymmetry is deliberate -- infra/modules/ecr asserts the
 #   ten deployables as an exact set and holds the mirror in a separate input, so
@@ -20,23 +24,52 @@
 #   two kinds of repository by their own tag convention rather than as one set.
 #
 # Parameters:
-#   workflow_dispatch.environment selects dev or prod; image_tag optionally
-#   overrides the default commit-SHA artifact identity.
+#   workflow_dispatch.environment (choice, dev|prod, default dev) selects which
+#   environment root is initialised, planned and applied, and is also the
+#   concurrency key so the two never serialise against each other.
+#   workflow_dispatch.image_tag (string, default "" meaning the commit SHA)
+#   overrides the immutable artifact identity every pushed image is tagged with.
 # Return values:
-#   Registry bootstrap, every build/push, Terraform init/plan/apply, SPA publish,
-#   and audit-artifact presence are GATING. Version displays alone are advisory.
+#   GATING -- the OIDC role assumption, the checksum-verified Terraform install,
+#   init, the targeted registry plan and apply, the SPA bundle build, every docker
+#   build, tag and push, the image vulnerability gate, the complete plan and the
+#   apply of that saved plan, the content-security narrowing plan and apply, the
+#   SPA publication and invalidation, the prod environment's approval gate, and the
+#   audit upload's if-no-files-found: error. ADVISORY -- the version displays in
+#   the Terraform install step, and nothing else. Produced artifacts: the pushed
+#   image digests, the rendered plans, and the carddemo-deploy-audit-<env> record.
 # Exceptions or errors:
-#   A partial infrastructure operation remains protected by the remote state lock
-#   and is never cancelled in progress. Production additionally waits on its
-#   GitHub environment approval policy.
+#   Any GATING step failing fails the run at that point, leaving a partial
+#   environment that the next run converges rather than repairs, because Terraform
+#   is declarative and the saved-plan path re-derives the difference from the state
+#   the failed run actually reached. A partial infrastructure operation remains
+#   protected by the remote state lock and is never cancelled in progress; the
+#   timeout ceiling exists so a wedged apply releases that lock. Production
+#   additionally waits on its GitHub environment approval policy. The audit upload
+#   and the removal of runner-local material both run under if: always(), so
+#   evidence survives a failure and generated inputs do not survive the runner.
 #
 # WHY (non-obvious design decisions):
-#   - Refactoring Rationale: CBADMCDJ.jcl required a manual destructive delete
-#     before rerun; saved Terraform plans converge idempotently under one state lock.
+#   - Refactoring Rationale: CBADMCDJ.jcl:38 told an operator to uncomment the
+#     CBADMCDJ.jcl:42 DELETE GROUP(CARDDEMO) before rerunning, so the baseline
+#     deployment was not idempotent and its rerun path was manually destructive;
+#     saved Terraform plans converge idempotently under one state lock instead.
+#   - Refactoring Rationale: that same deck had drifted from the system it
+#     installed -- MAPSET(COSGN00M) is defined twice at CBADMCDJ.jcl:50 and :53,
+#     and CBADMCDJ.jcl:148-157 name PROGRAM(COADM00C) and COTSTP1C-COTSTP4C, none
+#     of which exists in app/cbl -- which is what an imperative, hand-maintained
+#     deck does over time. A plan rendered and reviewed before it is applied is the
+#     control that surfaces exactly that drift, which is why nothing here applies
+#     without a saved plan.
 #   - Trade-offs: deployments queue per environment rather than cancelling,
 #     preventing an interrupted state mutation from becoming a second incident.
 #   - Alternatives Considered: stored cloud access keys. Rejected because OIDC
 #     sessions are short-lived and bound to this repository and run.
+#   - Assumptions: infra/bootstrap has already been applied once for this account.
+#     It provisions the state bucket and lock table that infra/envs/*/backend.tf
+#     names, so it must exist before the init below can run at all -- applying it
+#     from here would depend on the backend it is the thing that creates. It is
+#     deliberately outside this workflow; docs/runbooks/deploy.md owns it.
 # =============================================================================
 
 name: CardDemo Deploy
@@ -46,18 +79,54 @@ name: CardDemo Deploy
 on:
   workflow_dispatch:
     inputs:
+      # Assumptions: this input exists because the two environments are one
+      # topology parameterised by sizing and retention, so the target is a choice
+      # made at dispatch rather than a second workflow file. A `choice` rather than
+      # a free-text string is what makes an unreachable value impossible: the
+      # selection is interpolated into `infra/envs/<value>` and into the
+      # concurrency group, and a typo in a free-text form would either init a
+      # directory that does not exist or -- worse -- serialise against the wrong
+      # environment's lock. Trade-offs: it defaults to dev rather than having no
+      # default, so a dispatch submitted without reading the form targets the
+      # disposable environment; defaulting to prod would make the most consequential
+      # target the one reached by doing nothing.
       environment:
         description: "Environment to deploy; the prod GitHub environment must require approval."
         required: true
         type: choice
         options: [dev, prod]
         default: dev
+      # Assumptions: blank is the normal case and the default identity is the
+      # commit SHA, which is the CBADMCDJ.jcl:166 version-stamp analogue -- that
+      # deck recorded `Ver: CardDemo_v1.0-70-g193b394-123` inside the artifact it
+      # installed, and the tag plays the same role here.
+      # Alternatives Considered: tagging the images `latest` and letting the task
+      # definitions pull that. Rejected because a mutable tag makes a task
+      # definition non-reproducible -- two tasks launched from one revision can
+      # receive different bytes -- and it removes the only cheap rollback this
+      # design has, which is to re-apply naming a tag that is known to have worked.
+      # The registry enforces the same conclusion independently:
+      # infra/modules/ecr sets image_tag_mutability to IMMUTABLE, so a re-push of
+      # an existing tag is refused rather than silently rebound.
+      # Trade-offs: the override is retained for the case a reviewed release has to
+      # be re-deployed from a later commit of this workflow, and it is validated
+      # against the registry's tag grammar below rather than trusted, so a value
+      # that could not name an image fails before the first build.
       image_tag:
         description: "Immutable image tag override; blank uses the reviewed commit SHA."
         required: false
         type: string
         default: ""
 
+# Assumptions: this top-level block is a read-only FLOOR for the file rather than
+# the grant the deployment runs under. With no `permissions:` key at all every job
+# would inherit the repository default token, which on many repositories still
+# carries write scopes; declaring `contents: read` here means a job added later
+# starts read-only and has to widen its own scope deliberately, in the job that
+# performs the write. Trade-offs: the deploy job below restates its own scope
+# instead of leaning on this default, which is redundant on the page and is kept
+# that way because the scope a token actually carries should be readable at the
+# job that runs the code rather than inferred from a key sixty lines above it.
 permissions:
   contents: read
 
@@ -69,18 +138,105 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Alternatives Considered: splitting this into a `build-and-push` job and a
+  # `deploy` job joined by `needs:`, which is the shape the three checking
+  # workflows use and which would let the pushes fan out across runners. Rejected
+  # because every stage here consumes runner-local state the previous stage
+  # produced and a job boundary is a machine boundary: the resolved image-digest
+  # map is merged into $root/deployment.auto.tfvars.json that the apply reads, the
+  # SPA bundle in ui/dist is published by a later step, and deploy-reports/
+  # accumulates the audit record across all of them. A two-job split would have to
+  # carry all three between jobs as artifacts, which adds an upload/download round
+  # trip per stage and -- for the tfvars document and the saved plan -- would place
+  # planned values that can embed generated credentials into artifact storage,
+  # where they outlive the runner. Ordering is therefore enforced by step sequence
+  # rather than by `needs:`, and the ordering that matters is the same one either
+  # shape would express: every image is pushed and scanned BEFORE the apply, so no
+  # task definition can name a tag that failed to build or that carries a blocking
+  # finding.
   deploy:
     name: Build artifacts and deploy ${{ inputs.environment }}
+    # Trade-offs: the runner image is pinned rather than allowed to drift with
+    # `ubuntu-latest`, because three things this job depends on come from the image
+    # rather than from a step that pins them: the Docker daemon that builds all ten
+    # images, the AWS CLI that reads the registry and the Terraform outputs, and the
+    # `python3` that builds the operational Lambda packages before init. A silent
+    # image bump could move any of them underneath a deployment with no commit to
+    # attribute the change to, and this is the one workflow whose failures land
+    # against a live account rather than against a pull request.
     runs-on: ubuntu-24.04
+    # Assumptions: a bounded ceiling, not a budget. CBADMCDJ.jcl:2 bounded the
+    # baseline deployment the same way with `TIME=1440`, so a ceiling here
+    # preserves a property the mainframe job already had rather than inventing one.
+    # The specific hazard it answers is this workflow's own: a wedged apply holds
+    # the DynamoDB state lock for as long as the job lives, and an unbounded job
+    # would hold it indefinitely, blocking every later deployment until an operator
+    # force-unlocks the state. Trade-offs: the figure is deliberately generous
+    # rather than fitted to the work, because a ceiling tight enough to cut a
+    # legitimately slow run would fail deployments for the wrong reason -- and this
+    # job cannot be safely cancelled mid-apply, which is the same reason
+    # cancel-in-progress is false above.
     timeout-minutes: 180
+    # Assumptions: the asymmetry between the two environments lives in the GitHub
+    # environment's own protection rules rather than in this file, which is what
+    # lets one job body serve both. dev is disposable and sized to minimum capacity
+    # -- its Aurora configuration is permitted to scale to zero -- so an unreviewed
+    # apply there is cheap and recoverable; prod carries deletion protection and
+    # final-snapshot flags, where the control that matters is a human deciding
+    # whether the reviewed plan should run at all. CBADMCDJ.jcl:2's
+    # `NOTIFY=&SYSUID` is the baseline analogue and the weaker one: it told an
+    # operator after the fact, whereas a required reviewer on the prod environment
+    # blocks until someone answers. Trade-offs: the approval requirement is
+    # therefore NOT assertable from this repository -- a prod environment
+    # configured without a required reviewer would apply unattended -- so the
+    # obligation is stated in the input description above and in
+    # docs/runbooks/deploy.md, where the environment is configured.
     environment: ${{ inputs.environment }}
     permissions:
+      # Assumptions: `contents: read` is what actions/checkout needs to fetch the
+      # reviewed revision, and reading is all this job does to the repository --
+      # every artifact it produces is written to the registry, to S3 or to the
+      # runner, and nothing is committed back. Trade-offs: `checks: write` and
+      # `pull-requests: write` are both absent, unlike the three checking
+      # workflows, because this workflow publishes no JUnit report and comments on
+      # no pull request; `packages: write` is absent because images go to the
+      # account's own registry rather than to GitHub Packages; and `actions: write`
+      # is absent because nothing here re-dispatches a workflow. A job's token is
+      # reachable from every step in the job, not from the step that uses it
+      # onward, so each scope withheld is one a compromised action or dependency in
+      # any step cannot reach.
       contents: read
       # Assumptions: id-token is the sole mechanism that lets the official AWS
       # action exchange a signed per-run token for temporary role credentials.
+      # Alternatives Considered: a long-lived IAM user access key held as a
+      # repository secret, which is the arrangement this scope exists to make
+      # unnecessary. Rejected because such a key never expires, cannot be scoped to
+      # one run, and grants standing account access to anyone who reads it once,
+      # whereas the token minted under this scope is signed per run, carries this
+      # repository and ref as claims the role's trust policy checks, and trades for
+      # a session that expires on its own. This is why no AWS access-key identifier
+      # or secret appears anywhere in this file.
       id-token: write
 
     steps:
+      # Assumptions: this pin, and every other action reference in this file, names
+      # an immutable 40-character commit SHA rather than a movable tag such as `@v4`
+      # (CWE-1357, reliance on an uncontrolled component). A tag is a mutable
+      # pointer its owner can repoint -- by a deliberate tag move, a lapse in the
+      # action repository's branch protection, or a maintainer-account takeover, of
+      # which the tj-actions/changed-files compromise is the worked precedent --
+      # and whatever it then points at executes inside this job with this job's
+      # token. A SHA is content-addressed and cannot be moved. The reason this
+      # matters MORE here than in the three checking workflows is the scope
+      # granted immediately above: those jobs hold a read-only token, whereas this
+      # one holds `id-token: write` and therefore a path to the deployment role, so
+      # a substituted action here reaches the AWS account rather than a pull
+      # request. Trade-offs: a SHA is unreadable, which is why each pin carries a
+      # `# vX.Y.Z` trailer -- it keeps the version legible and lets Dependabot or
+      # Renovate propose the bump as a reviewable commit. Assumptions: a pin is
+      # adopted only when its full SHA is authoritatively verifiable; a version
+      # whose SHA could not be confirmed is not guessed at, and the three pins
+      # below record the measurement behind each of their versions.
       - name: Check out the reviewed revision
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -267,6 +423,22 @@ jobs:
           #   plans builds them; see infra/lambda/build_packages.py for why the provider
           #   that used to do this was removed.
           python3 infra/lambda/build_packages.py
+          # WHY : Assumptions: -lockfile=readonly holds the run to the provider
+          #   checksums in the tracked .terraform.lock.hcl. Without it a provider
+          #   whose recorded hash no longer matches what the registry serves is not
+          #   an error -- init REWRITES the lock and continues, so a deployment
+          #   would proceed on unreviewed provider bytes and the only evidence
+          #   would be a modified file on a runner that is then discarded. Readonly
+          #   turns that into a failed init instead. Trade-offs: advancing a
+          #   provider now requires a committed lock update, which is the intended
+          #   cost -- the lock is a reviewed artifact in this repository, and
+          #   infra-ci.yml plans against the same 19 locks.
+          # WHY : Assumptions: the backend is ENABLED here, unlike infra-ci.yml's
+          #   static path which inits with -backend=false. The two differ because
+          #   they answer different questions: that workflow must validate on a
+          #   fork pull request where no credential exists, whereas this one holds
+          #   credentials by design and needs the real remote state to plan against
+          #   what is actually deployed.
           terraform -chdir="$root" init -input=false -lockfile=readonly \
             -backend-config="bucket=$TF_STATE_BUCKET" \
             -backend-config="region=$TF_STATE_REGION" \
@@ -284,6 +456,17 @@ jobs:
           root="infra/envs/${{ inputs.environment }}"
           terraform -chdir="$root" plan -input=false -var-file=terraform.tfvars \
             -target=module.ecr -out=ecr.tfplan
+          # WHY : Assumptions: this targeted plan is rendered into the audit record
+          #   for the same reason the complete plan and the content-security
+          #   narrowing are. It is the step that creates the repositories every
+          #   later push writes to, so an operator reconstructing what a
+          #   deployment did needs it as much as the others -- and leaving one of
+          #   the three applies unrendered would make the audit artifact a partial
+          #   account of the run rather than a complete one. CBADMCDJ.jcl:159
+          #   echoed the whole installed group with LIST GROUP(CARDDEMO) rather
+          #   than a chosen part of it, and this keeps that property.
+          terraform -chdir="$root" show -no-color ecr.tfplan \
+            > deploy-reports/terraform-plan-registry.txt
           terraform -chdir="$root" apply -input=false ecr.tfplan
           # Refactoring Rationale: this read named an output that does not exist. The roots
           # publish ONE aggregate per module -- "registry" is the whole ecr module -- so the
@@ -313,6 +496,15 @@ jobs:
           set -euo pipefail
           repos="$(cat deploy-reports/ecr-repositories.json)"
           registry="$(jq -r 'to_entries[0].value | split("/")[0]' <<<"$repos")"
+          # WHY : Assumptions: the token is handed to docker on STDIN rather than as
+          #   `--password "$(aws ecr get-login-password ...)"`. A credential passed
+          #   as an argument is visible in /proc/<pid>/cmdline for the life of the
+          #   process, so any other process on the runner -- including one started
+          #   by a dependency's install script during the builds below -- can read
+          #   it, and it would additionally be recoverable from the shell's history
+          #   in an interactive reproduction of this step. Piping keeps it in a file
+          #   descriptor that only docker holds. docker itself warns on the
+          #   argument form for this reason.
           aws ecr get-login-password --region "${{ vars.CARDDEMO_AWS_REGION }}" |
             docker login --username AWS --password-stdin "$registry"
 
@@ -334,6 +526,31 @@ jobs:
           #       nothing from outside its own tree and each carries its own
           #       .dockerignore at that context root, which is also why the root
           #       .dockerignore governs exactly the eight service builds.
+          # WHY : Assumptions: the table below has TEN rows and services/ has NINE
+          #   Maven modules, and the difference is common-lib, which is deliberately
+          #   absent. It is a library the eight service images compile against and
+          #   package inside themselves, not a deployable -- it has no entry point,
+          #   no Dockerfile, and nothing would run it. Listing it would ask
+          #   infra/modules/ecr for an eleventh built repository whose exact-set
+          #   validation does not admit it, so the mismatch would surface as a
+          #   confusing registry error rather than as the naming mistake it is. The
+          #   count is stated here because eight-of-nine is exactly the off-by-one a
+          #   reader would otherwise have to rediscover from the module list.
+          # WHY : Alternatives Considered: a `strategy: matrix:` over these ten rows,
+          #   which is the idiomatic Actions shape and would build them
+          #   concurrently on ten runners. Rejected because each build's OUTPUT is
+          #   needed here, in this job: the loop accumulates the registry-resolved
+          #   digest of every image into one object that is merged into
+          #   $root/deployment.auto.tfvars.json and read by the apply below. A
+          #   matrix fans out to separate machines, so that object would have to be
+          #   reassembled from ten artifacts by a further job -- and the tfvars
+          #   document it feeds is precisely the file this workflow keeps
+          #   runner-local and deletes at the end, so publishing fragments of it to
+          #   artifact storage would work against that. Trade-offs: the ten builds
+          #   run sequentially, which is slower than a fan-out, accepted because
+          #   `set -euo pipefail` then makes the loop fail on the FIRST failing
+          #   build and stop -- the equivalent of `fail-fast: true` -- so a broken
+          #   image never reaches the push, the scan gate or the apply.
           cat > "$RUNNER_TEMP/carddemo-images.tsv" <<'IMAGES'
           auth-service	services/auth-service/Dockerfile	.
           account-service	services/account-service/Dockerfile	.
@@ -457,7 +674,7 @@ jobs:
           elif grep -q 'ImageNotFoundException' describe.err; then
             existing=""
           else
-            echo "[deploy] describe-images failed for ${collector_repository_name}:${collector_tag}" >&2
+            echo "[ci-deploy] describe-images failed for ${collector_repository_name}:${collector_tag}" >&2
             cat describe.err >&2
             rm -f describe.err
             exit 1
@@ -465,7 +682,7 @@ jobs:
           rm -f describe.err
 
           if [ -n "$existing" ]; then
-            echo "[deploy] mirror already holds ${mirror} at ${existing}; skipping the push"
+            echo "[ci-deploy] mirror already holds ${mirror} at ${existing}; skipping the push"
             mirror_digest="$existing"
           else
               # WHY : Assumptions: the platform is named explicitly because the pinned
@@ -483,7 +700,7 @@ jobs:
               --repository-name "$collector_repository_name" \
               --image-ids "imageTag=${collector_tag}" \
               --query 'imageDetails[0].imageDigest' --output text)"
-            echo "[deploy] mirrored ${upstream} to ${mirror} at ${mirror_digest}"
+            echo "[ci-deploy] mirrored ${upstream} to ${mirror} at ${mirror_digest}"
           fi
 
           # WHY : Assumptions: the digest is merged into the SAME image_digests object
@@ -609,7 +826,7 @@ jobs:
                   "$repository_name" "$tag" "$status" "$critical" "$high" "$medium" \
                   | tee -a deploy-reports/image-scan-findings.txt
                 if [ "$critical" -gt 0 ] || [ "$high" -gt 0 ]; then
-                  echo "[deploy] BLOCKING: ${repository_name}:${tag} carries ${critical} critical and ${high} high findings" >&2
+                  echo "[ci-deploy] BLOCKING: ${repository_name}:${tag} carries ${critical} critical and ${high} high findings" >&2
                   blocking=1
                 fi
                 ;;
@@ -626,18 +843,18 @@ jobs:
               *)
                 printf '%s:%s status=%s\n' "$repository_name" "$tag" "$status" \
                   | tee -a deploy-reports/image-scan-findings.txt
-                echo "[deploy] BLOCKING: no completed scan for ${repository_name}:${tag} (status ${status})" >&2
+                echo "[ci-deploy] BLOCKING: no completed scan for ${repository_name}:${tag} (status ${status})" >&2
                 blocking=1
                 ;;
             esac
           done < <(jq -r 'keys[]' <<<"$repos")
 
           if [ "$blocking" -ne 0 ]; then
-            echo "[deploy] refusing to apply: at least one image carries a critical or high finding, or has no completed scan" >&2
-            echo "[deploy] advance the affected base-image pin and rebuild; findings are summarised in deploy-reports/image-scan-findings.txt" >&2
+            echo "[ci-deploy] refusing to apply: at least one image carries a critical or high finding, or has no completed scan" >&2
+            echo "[ci-deploy] advance the affected base-image pin and rebuild; findings are summarised in deploy-reports/image-scan-findings.txt" >&2
             exit 1
           fi
-          echo "[deploy] image vulnerability gate: PASS"
+          echo "[ci-deploy] image vulnerability gate: PASS"
 
       # Alternatives Considered: a bare auto-approved apply. Rejected because it
       # re-plans at execution time; applying the saved plan guarantees the
@@ -650,6 +867,16 @@ jobs:
       # match and stays trackable. infra/README.md, infra/bootstrap/README.md and
       # both environment READMEs use the same convention, so an operator
       # reproducing this step locally writes a name "git check-ignore" covers.
+      # Assumptions: reading the TRACKED terraform.tfvars in CI is safe because it
+      # carries sizing and retention only -- capacity units, task counts, log
+      # retention, price class and the protection flags. It holds no credential by
+      # construction rather than by inspection: the database master password and
+      # the Cognito seed-user passwords are GENERATED at apply time and written
+      # straight to Secrets Manager, which is what makes "no secrets committed"
+      # structurally true for this repository instead of merely observed. The
+      # account-specific inputs that are not sizing arrive separately, from the
+      # protected GitHub environment into the untracked auto-tfvars document the
+      # step above writes and the cleanup step below deletes.
       - name: Plan and apply the complete environment
         shell: bash
         run: |
@@ -694,8 +921,34 @@ jobs:
             '.cloudfront_api_connect_src_origins = [$origin]' "$tfvars" > "$tfvars.next"
           mv "$tfvars.next" "$tfvars"
 
-          terraform -chdir="$root" apply -input=false -auto-approve \
-            -var-file=terraform.tfvars -target=module.cloudfront_spa
+          # WHY : Refactoring Rationale: this narrowing used to run as a single
+          #   auto-approved apply. That contradicted the discipline the complete
+          #   apply above is built on for no reason other than brevity: an
+          #   auto-approved apply re-plans at execution time, so what it sends to
+          #   the account is decided inside the same command that performs it and
+          #   is never rendered anywhere a reviewer or an audit record can see it.
+          #   The narrowing is small but it is not cosmetic -- it rewrites the
+          #   response-headers policy that governs which origins the published SPA
+          #   is allowed to call -- so it is now planned to a file, rendered into
+          #   the audit record, and applied from that exact saved plan, which is
+          #   the same three-step shape the registry step and the complete
+          #   environment apply already use. Alternatives Considered: leaving the
+          #   auto-approved form because the change set is bounded by -target.
+          #   Rejected because -target bounds WHICH resources may change, not what
+          #   the change is, and it is the second half that the frozen plan
+          #   requires to be reviewable.
+          # WHY : Assumptions: the plan file carries the ".tfplan" suffix the
+          #   repository ignore rules match on, for the same reason the complete
+          #   plan does, and the cleanup step below removes it by that name. The
+          #   rendering is the human `show -no-color` form rather than `show
+          #   -json`, which is what keeps sensitive planned attributes redacted in
+          #   the artifact a reviewer reads.
+          csp_plan="${{ inputs.environment }}-cloudfront.tfplan"
+          terraform -chdir="$root" plan -input=false -var-file=terraform.tfvars \
+            -target=module.cloudfront_spa -out="$csp_plan"
+          terraform -chdir="$root" show -no-color "$csp_plan" \
+            > deploy-reports/terraform-plan-cloudfront.txt
+          terraform -chdir="$root" apply -input=false "$csp_plan"
 
           # Assumptions: the document is written into the build output so the existing sync publishes
           #   it alongside the bundle, which keeps one publication step rather than two.
@@ -759,4 +1012,5 @@ jobs:
         run: |
           root="infra/envs/${{ inputs.environment }}"
           rm -f "$root/deployment.auto.tfvars.json" "$root/ecr.tfplan" \
-                "$root/${{ inputs.environment }}.tfplan"
+                "$root/${{ inputs.environment }}.tfplan" \
+                "$root/${{ inputs.environment }}-cloudfront.tfplan"

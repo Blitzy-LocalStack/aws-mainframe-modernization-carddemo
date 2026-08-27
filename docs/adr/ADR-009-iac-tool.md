@@ -47,7 +47,7 @@ finishes by hand:
 [What the Baseline Deployment Deck Shows About Idempotence](#what-the-baseline-deployment-deck-shows-about-idempotence)
 reads the first of these closely, because it is the clearest evidence in the
 repository for *which* properties a declarative model supplies. It is read as
-teaching material, which is what [`README.md`](../../README.md) **L400** says the
+teaching material, which is what [`README.md`](../../README.md) **L430** says the
 repository is for.
 
 ### The scope the tool has to carry
@@ -395,7 +395,7 @@ declarative model supplies and this deck is where those properties are visibly
 absent by design. It is **not** a criticism of the deck, its authors or the
 mainframe path. The deck is a demonstration artifact in a repository whose stated
 purpose is to be *"a resource for programmers wanting to understand and modernize
-their mainframes"* ([`README.md`](../../README.md) **L400**), so reading it
+their mainframes"* ([`README.md`](../../README.md) **L430**), so reading it
 closely is the use it invites. Every figure is a count a reader can re-run, and
 **this record proposes no change to it whatsoever** — the deck, like the whole of
 `app/**`, is read-only, and the z/OS and AWS Mainframe Modernization deployment

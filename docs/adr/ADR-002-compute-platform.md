@@ -1454,7 +1454,7 @@ adds a path, it does not remove one** — which is also what makes rollback chea
 since reverting to the mainframe path requires no un-migration at all
 ([`docs/runbooks/teardown.md`](../runbooks/teardown.md)).
 
-The maintainers publish, at [`README.md`](../../README.md) **L393–L400**, an
+The maintainers publish, at [`README.md`](../../README.md) **L423–L430**, an
 invitation to "raise issues, create code, and submit merge requests for
 enhancements to help build this application as a resource for programmers
 wanting to understand and modernize their mainframes." An additive compute

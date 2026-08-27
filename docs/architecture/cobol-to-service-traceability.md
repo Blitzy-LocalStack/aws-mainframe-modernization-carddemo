@@ -8441,10 +8441,10 @@ inferred from the presence of a related managed service:
 | Kafka and Kinesis | The baseline's asynchronous requirement is request/reply, and [`messaging-contracts.md`](messaging-contracts.md) maps it to queues; no streaming platform is added |
 | Redis and ElastiCache | The baseline has no application cache tier and parity does not require one |
 | Read replicas | Reporting reads use read-only cross-schema views against the writer; no replica topology is delivered |
-| Db2 rewards extension | Listed in the root [`README.md`](../../README.md) **L381–L384** as roadmap material, not present as an implemented source program or a migration target |
-| IMS DC implementation | Listed in `README.md` **L384** as roadmap material, not part of the supplied authorization IMS database extension |
-| SFTP integration | Listed in `README.md` **L386–L389** as roadmap material; the existing FTP-to-JES tunnel is separately accounted for as a retired mechanism in [§5.3](#53-also-retired-as-mechanisms-with-no-cloud-analogue) |
-| Exposure of transactions for distributed application integration | Listed in `README.md` **L389** as roadmap material; it is not the same thing as eliminating the internal two-resource commit in [D-6](#d-6--the-distributed-commit-is-eliminated-not-emulated) |
+| Db2 rewards extension | Listed in the root [`README.md`](../../README.md) **L411–L414** as roadmap material, not present as an implemented source program or a migration target |
+| IMS DC implementation | Listed in `README.md` **L414** as roadmap material, not part of the supplied authorization IMS database extension |
+| SFTP integration | Listed in `README.md` **L416–L419** as roadmap material; the existing FTP-to-JES tunnel is separately accounted for as a retired mechanism in [§5.3](#53-also-retired-as-mechanisms-with-no-cloud-analogue) |
+| Exposure of transactions for distributed application integration | Listed in `README.md` **L419** as roadmap material; it is not the same thing as eliminating the internal two-resource commit in [D-6](#d-6--the-distributed-commit-is-eliminated-not-emulated) |
 | External point-of-sale / authorization client | The baseline supplies no request producer, only [`tests/mocks/mq_request_stub.py`](../../tests/mocks/mq_request_stub.py), a deterministic test double; building a production client is not requested |
 
 The absent external client explains why there is no program-to-service row for a

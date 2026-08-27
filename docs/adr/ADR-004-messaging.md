@@ -112,9 +112,9 @@ truth. The module now provisions one request queue, this record names one, and t
 None of the three flows drives a screen. The repository's own transaction
 inventory records `CP00` → `COPAUA0C` as "MQ trigger, request and response; Insert
 and Update to IMS" with an empty map column at
-[`README.md`](../../README.md) **L305**, and `CDRD` → `CODATE01` and `CDRA` →
+[`README.md`](../../README.md) **L286**, and `CDRD` → `CODATE01` and `CDRA` →
 `COACCT01` as "Demonstrates MQ request/response pattern", also with no map, at
-**L313** and **L314**. Assumptions: a flow with no map has no terminal to carry
+**L294** and **L295**. Assumptions: a flow with no map has no terminal to carry
 state between turns, so the transport is the entire interface. That is what makes
 the payload shape in [Wire Contract Preservation](#wire-contract-preservation) a
 contract rather than an implementation detail.
@@ -473,7 +473,7 @@ Alternatives Considered: collapsing the three flows into synchronous HTTP calls,
 which would remove a transport from the architecture altogether. Rejected because
 the baseline **chose** decoupling: the authorization consumer is triggered by a
 queue rather than invoked by a caller, which is exactly what the empty map column
-at [`README.md`](../../README.md) **L305** records. Making the call synchronous
+at [`README.md`](../../README.md) **L286** records. Making the call synchronous
 would couple the authorization decision path to the caller's availability and
 would convert a queued backlog — which survives a consumer being unavailable —
 into a failed request. That changes the failure semantics the baseline selected,
@@ -735,8 +735,8 @@ have needed the very coordination it exists to avoid.
 Note that **exposing transactions for distributed integration is explicitly out of
 scope** (AAP §0.2.2) and **is not delivered**. It also appears on the maintainers'
 **own** published roadmap — "Exposure of transactions for distributed application
-integration" at [`README.md`](../../README.md) **L389**, within the Roadmap section
-opening at **L377**. It is cited here as their stated plan, not as a gap.
+integration" at [`README.md`](../../README.md) **L419**, within the Roadmap section
+opening at **L407**. It is cited here as their stated plan, not as a gap.
 
 ### 8. The inquiry path stays deliberately plain
 
@@ -1383,9 +1383,9 @@ None of the following is provided by this decision, and none of it is implied by
 |---|---|---|
 | Kafka, Kinesis or any streaming platform | Out of scope (AAP §0.2.2), **not delivered** | The requirement is request and reply, which the accepted option satisfies; a retained partitioned log solves ordered replay, which no flow here performs |
 | The external POS or authorizer client | Out of scope (AAP §0.2.2), **not delivered** | The request **producer is not supplied by the baseline** — only a stub exists, at [`tests/mocks/mq_request_stub.py`](../../tests/mocks/mq_request_stub.py) — and building one is not requested |
-| Exposing transactions for distributed integration | Out of scope (AAP §0.2.2), **not delivered** | On the maintainers' **own** roadmap at [`README.md`](../../README.md) **L389**; cited as their stated plan |
-| IMS DC | Out of scope, **not delivered** | On the maintainers' **own** roadmap at [`README.md`](../../README.md) **L384** |
-| FTP and SFTP integration | Out of scope, **not delivered** | On the maintainers' **own** roadmap at [`README.md`](../../README.md) **L387** |
+| Exposing transactions for distributed integration | Out of scope (AAP §0.2.2), **not delivered** | On the maintainers' **own** roadmap at [`README.md`](../../README.md) **L419**; cited as their stated plan |
+| IMS DC | Out of scope, **not delivered** | On the maintainers' **own** roadmap at [`README.md`](../../README.md) **L414** |
+| FTP and SFTP integration | Out of scope, **not delivered** | On the maintainers' **own** roadmap at [`README.md`](../../README.md) **L417** |
 | Multi-region topology and disaster recovery | Out of scope (AAP §0.2.2), **not delivered** | The target is single-region, three-availability-zone; cross-region queue replication is not designed, provisioned or tested |
 
 ### Honest boundary — what this record does not establish
@@ -1501,7 +1501,7 @@ and **L753**, the at-most-once request consumption that follows from the first, 
 publish-before-commit ordering that follows from the second — is described in this
 record **factually, as the behaviour being migrated**. It is the specification this
 decision is measured against. The repository is offered by its maintainers as, in
-their words at [`README.md`](../../README.md) **L400**, "a resource for programmers
+their words at [`README.md`](../../README.md) **L430**, "a resource for programmers
 wanting to understand and modernize their mainframes", and this record is written in
 that spirit.
 
@@ -1561,7 +1561,7 @@ L146, L243, L276, L286, L296, L299, L379, L416 ·
 [`app/app-vsam-mq/README.md`](../../app/app-vsam-mq/README.md) L53–L54, L71–L72 ·
 [`tests/mocks/mq_request_stub.py`](../../tests/mocks/mq_request_stub.py) — the stub
 that stands in for the unsupplied producer ·
-[`README.md`](../../README.md) L305, L313–L314, L377, L384, L387, L389, L400
+[`README.md`](../../README.md) L286, L294–L295, L407, L414, L417, L419, L430
 
 **External.** SQS semantics relied on by this record — per-request charging, the
 higher FIFO request rate, long polling and its effect on empty receives, message

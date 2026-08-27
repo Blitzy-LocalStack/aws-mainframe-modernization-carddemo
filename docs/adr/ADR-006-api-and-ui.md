@@ -72,7 +72,7 @@ regularity of the interface — not its size — is what decides between the opt
 | `DFHMDF` field definitions, repository-wide | **1166** | the 902 above plus **264** in the 4 extension mapsets |
 | Terminal geometry | `SIZE=(24,80)` | **exactly one** per mapset, in all 17 — for example [`app/bms/COSGN00.bms`](../../app/bms/COSGN00.bms) **L28** and [`app/bms/COACTUP.bms`](../../app/bms/COACTUP.bms) **L28** |
 | `DEFINE TRANSACTION` stanzas | **18** | [`app/csd/CARDDEMO.CSD`](../../app/csd/CARDDEMO.CSD) **L306–L480** |
-| Transactions in the application's own inventory | **24** | [`README.md`](../../README.md) **L291–L314** |
+| Transactions in the application's own inventory | **24** | [`README.md`](../../README.md) **L272–L295** |
 | Screens the target implements | **21** | 17 base mapsets + 4 extension mapsets |
 | Front-end assets of any kind in the baseline | **0** | no web, CSS or JavaScript asset, and no Node, Maven, Gradle, Go, Cargo or Python manifest anywhere |
 
@@ -101,8 +101,8 @@ at **L35** and **L25**; and `CDRD` and `CDRA` in
 
 **Three of those twenty-four carry no BMS map at all**, and their rows in the
 inventory table have an empty map column accordingly: `CP00` → `COPAUA0C`
-([`README.md`](../../README.md) **L305**), `CDRD` → `CODATE01` (**L313**) and
-`CDRA` → `COACCT01` (**L314**). Each is driven by a message rather than by a
+([`README.md`](../../README.md) **L286**), `CDRD` → `CODATE01` (**L294**) and
+`CDRA` → `COACCT01` (**L295**). Each is driven by a message rather than by a
 terminal, so none of them has a screen to re-implement — they are the request and
 reply flows that belong to [ADR-004](ADR-004-messaging.md). Twenty-four
 transactions less those three is **21**, and 21 is exactly 17 base mapsets plus
@@ -1157,10 +1157,10 @@ delivered:
   is the measured substitute.
 
 The application's own published plans are a separate matter and are not in this
-list. [`README.md`](../../README.md) **L377–L389** sets out the maintainers'
-roadmap — further database-syntax scenarios including DB2 Rewards at **L382**, IMS
-DC at **L384**, FTP and SFTP integration at **L387**, and exposure of transactions
-for distributed application integration at **L389**. Those are the maintainers'
+list. [`README.md`](../../README.md) **L407–L419** sets out the maintainers'
+roadmap — further database-syntax scenarios including DB2 Rewards at **L412**, IMS
+DC at **L414**, FTP and SFTP integration at **L417**, and exposure of transactions
+for distributed application integration at **L419**. Those are the maintainers'
 plans for the baseline application, cited here only so a reader does not mistake
 their absence from this record for an omission in it.
 
@@ -1527,7 +1527,7 @@ available unchanged — the migration adds a path, it does not remove one.
 [`app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd`](../../app/app-authorization-ims-db2-mq/csd/CRDDEMO2.csd) L39, L49, L59 ·
 [`app/app-transaction-type-db2/csd/CRDDEMOD.csd`](../../app/app-transaction-type-db2/csd/CRDDEMOD.csd) L25, L35 ·
 [`app/app-vsam-mq/csd/CRDDEMOM.csd`](../../app/app-vsam-mq/csd/CRDDEMOM.csd) L17, L27 ·
-[`README.md`](../../README.md) L291–L314, L305, L313, L314, L377–L389, L400
+[`README.md`](../../README.md) L272–L295, L286, L294, L295, L407–L419, L430
 
 **External.** The component library's peer requirements, its removal of the
 React 19 compatibility patch and its CSS-variables theming default — from the
